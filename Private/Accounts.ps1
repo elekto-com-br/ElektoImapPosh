@@ -2,19 +2,23 @@
 # shared with them: each tool keeps its own, so reading can have an app password of its own. An account is
 # self-contained: while one is in use, the IMAP_* environment variables are ignored (its password may still
 # come from IMAP_PASS_<ACCOUNT>, see PasswordStore.ps1).
-# Writing needs a permission of the account, AllowWrite (or IMAP_ALLOW_WRITE), false unless set: without it
-# the module only reads: folders are opened read-only, so the server refuses changes to their messages, and
-# every command that would change the mailbox asks Test-ImapWriteAllowed first (see Folders.ps1).
+# Writing needs a permission of the account, AllowWrite (or IMAP_ALLOW_WRITE), for each kind of change: Flags,
+# Move, Labels, or All of them, those of later versions too; none unless set. Without it the module only reads:
+# folders are opened read-only, so the server refuses changes to their messages, and every command that would
+# change the mailbox asks Test-ImapWriteAllowed first (see Folders.ps1).
 # How the connection is secured is of the account too, since it is of its server: NoTls and
 # SkipCertificateCheck (or IMAP_NO_TLS and IMAP_SKIP_CERTIFICATE_CHECK), false unless set (see Connection.ps1).
 
 $script:AccountSettingNames = @('Server', 'Port', 'User', 'NoTls', 'SkipCertificateCheck', 'AllowWrite')
 # The settings that are true or false, each with its environment variable
-$script:AccountSwitches = [ordered]@{ NoTls = 'IMAP_NO_TLS'; SkipCertificateCheck = 'IMAP_SKIP_CERTIFICATE_CHECK'; AllowWrite = 'IMAP_ALLOW_WRITE' }
+$script:AccountSwitches = [ordered]@{ NoTls = 'IMAP_NO_TLS'; SkipCertificateCheck = 'IMAP_SKIP_CERTIFICATE_CHECK' }
+# The kinds of change AllowWrite can allow, besides All and None
+$script:WriteKinds = @('Flags', 'Move', 'Labels')
+$script:WriteKindsHint = "a list of $($script:WriteKinds -join ', '), or All or None alone"
 $script:AccountNamePattern = '^[A-Za-z0-9][A-Za-z0-9_.-]*$'
 $script:DefaultServer = 'imap.gmail.com'
 $script:DefaultPort = 993
-$script:EnvironmentVariableNames = @('IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS') + $script:AccountSwitches.Values
+$script:EnvironmentVariableNames = @('IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS') + $script:AccountSwitches.Values + 'IMAP_ALLOW_WRITE'
 
 # Account names are keys of dictionaries, where PowerShell gives a key precedence over a property of the
 # same name: an account called "Keys" would hide .Keys. So the names are always listed with .psbase.Keys.
@@ -37,6 +41,19 @@ function Get-AccountDirectory {
 
 function Get-AccountFilePath {
     return Join-Path (Get-AccountDirectory) 'accounts.json'
+}
+
+# The kinds of change named by an AllowWrite, read ignoring case: spelled and ordered as in WriteKinds, All
+# for every kind (those of later versions too), an empty list for None. $null when a name is none of these,
+# or when All or None is not alone.
+function ConvertTo-WriteKindList([string[]]$Names) {
+    $known = @($script:WriteKinds) + 'All', 'None'
+    $spelled = @(foreach ($name in $Names) { $known | Where-Object { $_ -eq $name } })
+    if ($spelled.Count -ne @($Names).Count) { return $null }
+    $spelled = @($spelled | Select-Object -Unique)
+    if ($spelled.Count -gt 1 -and ($spelled -contains 'All' -or $spelled -contains 'None')) { return $null }
+    if ($spelled -contains 'All') { return , @('All') }
+    return , @($script:WriteKinds | Where-Object { $spelled -contains $_ })
 }
 
 # The settings in the IMAP_* environment variables. There is no fallback to the SMTP_* variables of
@@ -62,6 +79,13 @@ function Get-EnvironmentConfiguration {
         if (-not $settings[$switch.Key] -and $value -and $value -notin 'false', '0') {
             throw "The environment variable $($switch.Value) must be true or false (or 1 or 0), not '$value'."
         }
+    }
+    $value = $env:IMAP_ALLOW_WRITE
+    $settings.AllowWrite = if ($value -in 'true', '1') { , @('All') }
+    elseif (-not $value -or $value -in 'false', '0') { , @() }
+    else { ConvertTo-WriteKindList ($value -split ',' | ForEach-Object Trim) }
+    if ($null -eq $settings.AllowWrite) {
+        throw "The environment variable IMAP_ALLOW_WRITE must be true, false or $($script:WriteKindsHint) (such as Flags,Move), not '$value'."
     }
     return $settings
 }
@@ -124,6 +148,12 @@ function Read-AccountFile {
                     $value = [int]$value
                 } elseif ($script:AccountSwitches.Contains($key)) {
                     if ($value -isnot [bool]) { throw "$key of account '$name' in '$path' must be true or false." }
+                } elseif ($key -eq 'AllowWrite') {
+                    # true and false as well, for a file written by hand
+                    $kinds = if ($value -is [bool]) { if ($value) { , @('All') } else { , @() } }
+                    elseif (@($value | Where-Object { $_ -isnot [string] }).Count -eq 0) { ConvertTo-WriteKindList $value }
+                    if ($null -eq $kinds) { throw "AllowWrite of account '$name' in '$path' must be true, false or $($script:WriteKindsHint)." }
+                    $value = $kinds
                 } elseif ($value -isnot [string]) {
                     throw "$key of account '$name' in '$path' must be a string."
                 }
@@ -261,5 +291,6 @@ function Resolve-ImapConfiguration($Cmdlet, [string]$Account) {
         PasswordSource = $password.Source
     }
     foreach ($switch in $script:AccountSwitches.Keys) { $settings[$switch] = $accountSettings[$switch] -eq $true }
+    $settings.AllowWrite = @($accountSettings.AllowWrite | Where-Object { $_ })
     return $settings
 }
