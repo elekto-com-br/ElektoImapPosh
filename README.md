@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/github/license/elekto-com-br/ElektoImapPosh)](LICENSE)
 
-A PowerShell module for reading email by IMAP, from several accounts on the same machine: list folders, search messages, read them as plain text and save their attachments, without marking anything as read. Gmail and Google Workspace come first. It is the reading companion of [ElektoMailPosh](https://github.com/elekto-com-br/ElektoMailPosh), which sends.
+A PowerShell module for reading email by IMAP, from several accounts on the same machine: list folders, search messages, read their text and save their attachments, without marking anything as read. Gmail and Google Workspace come first. It is the reading companion of [ElektoMailPosh](https://github.com/elekto-com-br/ElektoMailPosh), which sends.
 
 > [!NOTE]
 > Under development: the first version, 0.1.0, is not on the PowerShell Gallery yet.
@@ -107,7 +107,7 @@ Gmail has no read-only IMAP password, so ElektoImapPosh guards the mailbox itsel
 
 ### Policies
 
-A policy says what the commands may read from the accounts that follow it. It is meant above all for mailboxes read by AI agents: it keeps the full text of some messages, and some attachments, from being read by accident, limits how much one command downloads, and makes your intent explicit. The commands that read messages follow it: `Get-ImapMessage` says of each message whether its body may be read, and why not.
+A policy says what the commands may read from the accounts that follow it. It is meant above all for mailboxes read by AI agents: it keeps the full text of some messages, and some attachments, from being read by accident, limits how much one command downloads, and makes your intent explicit. The commands that read messages follow it: `Get-ImapMessage` says of each message whether its body may be read, and why not, and `Read-ImapMessage` refuses to read one it withholds.
 
 ```powershell
 Set-ImapPolicy agent -DenyFolders 'Finance/*', Junk -DenyReadFrom '*@bank.example' -MaxAgeDays 90 -MaxMessages 200 -MaxMessageSize 25MB
@@ -132,7 +132,7 @@ Get-ImapPolicy                  # the policies, and the accounts that follow eac
 - Senders are addresses or wildcard patterns (`jp@example.com`, `*@example.com`), read ignoring case. Anyone can write any address as the sender, so the allow lists match only a sender authenticated by the server named in `TrustAuthenticationResults` (the topmost of its headers says that DMARC passed for the domain of the sender); without it, they pass no sender. The deny lists match the sender as the message gives it, since a forged sender there only withholds more.
 - Your own messages, in the sent folder, have no such header: they count as authenticated, so an allow list that names your address lets them be read. The sent folder is the one the server marks so, or else, on a server that marks none, the folder named `Sent`; on Gmail, the messages with the label `\Sent` too.
 - An allow list, when given, withholds what it does not name, and a deny list wins over it. An account without a policy allows all reading.
-- What a policy withholds is the body and the attachments. The metadata of every message (sender, recipients, subject, date, labels, the names and sizes of its attachments) can always be read, and a message withheld says so, rather than missing without a word: `Get-ImapMessage` lists it, with the reason in its property `Withheld`.
+- What a policy withholds is the body and the attachments. The metadata of every message (sender, recipients, subject, date, labels, the names and sizes of its attachments) can always be read, and a message withheld says so, rather than missing without a word: `Get-ImapMessage` lists it, with the reason in its property `Withheld`, and `Read-ImapMessage` refuses it with a `MessageWithheld` error that gives the reason, having downloaded nothing of it but its metadata.
 - On Gmail, a label is a folder, a message is in the folder of each of its labels, and All Mail holds them all. A message with the label of a denied folder is therefore withheld wherever it is read from: All Mail (where `-Query` searches), the inbox or another label. The system labels (`\Inbox`, `\Sent`, `\Important`...) stand for their special folders.
 - A command never goes beyond the limits: `-Since` earlier than `MaxAgeDays` allows is narrowed to its days, with a warning, and `-First` is lowered to what `MaxMessages` leaves; when that leaves messages out, a warning says how many.
 - `Set-ImapPolicy` changes only the settings given (an empty list or value removes one, and `0` removes a limit), `Get-ImapPolicy` lists the policies and the accounts that follow each, and `Remove-ImapPolicy` removes those that no account follows. Several accounts may follow the same policy. Without accounts, `IMAP_POLICY` names the policy.
@@ -210,6 +210,22 @@ Get-ImapFolder work -Folder 'Clients/*' | Get-ImapMessage -From client.example
 - On Gmail and Google Workspace, `-Query` takes a search as typed in the search box of Gmail, and searches All Mail unless `-Folder` says otherwise: `Get-ImapMessage work -Query 'from:bank.example has:attachment newer_than:30d'`. Elsewhere it is a `QueryNotSupported` error.
 - Each message carries its `Account`, `Folder` and `Uid`, which identify it, and `UidValidity`, which changes when the server numbers the folder anew.
 - Under a policy, `Withheld` says why the body of a message may not be read: `Get-ImapMessage | Where-Object Withheld | Select-Object From, Subject, Withheld`.
+
+### Reading Messages
+
+`Read-ImapMessage` returns the text of messages, with their metadata and the list of their attachments. The messages usually come from `Get-ImapMessage`, which says where each one is:
+
+```powershell
+Get-ImapMessage -First 5 | Read-ImapMessage
+Read-ImapMessage work -Folder Inbox -Uid 12045
+Get-ImapMessage work -From bank.example -Since (Get-Date).Date | Read-ImapMessage | Where-Object Text -Match 'Total: ([\d.,]+)'
+```
+
+- `Text` is the plain text of the message or, when it has none, its HTML as it is; `Format` says which (`Text` or `Html`), and `-Html` gives the HTML first. The text is decoded (base64, quoted-printable, its character set), but HTML is never converted: pipe it to a converter of your choice, such as `pandoc -f html -t plain`.
+- Only that part of the message is downloaded. Its attachments are listed in `Attachments`, by name, type and size (as the message carries them: a file sent in base64 is about three quarters of it), and not downloaded. Nothing is marked as read, and nothing in the message is fetched from the network (images) nor followed (links).
+- `-MaxLength` cuts the text, and `Truncated` says so.
+- A message that the policy of the account withholds is not read: a `MessageWithheld` error says why. `MaxMessages` limits how many messages of each account one command reads, with a warning that says how many were left out.
+- When a folder was numbered anew since its messages were listed (another `UidValidity`), a `UidValidityChanged` error says so, rather than read another message with the same UID. A UID that is not in the folder is a `MessageNotFound` error, and a folder pattern that names more than one folder is `FolderAmbiguous`.
 
 ## Building from Source
 

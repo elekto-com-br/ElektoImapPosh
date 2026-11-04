@@ -137,15 +137,19 @@ function Get-PolicyStartDate($Policy) {
 }
 
 # The full names of the folders a Gmail label stands for, as the listing spells them: a system label, the folder of its
-# special use; any other, the folder of that name, ignoring case
-function Get-LabelFolder($Folders, [string]$Label) {
+# special use; any other, the folder of that name, ignoring case. Found in the indexes of Get-PolicyFolderSet, made
+# once: searching the folders for each label of each message took seconds for a few hundred messages on a mailbox
+# with hundreds of labels (measured: 5.3 s for 200 messages and 500 labels).
+function Get-LabelFolder($Places, [string]$Label) {
     $use = $script:SystemLabels[$Label]
-    $found = if ($use) { Select-ImapFolder $Folders $use } else { , @($Folders | Where-Object { $_.FullName -eq $Label }) }
-    return , [string[]]@($found | ForEach-Object { $_.FullName })
+    if ($use) { return , $Places.BySpecialUse[$use] }
+    if ($Places.ByName.ContainsKey($Label)) { return , $Places.ByName[$Label].ToArray() }
+    return , [string[]]@()
 }
 
 # The folders of a session that its policy names, found once in its listing, as sets of full names as it spells them:
-# Denied, those of DenyFolders (as -Folder takes them), and Sent, the sent folder, whose messages are the user's own
+# Denied, those of DenyFolders (as -Folder takes them), and Sent, the sent folder, whose messages are the user's own.
+# With them, for Get-LabelFolder, the full names of the folders by name, ignoring case, and by special use.
 function Get-PolicyFolderSet($Session) {
     if ($Session.PolicyFolders) { return $Session.PolicyFolders }
     # Without the listing, DenyFolders would find no folder, and withhold nothing
@@ -156,7 +160,16 @@ function Get-PolicyFolderSet($Session) {
     }
     $sent = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($folder in (Select-ImapFolder $Session.Folders 'Sent')) { $null = $sent.Add($folder.FullName) }
-    $Session.PolicyFolders = @{ Denied = $denied; Sent = $sent }
+    $byName = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[string]]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($folder in $Session.Folders) {
+        if (-not $byName.ContainsKey($folder.FullName)) { $byName[$folder.FullName] = [System.Collections.Generic.List[string]]::new() }
+        $byName[$folder.FullName].Add($folder.FullName)
+    }
+    $bySpecialUse = @{}
+    foreach ($use in $script:SystemLabels.Values) {
+        $bySpecialUse[$use] = [string[]]@(foreach ($folder in (Select-ImapFolder $Session.Folders $use)) { $folder.FullName })
+    }
+    $Session.PolicyFolders = @{ Denied = $denied; Sent = $sent; ByName = $byName; BySpecialUse = $bySpecialUse }
     return $Session.PolicyFolders
 }
 
@@ -192,7 +205,7 @@ function Get-WithheldReason($Session, $Folder, $Summary) {
     if ($places.Denied.Contains($Folder.FullName)) { return "The folder '$($Folder.FullName)' is in DenyFolders $of." }
     $own = $places.Sent.Contains($Folder.FullName)
     foreach ($label in $Summary.GMailLabels) {
-        foreach ($name in (Get-LabelFolder $Session.Folders $label)) {
+        foreach ($name in (Get-LabelFolder $places $label)) {
             if ($places.Denied.Contains($name)) { return "It has the label '$label', and the folder '$name' is in DenyFolders $of." }
             if ($places.Sent.Contains($name)) { $own = $true }
         }

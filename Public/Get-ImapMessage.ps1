@@ -130,7 +130,7 @@ Function Get-ImapMessage {
             $start = Get-PolicyStartDate $policy
             if ($start -and -not ($searchSince -and $searchSince.Date -ge $start)) {
                 if ($sinceGiven -and -not $session.SinceNarrowed) {
-                    Write-Warning "The policy '$($policy.Name)' of $($settings.User) allows only the last $($policy.MaxAgeDays) days: messages received before $($start.ToString('yyyy-MM-dd')) were not searched."
+                    Write-Warning "The policy '$($policy.Name)' of $($settings.User) allows only the last $(if ($policy.MaxAgeDays -eq 1) { 'day' } else { "$($policy.MaxAgeDays) days" }): messages received before $($start.ToString('yyyy-MM-dd')) were not searched."
                     $session.SinceNarrowed = $true
                 }
                 $searchSince = $start
@@ -149,17 +149,17 @@ Function Get-ImapMessage {
                     $left = [Math]::Max(0, $policy.MaxMessages - [int]$session.MessagesHandled)
                     if ($limit -gt $left) {
                         $more = if ($limit - $left -eq 1) { '1 more was' } else { "$($limit - $left) more were" }
-                        Write-Warning "The policy '$($policy.Name)' lets one command handle $($policy.MaxMessages) messages of $($settings.User): of those found in '$($item.FullName)', $more left out."
+                        Write-Warning "The policy '$($policy.Name)' lets one command handle $($policy.MaxMessages) message$(if ($policy.MaxMessages -ne 1) { 's' }) of $($settings.User): of those found in '$($item.FullName)', $more left out."
                         $limit = $left
                     }
                 }
-                $uids = @($found | Select-Object -First $limit)
-                if ($uids.Count -eq 0) { continue }
+                if ($limit -eq 0) { continue }
+                $uids = @($found[0..($limit - 1)])
                 $session.MessagesHandled = [int]$session.MessagesHandled + $uids.Count
 
                 $summaries = Get-ImapMessageSummary $PSCmdlet $session $item $uids
                 if ($null -eq $summaries) { continue }
-                foreach ($summary in $summaries) { ConvertTo-ImapMessage $session $item $summary }
+                foreach ($summary in $summaries) { ConvertTo-ImapMessage $session $item $summary (Get-WithheldReason $session $item $summary) }
             }
         }
     }

@@ -9,7 +9,8 @@
 # its commands. It proves the module's reading of those answers, not Gmail's: what an Authentication-Results header of
 # Gmail says, for one, comes from a real message.
 # Each message is a hashtable: Uid, Folders (the full names of those it is in), Labels, ThreadId, From, Subject, Date,
-# Size, Seen, AuthenticationResults (the value of the topmost header), Attachment (a file name), Raw (the X-GM-RAW
+# Size, Seen, AuthenticationResults (the value of the topmost header), Text (of its text/plain part, the only one, or
+# the first of a multipart/mixed when it has an Attachment, a file name), Raw (the X-GM-RAW
 # searches it matches; any other search matches every message of the folder), and ChangedElsewhere: as if another
 # client had changed its flags, a FETCH of them comes, unasked, with every UID FETCH that does not ask for it.
 
@@ -56,7 +57,27 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                 }
                 return @($uids | Sort-Object -Unique)
             }
-            # The items asked for, and only those, as Gmail answers
+            # A section of a message, as BODY[section] gives it: the whole message (""), a part ("1"), or its headers ("1.MIME")
+            function Get-Section($Message, [string]$Section) {
+                $text = if ($Message.Text) { $Message.Text } else { "The body of $($Message.Subject)." }
+                $textHeaders = "Content-Type: text/plain; charset=utf-8`r`nContent-Transfer-Encoding: 8bit`r`n`r`n"
+                $name = $Message.Attachment
+                switch ($Section) {
+                    '' {
+                        $top = "From: $($Message.From)`r`nTo: Me <me@gmail.com>`r`nSubject: $($Message.Subject)`r`nMessage-ID: <$($Message.Uid)@fake.example>`r`nMIME-Version: 1.0`r`n"
+                        if (-not $name) { return $top + $textHeaders + $text }
+                        return $top + "Content-Type: multipart/mixed; boundary=b1`r`n`r`n--b1`r`n$textHeaders$text`r`n--b1`r`n" +
+                            "Content-Type: application/pdf; name=$name`r`nContent-Disposition: attachment; filename=$name`r`nContent-Transfer-Encoding: base64`r`n`r`nJVBERi0xLjQK`r`n--b1--`r`n"
+                    }
+                    '1' { return $text }
+                    '1.MIME' { return $textHeaders }
+                    '2' { return "JVBERi0xLjQK`r`n" }
+                    '2.MIME' { return "Content-Type: application/pdf; name=$name`r`nContent-Disposition: attachment; filename=$name`r`nContent-Transfer-Encoding: base64`r`n`r`n" }
+                }
+                return ''
+            }
+
+            # The items asked for, and only those, as Gmail answers; literals counted in the bytes of UTF-8
             function Write-Fetch($Writer, [int]$Sequence, $Message, [string]$Items) {
                 $culture = [Globalization.CultureInfo]::InvariantCulture
                 $date = ([DateTimeOffset]$Message.Date).ToUniversalTime()
@@ -87,7 +108,13 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                     if ($Items -match '\bBODYSTRUCTURE\b') { "BODYSTRUCTURE $structure" }
                     if ($Items -match '\bX-GM-THRID\b') { "X-GM-THRID $thread" }
                     if ($Items -match '\bX-GM-LABELS\b') { "X-GM-LABELS ($labels)" }
-                    if ($Items -match 'HEADER\.FIELDS \(AUTHENTICATION-RESULTS\)') { "BODY[HEADER.FIELDS (AUTHENTICATION-RESULTS)] {$([Text.Encoding]::ASCII.GetByteCount($header))}`r`n$header" }
+                    if ($Items -match 'HEADER\.FIELDS \(AUTHENTICATION-RESULTS\)') { "BODY[HEADER.FIELDS (AUTHENTICATION-RESULTS)] {$([Text.Encoding]::UTF8.GetByteCount($header))}`r`n$header" }
+                    foreach ($match in [regex]::Matches($Items, 'BODY\.PEEK\[([^\]]*)\]')) {
+                        $section = $match.Groups[1].Value
+                        if ($section -like 'HEADER.FIELDS*') { continue }
+                        $content = Get-Section $Message $section
+                        "BODY[$section] {$([Text.Encoding]::UTF8.GetByteCount($content))}`r`n$content"
+                    }
                 ) -join ' '
                 $Writer.Write("* $Sequence FETCH ($answer)`r`n")
             }
@@ -99,7 +126,7 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                 try {
                     $stream = $client.GetStream()
                     $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::ASCII)
-                    $writer = [IO.StreamWriter]::new($stream, [Text.Encoding]::ASCII)
+                    $writer = [IO.StreamWriter]::new($stream, [Text.UTF8Encoding]::new($false))
                     $writer.NewLine = "`r`n"
                     $writer.AutoFlush = $true
                     $writer.WriteLine("* OK [CAPABILITY $capabilities] Fake Gmail ready")
