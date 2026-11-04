@@ -40,6 +40,7 @@ Set-ImapAccount -Name personal -Server imap.gmail.com -User me@gmail.com -Passwo
 | `Server` | Yes | - | IMAP server address |
 | `Port` | No | `993` | IMAP server port |
 | `User` | Yes | - | IMAP user name, usually the email address |
+| `AllowWrite` | No | `false` | Allows changes to the mailbox: see [Reading Without Changing Anything](#reading-without-changing-anything) |
 
 The settings are kept in `accounts.json`, in the folder `ElektoImapPosh` of your configuration folder (`%APPDATA%` on Windows, `~/.config` on Linux and macOS, or `$XDG_CONFIG_HOME` when set), or in the folder named by `IMAP_CONFIG_DIR`. It holds no passwords, so it can be read and edited by hand:
 
@@ -79,6 +80,16 @@ Without accounts, set the IMAP settings via environment variables. This keeps se
 | `IMAP_PASS` | Yes | - | IMAP password |
 | `IMAP_SERVER` | No | `imap.gmail.com` | IMAP server address |
 | `IMAP_PORT` | No | `993` | IMAP server port |
+| `IMAP_ALLOW_WRITE` | No | `false` | `true` (or `1`) allows changes to the mailbox: see [Reading Without Changing Anything](#reading-without-changing-anything) |
+
+### Reading Without Changing Anything
+
+Gmail has no read-only IMAP password, so ElektoImapPosh guards the mailbox itself: unless an account allows changes, it only reads.
+
+- Commands that change the mailbox (marking as read, moving, labels, creating folders: not in this version yet) need the account's permission, `Set-ImapAccount work -AllowWrite`, or `IMAP_ALLOW_WRITE=true` without accounts. Without it they stop with a `WriteNotAllowed` error, before they change anything. `-AllowWrite:$false` takes the permission back.
+- Besides, folders are opened read-only (the IMAP command EXAMINE), so the server itself refuses changes to their messages, flags included, and MailKit refuses to send one. Reading a message never marks it as read. EXAMINE covers the folder opened, not the connection: that is why the permission above is checked for every change.
+
+`Get-ImapAccount` shows which accounts allow changes.
 
 ### Server Notes
 
