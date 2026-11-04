@@ -9,7 +9,8 @@ what it found: how the connection was secured, the authentication mechanisms the
 the capabilities it has after the login. It reads nothing from the mailbox.
 
 The connection is always encrypted: TLS from the start on port 993, and STARTTLS on any other port,
-which fails when the server does not offer it. Only -NoTls connects in plain text.
+which fails when the server does not offer it. Only -NoTls connects in plain text. The server's
+certificate must be valid, unless -SkipCertificateCheck.
 
 .PARAMETER Account
 The account to test, one of those kept by Set-ImapAccount. If not provided, tests the default
@@ -21,6 +22,13 @@ reported as an error without stopping the others.
 Connects in plain text, without TLS: the password and everything read cross the network
 unencrypted. Meant for test servers on the same machine that have no TLS, such as smtp4dev.
 Always use TLS with a real mailbox, and be responsible.
+
+.PARAMETER SkipCertificateCheck
+Accepts the server's certificate without checking it: one that is self-signed, issued by an
+authority this machine does not trust, expired, or for another name. The connection is still
+encrypted, but nothing proves that the other end is the server meant, rather than someone in
+between. Meant for test servers and servers with a certificate of their own; a mailbox such as
+Gmail never needs it. Be responsible.
 
 .EXAMPLE
 Test-ImapAccount work
@@ -45,7 +53,9 @@ Function Test-ImapAccount {
         [Alias('Name')]
         [string]$Account,
 
-        [switch]$NoTls
+        [switch]$NoTls,
+
+        [switch]$SkipCertificateCheck
     )
 
     process {
@@ -53,7 +63,7 @@ Function Test-ImapAccount {
         if (-not $settings) { return }
 
         $stopwatch = [Diagnostics.Stopwatch]::StartNew()
-        $client = Connect-ImapServer $PSCmdlet $settings -NoTls:$NoTls
+        $client = Connect-ImapServer $PSCmdlet $settings -NoTls:$NoTls -SkipCertificateCheck:$SkipCertificateCheck
         if (-not $client) { return }
         # Only a command that gets to its end logs out; stopped before it (by Ctrl+C, here or down the
         # pipeline, or by an error), it only closes the connection. $PSCmdlet.Stopping cannot tell: in this

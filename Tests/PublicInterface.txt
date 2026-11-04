@@ -10,6 +10,7 @@ Get-ImapFolder
     -Account String[], position 0, from the pipeline by property name, alias Name, SupportsWildcards
     -Folder String[], position 1, from the pipeline by property name, SupportsWildcards
     -NoTls SwitchParameter
+    -SkipCertificateCheck SwitchParameter
 
 Remove-ImapAccount
   __AllParameterSets
@@ -33,3 +34,4 @@ Test-ImapAccount
   __AllParameterSets
     -Account String, position 0, from the pipeline by property name, alias Name
     -NoTls SwitchParameter
+    -SkipCertificateCheck SwitchParameter
