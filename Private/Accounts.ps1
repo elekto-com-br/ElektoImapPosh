@@ -8,8 +8,10 @@
 # change the mailbox asks Test-ImapWriteAllowed first (see Folders.ps1).
 # How the connection is secured is of the account too, since it is of its server: NoTls and
 # SkipCertificateCheck (or IMAP_NO_TLS and IMAP_SKIP_CERTIFICATE_CHECK), false unless set (see Connection.ps1).
+# What may be read is of a policy, kept in the same file, which an account follows by its setting Policy (or
+# IMAP_POLICY without accounts, see Policies.ps1).
 
-$script:AccountSettingNames = @('Server', 'Port', 'User', 'NoTls', 'SkipCertificateCheck', 'AllowWrite')
+$script:AccountSettingNames = @('Server', 'Port', 'User', 'NoTls', 'SkipCertificateCheck', 'AllowWrite', 'Policy')
 # The settings that are true or false, each with its environment variable
 $script:AccountSwitches = [ordered]@{ NoTls = 'IMAP_NO_TLS'; SkipCertificateCheck = 'IMAP_SKIP_CERTIFICATE_CHECK' }
 # The kinds of change AllowWrite can allow, besides All and None
@@ -18,7 +20,7 @@ $script:WriteKindsHint = "a list of $($script:WriteKinds -join ', '), or All or 
 $script:AccountNamePattern = '^[A-Za-z0-9][A-Za-z0-9_.-]*$'
 $script:DefaultServer = 'imap.gmail.com'
 $script:DefaultPort = 993
-$script:EnvironmentVariableNames = @('IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS') + $script:AccountSwitches.Values + 'IMAP_ALLOW_WRITE'
+$script:EnvironmentVariableNames = @('IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS') + $script:AccountSwitches.Values + 'IMAP_ALLOW_WRITE', 'IMAP_POLICY'
 
 # Account names are keys of dictionaries, where PowerShell gives a key precedence over a property of the
 # same name: an account called "Keys" would hide .Keys. So the names are always listed with .psbase.Keys.
@@ -90,8 +92,10 @@ function Get-EnvironmentConfiguration {
     return $settings
 }
 
-# Reads the accounts file into Path, Default (an account name or $null) and Accounts (name -> settings,
-# both looked up ignoring case). Returns $null when there is no file; throws when it is not valid.
+# Reads the accounts file into Path, Default (an account name or $null), Accounts (name -> settings) and Policies
+# (name -> settings, see Policies.ps1), all looked up ignoring case. Returns $null when there is no file; throws
+# when it is not valid. An account may name a policy the file does not have (written by hand): the commands that
+# read from it refuse to, rather than every command failing on the file.
 # ConvertFrom-Json keeps the case of the keys, and keeps apart keys that differ only in case. The rest
 # of the module ignores case (as do the Credential Manager and the IMAP_PASS_<ACCOUNT> variables), so
 # the keys, account names and settings of the file are read ignoring case too, and two that differ only
@@ -115,7 +119,7 @@ function Read-AccountFile {
     if ($json -isnot [System.Collections.IDictionary]) { throw "The accounts file '$path' must hold a JSON object." }
     $data = @{}
     foreach ($entry in $json.GetEnumerator()) {
-        $key = 'Default', 'Accounts' | Where-Object { $_ -eq $entry.Key }
+        $key = 'Default', 'Accounts', 'Policies' | Where-Object { $_ -eq $entry.Key }
         if (-not $key) { throw "Unknown key '$($entry.Key)' in the accounts file '$path'." }
         if ($data.ContainsKey($key)) { throw "The key '$key' is twice in the accounts file '$path', in different case." }
         $data[$key] = $entry.Value
@@ -173,7 +177,7 @@ function Read-AccountFile {
         $default = $null
     }
 
-    return @{ Path = $path; Default = $default; Accounts = $accounts }
+    return @{ Path = $path; Default = $default; Accounts = $accounts; Policies = Read-PolicyList $data.Policies $path }
 }
 
 # The account of $Names whose password variable (IMAP_PASS_<ACCOUNT>, where all but letters and digits become
@@ -183,8 +187,8 @@ function Find-PasswordVariableOwner($Names, [string]$Name) {
     return @($Names | Where-Object { (Get-PasswordVariableName $_) -eq $variable })[0]
 }
 
-# Writes the accounts file, settings in a fixed order and without the empty ones
-function Write-AccountFile([string]$Default, [System.Collections.IDictionary]$Accounts) {
+# Writes the accounts file, with its policies, settings in a fixed order and without the empty ones
+function Write-AccountFile([string]$Default, [System.Collections.IDictionary]$Accounts, [System.Collections.IDictionary]$Policies) {
     $path = Get-AccountFilePath
     $data = [ordered]@{}
     if ($Default) { $data.Default = $Default }
@@ -197,6 +201,16 @@ function Write-AccountFile([string]$Default, [System.Collections.IDictionary]$Ac
             $settings[$key] = $value
         }
         $data.Accounts[$name] = $settings
+    }
+    if ($Policies -and $Policies.psbase.Count) {
+        $data.Policies = [ordered]@{}
+        foreach ($name in $Policies.psbase.Keys) {
+            $settings = [ordered]@{}
+            foreach ($key in $script:PolicySettings.Keys) {
+                if ($Policies[$name].Contains($key)) { $settings[$key] = $Policies[$name][$key] }
+            }
+            $data.Policies[$name] = $settings
+        }
     }
 
     # A failure stops the caller here, before it stores or deletes a password that would then not match
@@ -248,10 +262,10 @@ function Resolve-ImapAccountName([string[]]$Account) {
 }
 
 # The settings a command connects with: those of the account given, or of the default account of the
-# file, or else the IMAP_* environment variables. Reports an error of the command ($Cmdlet is its
-# $PSCmdlet) and returns $null when the account does not exist or has no password, or when there is no
-# account and the variables lack the user or the password; throws when the file or the variables cannot
-# be read.
+# file, or else the IMAP_* environment variables, with the policy they follow (see Add-ImapPolicy). Reports
+# an error of the command ($Cmdlet is its $PSCmdlet) and returns $null when the account does not exist or
+# has no password, when there is no account and the variables lack the user or the password, or when the
+# policy does not exist; throws when the file or the variables cannot be read.
 function Resolve-ImapConfiguration($Cmdlet, [string]$Account) {
     $file = Read-AccountFile
     if (-not $Account -and $file) { $Account = $file.Default }
@@ -264,7 +278,7 @@ function Resolve-ImapConfiguration($Cmdlet, [string]$Account) {
         }
         $settings.Account = $null
         $settings.PasswordSource = 'IMAP_PASS'
-        return $settings
+        return Add-ImapPolicy $Cmdlet $file $settings $env:IMAP_POLICY
     }
 
     $name = Find-AccountName $file $Account
@@ -292,5 +306,5 @@ function Resolve-ImapConfiguration($Cmdlet, [string]$Account) {
     }
     foreach ($switch in $script:AccountSwitches.Keys) { $settings[$switch] = $accountSettings[$switch] -eq $true }
     $settings.AllowWrite = @($accountSettings.AllowWrite | Where-Object { $_ })
-    return $settings
+    return Add-ImapPolicy $Cmdlet $file $settings $accountSettings.Policy
 }

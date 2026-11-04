@@ -13,7 +13,7 @@ BeforeAll {
 
     # An empty configuration folder and no variable of either module: a machine without accounts
     $variableNames = 'IMAP_CONFIG_DIR', 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_PASS_WORK',
-    'IMAP_NO_TLS', 'IMAP_SKIP_CERTIFICATE_CHECK', 'IMAP_ALLOW_WRITE',
+    'IMAP_NO_TLS', 'IMAP_SKIP_CERTIFICATE_CHECK', 'IMAP_ALLOW_WRITE', 'IMAP_POLICY',
     'SMTP_SERVER', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS'
     $savedEnvironment = @{}
     foreach ($name in $variableNames) {

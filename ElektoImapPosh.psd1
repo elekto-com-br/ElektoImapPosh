@@ -39,7 +39,7 @@ PowerShellVersion = '7.6'
 FormatsToProcess = @('ElektoImapPosh.Format.ps1xml')
 
 # Functions to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no functions to export.
-FunctionsToExport = @('Get-ImapAccount', 'Set-ImapAccount', 'Remove-ImapAccount', 'Test-ImapAccount', 'Get-ImapFolder')
+FunctionsToExport = @('Get-ImapAccount', 'Set-ImapAccount', 'Remove-ImapAccount', 'Test-ImapAccount', 'Get-ImapPolicy', 'Set-ImapPolicy', 'Remove-ImapPolicy', 'Get-ImapFolder')
 
 # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no cmdlets to export.
 CmdletsToExport = @()

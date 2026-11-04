@@ -43,6 +43,7 @@ Set-ImapAccount -Name personal -Server imap.gmail.com -User me@gmail.com -Passwo
 | `NoTls` | No | `false` | Connects in plain text, for test servers: see [Server Notes](#server-notes) |
 | `SkipCertificateCheck` | No | `false` | Accepts any certificate from the server: see [Server Notes](#server-notes) |
 | `AllowWrite` | No | `None` | The kinds of change allowed in the mailbox: see [Reading Without Changing Anything](#reading-without-changing-anything) |
+| `Policy` | No | - | The policy followed when reading from the account: see [Policies](#policies) |
 
 The settings are kept in `accounts.json`, in the folder `ElektoImapPosh` of your configuration folder (`%APPDATA%` on Windows, `~/.config` on Linux and macOS, or `$XDG_CONFIG_HOME` when set), or in the folder named by `IMAP_CONFIG_DIR`. It holds no passwords, so it can be read and edited by hand:
 
@@ -85,6 +86,7 @@ Without accounts, set the IMAP settings via environment variables. This keeps se
 | `IMAP_NO_TLS` | No | `false` | `true` (or `1`) connects in plain text, for test servers: see [Server Notes](#server-notes) |
 | `IMAP_SKIP_CERTIFICATE_CHECK` | No | `false` | `true` (or `1`) accepts any certificate from the server: see [Server Notes](#server-notes) |
 | `IMAP_ALLOW_WRITE` | No | `false` | The kinds of change allowed in the mailbox, such as `Flags,Move`; `true` (or `1`) allows all: see [Reading Without Changing Anything](#reading-without-changing-anything) |
+| `IMAP_POLICY` | No | - | The policy followed when reading, one of those in `accounts.json`: see [Policies](#policies) |
 
 ### Reading Without Changing Anything
 
@@ -102,6 +104,40 @@ Gmail has no read-only IMAP password, so ElektoImapPosh guards the mailbox itsel
 - Besides, folders are opened read-only (the IMAP command EXAMINE), so the server itself refuses changes to their messages, flags included, and MailKit refuses to send one. Reading a message never marks it as read. EXAMINE covers the folder opened, not the connection: that is why the permission above is checked for every change.
 
 `Get-ImapAccount` shows which kinds of change each account allows.
+
+### Policies
+
+A policy says what the commands may read from the accounts that follow it. It is meant above all for mailboxes read by AI agents: it keeps the full text of some messages, and some attachments, from being read by accident, limits how much one command downloads, and makes your intent explicit. The commands that read messages (not in this version yet) follow it.
+
+```powershell
+Set-ImapPolicy agent -DenyFolders 'Finance/*', Junk -DenyReadFrom '*@bank.example' -MaxAgeDays 90 -MaxMessages 200 -MaxMessageSize 25MB
+Set-ImapAccount work -Policy agent
+Get-ImapPolicy                  # the policies, and the accounts that follow each
+```
+
+| Setting | What it does |
+|---------|--------------|
+| `DenyFolders` | Folders whose messages are listed but not read nor changed: full names, special uses (`Junk`, `Trash`...) or patterns, as `-Folder` takes them |
+| `AllowReadFrom` | The senders whose messages may be read in full; those of any other sender are withheld |
+| `DenyReadFrom` | The senders whose messages are withheld, even if `AllowReadFrom` names them |
+| `AllowAttachmentsFrom` | The senders whose attachments may be saved |
+| `AllowAttachmentTypes` | The attachments that may be saved, by MIME type (`application/pdf`, `image/*`) or by file name (`*.pdf`) |
+| `DenyAttachmentTypes` | The attachments that may not be saved, even if `AllowAttachmentTypes` names them: denied when either the type or the name matches |
+| `MaxAgeDays` | Older messages are not searched nor read |
+| `MaxMessages` | How many messages one command may handle |
+| `MaxMessageSize` | The largest message read in full, in bytes (`25MB`); of a larger one, only its metadata |
+| `MaxAttachmentSize` | The largest attachment that may be saved, in bytes (`10MB`) |
+| `TrustAuthenticationResults` | The receiving server whose `Authentication-Results` headers tell an authenticated sender: `mx.google.com` on Gmail |
+
+- Senders are addresses or wildcard patterns (`jp@example.com`, `*@example.com`), read ignoring case. Anyone can write any address as the sender, so the allow lists match only a sender authenticated by the server named in `TrustAuthenticationResults` (the topmost of its headers says that DMARC passed for the domain of the sender); without it, they pass no sender. The deny lists match the sender as the message gives it, since a forged sender there only withholds more.
+- An allow list, when given, withholds what it does not name, and a deny list wins over it. An account without a policy allows all reading.
+- What a policy withholds is the body and the attachments. The metadata of every message (sender, recipients, subject, date, labels, the names and sizes of its attachments) can always be read, and a message withheld says so, rather than missing without a word.
+- `Set-ImapPolicy` changes only the settings given (an empty list or value removes one, and `0` removes a limit), `Get-ImapPolicy` lists the policies and the accounts that follow each, and `Remove-ImapPolicy` removes those that no account follows. Several accounts may follow the same policy. Without accounts, `IMAP_POLICY` names the policy.
+- An account whose policy does not exist (in a file edited by hand, say) reads nothing: its commands stop with a `PolicyNotFound` error.
+- In `accounts.json`, the policies are kept apart from the accounts, as `"Policies": { "agent": { "DenyFolders": ["Junk"], "MaxMessages": 200 } }`, and an account follows one with `"Policy": "agent"`.
+
+> [!IMPORTANT]
+> A policy prevents accidents. It is no protection against an agent, or anyone, that runs commands as you: they can change the policy, edit `accounts.json` or read the stored passwords. Messages are untrusted input, and their senders can be forged. If you do not want to trust an agent with your mail, do not give it this tool.
 
 ### Server Notes
 

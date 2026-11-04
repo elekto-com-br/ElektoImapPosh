@@ -13,7 +13,8 @@ and where the password of each one comes from (never the password itself):
 NoTls tells whether the account connects in plain text, and SkipCertificateCheck whether it
 accepts any certificate from its server. AllowWrite lists the kinds of change that the commands
 that change the mailbox may make in the account (Flags, Move, Labels, or All); with None,
-ElektoImapPosh only reads. See Set-ImapAccount.
+ElektoImapPosh only reads. Policy names the policy followed when reading from the account (see
+Set-ImapPolicy), if any. See Set-ImapAccount.
 
 The accounts are kept in accounts.json, in the folder ElektoImapPosh of the user's configuration
 folder (%APPDATA% on Windows, ~/.config elsewhere), or in the folder named by IMAP_CONFIG_DIR.
@@ -70,6 +71,7 @@ Function Get-ImapAccount {
             NoTls                = $account.NoTls -eq $true
             SkipCertificateCheck = $account.SkipCertificateCheck -eq $true
             AllowWrite           = if ($account.AllowWrite) { , $account.AllowWrite } else { , @('None') }
+            Policy               = $account.Policy
         }
     }
 }
