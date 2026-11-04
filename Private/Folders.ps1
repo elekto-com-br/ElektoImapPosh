@@ -44,6 +44,22 @@ function Select-ImapFolder($Folders, [string]$Name, [switch]$Literal) {
     return , @($Folders | Where-Object { $_.FullName -like $Name })
 }
 
+# The folders that the names given to -Folder stand for (see Select-ImapFolder), each once, in an array. A name that
+# matches no folder is reported (FolderNotFound), and the others go on; a pattern that matches none is no error.
+function Select-ImapFolderList($Cmdlet, $Session, $Folders, [string[]]$Names, [switch]$Literal) {
+    $chosen = [System.Collections.Generic.List[object]]::new()
+    foreach ($name in $Names) {
+        $found = Select-ImapFolder $Folders $name -Literal:$Literal
+        if ($found.Count -eq 0 -and ($Literal -or -not [WildcardPattern]::ContainsWildcardCharacters($name))) {
+            Write-ImapError $Cmdlet "There is no folder '$name' in the mailbox of $($Session.Settings.User). Get-ImapFolder lists them." 'FolderNotFound' ObjectNotFound $name
+        }
+        foreach ($item in $found) {
+            if (-not $chosen.Contains($item)) { $chosen.Add($item) }
+        }
+    }
+    return , $chosen.ToArray()
+}
+
 # The folders of the session that can hold messages, in an array, as the server lists them; or $null after
 # reporting why not. With StatusItems, their counts come in the listing (one command, with LIST-STATUS).
 # The folders do not change while a command runs, so they are listed once per session, unless the counts are

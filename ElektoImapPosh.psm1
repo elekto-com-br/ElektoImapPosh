@@ -41,7 +41,7 @@ $accountCompleter = {
     $file = try { Read-AccountFile } catch { $null }
     if ($file) { $file.Accounts.psbase.Keys | Where-Object { $_ -like "$wordToComplete*" } }
 }
-Register-ArgumentCompleter -CommandName Test-ImapAccount, Get-ImapFolder -ParameterName Account -ScriptBlock $accountCompleter
+Register-ArgumentCompleter -CommandName Test-ImapAccount, Get-ImapFolder, Get-ImapMessage -ParameterName Account -ScriptBlock $accountCompleter
 Register-ArgumentCompleter -CommandName Get-ImapAccount, Set-ImapAccount, Remove-ImapAccount -ParameterName Name -ScriptBlock $accountCompleter
 
 # Tab completion of policy names
@@ -54,7 +54,7 @@ Register-ArgumentCompleter -CommandName Get-ImapPolicy, Set-ImapPolicy, Remove-I
 Register-ArgumentCompleter -CommandName Set-ImapAccount -ParameterName Policy -ScriptBlock $policyCompleter
 
 # Tab completion of the special uses, the names of folders that work on any server and in any language
-Register-ArgumentCompleter -CommandName Get-ImapFolder -ParameterName Folder -ScriptBlock {
+Register-ArgumentCompleter -CommandName Get-ImapFolder, Get-ImapMessage -ParameterName Folder -ScriptBlock {
     $wordToComplete = $args[2]
     $script:SpecialUseNames | Where-Object { $_ -like "$wordToComplete*" }
 }

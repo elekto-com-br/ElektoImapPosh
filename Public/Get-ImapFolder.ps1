@@ -75,18 +75,7 @@ Function Get-ImapFolder {
             if ($null -eq $folders) { continue }
 
             $chosen = $folders
-            if ($Folder) {
-                $chosen = [System.Collections.Generic.List[object]]::new()
-                foreach ($name in $Folder) {
-                    $found = Select-ImapFolder $folders $name -Literal:$folderFromPipeline
-                    if ($found.Count -eq 0 -and ($folderFromPipeline -or -not [WildcardPattern]::ContainsWildcardCharacters($name))) {
-                        Write-ImapError $PSCmdlet "There is no folder '$name' in the mailbox of $($settings.User). Get-ImapFolder lists them." 'FolderNotFound' ObjectNotFound $name
-                    }
-                    foreach ($item in $found) {
-                        if (-not $chosen.Contains($item)) { $chosen.Add($item) }
-                    }
-                }
-            }
+            if ($Folder) { $chosen = Select-ImapFolderList $PSCmdlet $session $folders $Folder -Literal:$folderFromPipeline }
 
             foreach ($item in $chosen) {
                 if ($Folder) {
