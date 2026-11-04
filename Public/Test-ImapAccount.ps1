@@ -55,24 +55,29 @@ Function Test-ImapAccount {
         $stopwatch = [Diagnostics.Stopwatch]::StartNew()
         $client = Connect-ImapServer $PSCmdlet $settings -NoTls:$NoTls
         if (-not $client) { return }
+        # Only a command that gets to its end logs out; stopped before it (by Ctrl+C, here or down the
+        # pipeline, or by an error), it only closes the connection. $PSCmdlet.Stopping cannot tell: in this
+        # finally block, after Ctrl+C down the pipeline, it is still false (tested).
+        $ended = $false
         try {
             # Offered before the login: Gmail, for one, lists none after it
             $mechanisms = @($client.AuthenticationMechanisms | Sort-Object)
-            if (-not (Invoke-ImapLogin $PSCmdlet $client $settings)) { return }
-
-            [PSCustomObject]@{
-                Account                  = $settings.Account
-                Server                   = $settings.Server
-                Port                     = $settings.Port
-                User                     = $settings.User
-                Security                 = "$(Get-SecureSocketOption $settings.Port -NoTls:$NoTls)"
-                SslProtocol              = if ($client.IsSecure) { "$($client.SslProtocol)" } else { 'None' }
-                AuthenticationMechanisms = $mechanisms
-                Capabilities             = @("$($client.Capabilities)" -split ', ')
-                Elapsed                  = $stopwatch.Elapsed
+            if (Invoke-ImapLogin $PSCmdlet $client $settings) {
+                [PSCustomObject]@{
+                    Account                  = $settings.Account
+                    Server                   = $settings.Server
+                    Port                     = $settings.Port
+                    User                     = $settings.User
+                    Security                 = "$(Get-SecureSocketOption $settings.Port -NoTls:$NoTls)"
+                    SslProtocol              = if ($client.IsSecure) { "$($client.SslProtocol)" } else { 'None' }
+                    AuthenticationMechanisms = $mechanisms
+                    Capabilities             = @("$($client.Capabilities)" -split ', ')
+                    Elapsed                  = $stopwatch.Elapsed
+                }
             }
+            $ended = $true
         } finally {
-            Disconnect-ImapClient $client
+            Disconnect-ImapClient $client -Abort:(-not $ended)
         }
     }
 }
