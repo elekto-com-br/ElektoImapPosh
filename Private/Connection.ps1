@@ -1,8 +1,10 @@
 # The connection to the IMAP server, always encrypted: TLS from the start on port 993 (IMAPS), and STARTTLS,
 # required, on any other port. MailKit's Auto is never used: with a server that offers no STARTTLS it goes on
-# in plain text, password included. Only -NoTls, meant for test servers such as smtp4dev, connects that way.
-# The server's certificate is checked as MailKit does (a trusted issuer, the name of the server); only
-# -SkipCertificateCheck, for servers with a certificate of their own, accepts any.
+# in plain text, password included. Only an account with NoTls (or IMAP_NO_TLS), meant for test servers such
+# as smtp4dev, connects that way. The server's certificate is checked as MailKit does (a trusted issuer, the
+# name of the server); only an account with SkipCertificateCheck (or IMAP_SKIP_CERTIFICATE_CHECK), for servers
+# with a certificate of their own, accepts any. Both are settings of the account rather than switches of each
+# command, since they are of its server: a pipeline of commands would otherwise repeat them in each one.
 # Failures are reported as Errors.ps1 says, so the operations of MailKit run by their Async methods, through
 # Wait-ImapTask.
 
@@ -25,7 +27,7 @@ function Wait-ImapTask([System.Threading.Tasks.Task]$Task, [TimeSpan]$Timeout = 
     return $null
 }
 
-# The check of the server's certificate that -SkipCertificateCheck puts in place of MailKit's: it accepts any.
+# The check of the server's certificate that SkipCertificateCheck puts in place of MailKit's: it accepts any.
 # MailKit calls it on another thread, where a script block has no runspace to run in, so it is a delegate
 # compiled from an expression tree (no C# to compile, unlike Add-Type).
 $script:AcceptAnyCertificate = [System.Linq.Expressions.Expression]::Lambda(
@@ -46,20 +48,21 @@ function Get-SecureSocketOption([int]$Port, [switch]$NoTls) {
 }
 
 # An ImapClient connected, and not yet authenticated, to the server of the settings (as Resolve-ImapConfiguration
-# returns them), or $null when it could not connect. With -SkipCertificateCheck, the server's certificate is
-# accepted without being checked.
-function Connect-ImapServer($Cmdlet, $Settings, [switch]$NoTls, [switch]$SkipCertificateCheck) {
-    $options = Get-SecureSocketOption $Settings.Port -NoTls:$NoTls
+# returns them), or $null when it could not connect. With SkipCertificateCheck in the settings, the server's
+# certificate is accepted without being checked.
+function Connect-ImapServer($Cmdlet, $Settings) {
+    $options = Get-SecureSocketOption $Settings.Port -NoTls:$Settings.NoTls
     $client = [MailKit.Net.Imap.ImapClient]::new()
-    if ($SkipCertificateCheck) { $client.ServerCertificateValidationCallback = $script:AcceptAnyCertificate }
+    if ($Settings.SkipCertificateCheck) { $client.ServerCertificateValidationCallback = $script:AcceptAnyCertificate }
     $connected = $false
     try {
-        Write-Verbose "Connecting to $($Settings.Server):$($Settings.Port) ($options$(if ($SkipCertificateCheck) { ', any certificate' }))..."
+        Write-Verbose "Connecting to $($Settings.Server):$($Settings.Port) ($options$(if ($Settings.SkipCertificateCheck) { ', any certificate' }))..."
         $task = $client.ConnectAsync($Settings.Server, $Settings.Port, $options)
         $failure = Wait-ImapTask $task
         if ($failure) {
-            $hint = if ($task.Exception.InnerException -is [MailKit.Security.SslHandshakeException] -and -not $SkipCertificateCheck) {
-                ' (For a server with a certificate of its own, -SkipCertificateCheck accepts it.)'
+            $hint = if ($task.Exception.InnerException -is [MailKit.Security.SslHandshakeException] -and -not $Settings.SkipCertificateCheck) {
+                $how = if ($Settings.Account) { "Set-ImapAccount $($Settings.Account) -SkipCertificateCheck" } else { 'IMAP_SKIP_CERTIFICATE_CHECK=true' }
+                " (For a server with a certificate of its own, $how accepts it.)"
             }
             Write-ImapError $Cmdlet "Could not connect to $($Settings.Server):$($Settings.Port) ($options): $($failure.TrimEnd())$hint" 'ConnectionFailed' ConnectionError $Settings.Server
             return $null
@@ -87,8 +90,8 @@ function Invoke-ImapLogin($Cmdlet, $Client, $Settings) {
 
 # An ImapClient connected and authenticated, or $null after reporting why not. The commands that read
 # disconnect it with Disconnect-ImapClient in a finally block.
-function Connect-ImapClient($Cmdlet, $Settings, [switch]$NoTls, [switch]$SkipCertificateCheck) {
-    $client = Connect-ImapServer $Cmdlet $Settings -NoTls:$NoTls -SkipCertificateCheck:$SkipCertificateCheck
+function Connect-ImapClient($Cmdlet, $Settings) {
+    $client = Connect-ImapServer $Cmdlet $Settings
     if (-not $client) { return $null }
     $authenticated = $false
     $answered = $false
@@ -128,12 +131,12 @@ function Disconnect-ImapClient($Client, [switch]$Abort) {
 # block disposes of what is left after Ctrl+C or a terminating error. Returns the settings and the client,
 # or $null after reporting why not, only the first time for each account. '' is the default account, or
 # else the IMAP_* environment variables.
-function Get-ImapSession($Cmdlet, [hashtable]$Sessions, [string]$Account, [switch]$NoTls, [switch]$SkipCertificateCheck) {
+function Get-ImapSession($Cmdlet, [hashtable]$Sessions, [string]$Account) {
     if ($Sessions.ContainsKey($Account)) { return $Sessions[$Account] }
     $Sessions[$Account] = $null
     $settings = Resolve-ImapConfiguration $Cmdlet $Account
     if (-not $settings) { return $null }
-    $client = Connect-ImapClient $Cmdlet $settings -NoTls:$NoTls -SkipCertificateCheck:$SkipCertificateCheck
+    $client = Connect-ImapClient $Cmdlet $settings
     if (-not $client) { return $null }
     $Sessions[$Account] = @{ Settings = $settings; Client = $client }
     return $Sessions[$Account]

@@ -2,7 +2,7 @@
 # the tests that need a real one. The tests that use it are skipped where it is not installed (a global .NET
 # tool: dotnet tool install -g Rnwood.Smtp4dev). It runs in memory, on free ports of the loopback only, without
 # reading the user's settings, and is stopped with its process tree. Its IMAP server has no TLS: the tests
-# connect with -NoTls.
+# connect with NoTls, set in their accounts (or IMAP_NO_TLS).
 
 function Test-Smtp4devInstalled {
     return [bool](Get-Command smtp4dev -CommandType Application -ErrorAction Ignore)

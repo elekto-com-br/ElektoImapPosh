@@ -10,8 +10,9 @@ and where the password of each one comes from (never the password itself):
 - File: a file readable only by its owner (Linux and macOS)
 - Missing: no password, so the account cannot be used yet
 
-AllowWrite tells whether the commands that change the mailbox may do so in the account (see
-Set-ImapAccount -AllowWrite); without it, ElektoImapPosh only reads.
+NoTls tells whether the account connects in plain text, and SkipCertificateCheck whether it
+accepts any certificate from its server. AllowWrite tells whether the commands that change the
+mailbox may do so in the account; without it, ElektoImapPosh only reads. See Set-ImapAccount.
 
 The accounts are kept in accounts.json, in the folder ElektoImapPosh of the user's configuration
 folder (%APPDATA% on Windows, ~/.config elsewhere), or in the folder named by IMAP_CONFIG_DIR.
@@ -59,13 +60,15 @@ Function Get-ImapAccount {
         }
 
         [PSCustomObject]@{
-            Name           = $accountName
-            Default        = $accountName -eq $file.Default
-            Server         = $account.Server
-            Port           = if ($account.Port) { $account.Port } else { $script:DefaultPort }
-            User           = $account.User
-            PasswordSource = $passwordSource
-            AllowWrite     = $account.AllowWrite -eq $true
+            Name                 = $accountName
+            Default              = $accountName -eq $file.Default
+            Server               = $account.Server
+            Port                 = if ($account.Port) { $account.Port } else { $script:DefaultPort }
+            User                 = $account.User
+            PasswordSource       = $passwordSource
+            NoTls                = $account.NoTls -eq $true
+            SkipCertificateCheck = $account.SkipCertificateCheck -eq $true
+            AllowWrite           = $account.AllowWrite -eq $true
         }
     }
 }

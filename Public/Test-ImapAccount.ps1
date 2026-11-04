@@ -9,26 +9,15 @@ what it found: how the connection was secured, the authentication mechanisms the
 the capabilities it has after the login. It reads nothing from the mailbox.
 
 The connection is always encrypted: TLS from the start on port 993, and STARTTLS on any other port,
-which fails when the server does not offer it. Only -NoTls connects in plain text. The server's
-certificate must be valid, unless -SkipCertificateCheck.
+which fails when the server does not offer it. The server's certificate must be valid. An account
+set with -NoTls connects in plain text, and one set with -SkipCertificateCheck accepts any
+certificate (see Set-ImapAccount); without accounts, IMAP_NO_TLS and IMAP_SKIP_CERTIFICATE_CHECK.
 
 .PARAMETER Account
 The account to test, one of those kept by Set-ImapAccount. If not provided, tests the default
 account, if there is one, or else the IMAP_* environment variables. Also taken from the pipeline,
 as the accounts listed by Get-ImapAccount: each one is tested in turn, and one that fails is
 reported as an error without stopping the others.
-
-.PARAMETER NoTls
-Connects in plain text, without TLS: the password and everything read cross the network
-unencrypted. Meant for test servers on the same machine that have no TLS, such as smtp4dev.
-Always use TLS with a real mailbox, and be responsible.
-
-.PARAMETER SkipCertificateCheck
-Accepts the server's certificate without checking it: one that is self-signed, issued by an
-authority this machine does not trust, expired, or for another name. The connection is still
-encrypted, but nothing proves that the other end is the server meant, rather than someone in
-between. Meant for test servers and servers with a certificate of their own; a mailbox such as
-Gmail never needs it. Be responsible.
 
 .EXAMPLE
 Test-ImapAccount work
@@ -41,8 +30,9 @@ Get-ImapAccount | Test-ImapAccount
 Tests every account, reporting those that fail as errors.
 
 .EXAMPLE
-$env:IMAP_SERVER = '127.0.0.1'; $env:IMAP_PORT = 1143; $env:IMAP_USER = 'test'; $env:IMAP_PASS = 'test'
-Test-ImapAccount -NoTls
+$env:IMAP_SERVER = '127.0.0.1'; $env:IMAP_PORT = 1143; $env:IMAP_NO_TLS = 'true'
+$env:IMAP_USER = 'test'; $env:IMAP_PASS = 'test'
+Test-ImapAccount
 
 Tests a smtp4dev on the same machine, configured by environment variables, in plain text.
 #>
@@ -51,11 +41,7 @@ Function Test-ImapAccount {
     param (
         [Parameter(Position = 0, ValueFromPipelineByPropertyName = $true)]
         [Alias('Name')]
-        [string]$Account,
-
-        [switch]$NoTls,
-
-        [switch]$SkipCertificateCheck
+        [string]$Account
     )
 
     process {
@@ -63,7 +49,7 @@ Function Test-ImapAccount {
         if (-not $settings) { return }
 
         $stopwatch = [Diagnostics.Stopwatch]::StartNew()
-        $client = Connect-ImapServer $PSCmdlet $settings -NoTls:$NoTls -SkipCertificateCheck:$SkipCertificateCheck
+        $client = Connect-ImapServer $PSCmdlet $settings
         if (-not $client) { return }
         # Only a command that gets to its end logs out; stopped before it (by Ctrl+C, here or down the
         # pipeline, or by an error), it only closes the connection. $PSCmdlet.Stopping cannot tell: in this
@@ -78,7 +64,7 @@ Function Test-ImapAccount {
                     Server                   = $settings.Server
                     Port                     = $settings.Port
                     User                     = $settings.User
-                    Security                 = "$(Get-SecureSocketOption $settings.Port -NoTls:$NoTls)"
+                    Security                 = "$(Get-SecureSocketOption $settings.Port -NoTls:$settings.NoTls)"
                     SslProtocol              = if ($client.IsSecure) { "$($client.SslProtocol)" } else { 'None' }
                     AuthenticationMechanisms = $mechanisms
                     Capabilities             = @("$($client.Capabilities)" -split ', ')

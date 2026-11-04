@@ -40,6 +40,8 @@ Set-ImapAccount -Name personal -Server imap.gmail.com -User me@gmail.com -Passwo
 | `Server` | Yes | - | IMAP server address |
 | `Port` | No | `993` | IMAP server port |
 | `User` | Yes | - | IMAP user name, usually the email address |
+| `NoTls` | No | `false` | Connects in plain text, for test servers: see [Server Notes](#server-notes) |
+| `SkipCertificateCheck` | No | `false` | Accepts any certificate from the server: see [Server Notes](#server-notes) |
 | `AllowWrite` | No | `false` | Allows changes to the mailbox: see [Reading Without Changing Anything](#reading-without-changing-anything) |
 
 The settings are kept in `accounts.json`, in the folder `ElektoImapPosh` of your configuration folder (`%APPDATA%` on Windows, `~/.config` on Linux and macOS, or `$XDG_CONFIG_HOME` when set), or in the folder named by `IMAP_CONFIG_DIR`. It holds no passwords, so it can be read and edited by hand:
@@ -80,6 +82,8 @@ Without accounts, set the IMAP settings via environment variables. This keeps se
 | `IMAP_PASS` | Yes | - | IMAP password |
 | `IMAP_SERVER` | No | `imap.gmail.com` | IMAP server address |
 | `IMAP_PORT` | No | `993` | IMAP server port |
+| `IMAP_NO_TLS` | No | `false` | `true` (or `1`) connects in plain text, for test servers: see [Server Notes](#server-notes) |
+| `IMAP_SKIP_CERTIFICATE_CHECK` | No | `false` | `true` (or `1`) accepts any certificate from the server: see [Server Notes](#server-notes) |
 | `IMAP_ALLOW_WRITE` | No | `false` | `true` (or `1`) allows changes to the mailbox: see [Reading Without Changing Anything](#reading-without-changing-anything) |
 
 ### Reading Without Changing Anything
@@ -94,8 +98,9 @@ Gmail has no read-only IMAP password, so ElektoImapPosh guards the mailbox itsel
 ### Server Notes
 
 - The connection is always encrypted: TLS from the start on port 993, and STARTTLS on any other port, required (a server that does not offer it is refused, rather than read in plain text).
-- `-NoTls` connects in plain text, password included. It is meant for test servers on your own machine that have no TLS, such as [smtp4dev](https://github.com/rnwood/smtp4dev). Always use TLS with a real mailbox, and be responsible.
-- The server's certificate is checked: issued by an authority the machine trusts, for the name of the server, and in date. `-SkipCertificateCheck` accepts any certificate, for servers with one of their own and for test servers: the connection is still encrypted, but nothing proves that the other end is the server you meant. Gmail never needs it. Be responsible.
+- `NoTls` (`Set-ImapAccount <name> -NoTls`, or `IMAP_NO_TLS=true`) connects in plain text, password included. It is meant for test servers on your own machine that have no TLS, such as [smtp4dev](https://github.com/rnwood/smtp4dev). Always use TLS with a real mailbox, and be responsible.
+- The server's certificate is checked: issued by an authority the machine trusts, for the name of the server, and in date. `SkipCertificateCheck` (`Set-ImapAccount <name> -SkipCertificateCheck`, or `IMAP_SKIP_CERTIFICATE_CHECK=true`) accepts any certificate, for servers with one of their own and for test servers: the connection is still encrypted, but nothing proves that the other end is the server you meant. Gmail never needs it. Be responsible.
+- Both are settings of the account, as they are of its server, so every command that reads from it connects the same way. `-NoTls:$false` and `-SkipCertificateCheck:$false` turn them off.
 - Gmail and Google Workspace need an [app password](https://myaccount.google.com/apppasswords), which requires 2-Step Verification. In Google Workspace, the administrator can turn app passwords off, and IMAP must be enabled for the users in the Admin console.
 
 ## Usage

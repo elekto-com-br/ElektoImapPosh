@@ -9,8 +9,6 @@ Get-ImapFolder
   __AllParameterSets
     -Account String[], position 0, from the pipeline by property name, alias Name, SupportsWildcards
     -Folder String[], position 1, from the pipeline by property name, SupportsWildcards
-    -NoTls SwitchParameter
-    -SkipCertificateCheck SwitchParameter
 
 Remove-ImapAccount
   __AllParameterSets
@@ -24,14 +22,14 @@ Set-ImapAccount
     -AllowWrite SwitchParameter
     -Confirm SwitchParameter, alias cf, ConfirmImpact Medium
     -Default SwitchParameter
+    -NoTls SwitchParameter
     -Password SecureString
     -Port Int32, ValidateRange(1, 65535)
     -Server String
+    -SkipCertificateCheck SwitchParameter
     -User String
     -WhatIf SwitchParameter, alias wi
 
 Test-ImapAccount
   __AllParameterSets
     -Account String, position 0, from the pipeline by property name, alias Name
-    -NoTls SwitchParameter
-    -SkipCertificateCheck SwitchParameter
