@@ -143,28 +143,38 @@ function Find-AccountName($File, [string]$Name) {
 }
 
 # The settings a command connects with: those of the account given, or of the default account of the
-# file, or else the IMAP_* environment variables. Throws when the account does not exist or has no
-# password, or when there is no account and the variables lack the user or the password.
-function Resolve-ImapConfiguration([string]$Account) {
+# file, or else the IMAP_* environment variables. Reports an error of the command ($Cmdlet is its
+# $PSCmdlet) and returns $null when the account does not exist or has no password, or when there is no
+# account and the variables lack the user or the password; throws when the file or the variables cannot
+# be read.
+function Resolve-ImapConfiguration($Cmdlet, [string]$Account) {
     $file = Read-AccountFile
     if (-not $Account -and $file) { $Account = $file.Default }
 
     if (-not $Account) {
         $settings = Get-EnvironmentConfiguration
         if (-not $settings.User -or -not $settings.Password) {
-            throw 'There is no account to read from: create one with Set-ImapAccount, or set the environment variables IMAP_USER and IMAP_PASS.'
+            Write-ImapError $Cmdlet 'There is no account to read from: create one with Set-ImapAccount, or set the environment variables IMAP_USER and IMAP_PASS.' 'NoConfiguration' ObjectNotFound $null
+            return $null
         }
         $settings.Account = $null
         $settings.PasswordSource = 'IMAP_PASS'
         return $settings
     }
 
-    if (-not $file) { throw "There is no account '$Account': the accounts file '$(Get-AccountFilePath)' does not exist." }
     $name = Find-AccountName $file $Account
-    if (-not $name) { throw "There is no account '$Account' in '$($file.Path)'. Accounts: $($file.Accounts.psbase.Keys -join ', ')." }
+    if (-not $name) {
+        $message = if (-not $file) { "There is no account '$Account': the accounts file '$(Get-AccountFilePath)' does not exist." }
+        else { "There is no account '$Account' in '$($file.Path)'. Accounts: $($file.Accounts.psbase.Keys -join ', ')." }
+        Write-ImapError $Cmdlet $message 'AccountNotFound' ObjectNotFound $Account
+        return $null
+    }
 
     $password = Get-AccountPassword $name
-    if (-not $password) { throw (Get-MissingPasswordMessage $name) }
+    if (-not $password) {
+        Write-ImapError $Cmdlet (Get-MissingPasswordMessage $name) 'PasswordMissing' ObjectNotFound $name
+        return $null
+    }
 
     $accountSettings = $file.Accounts[$name]
     return @{

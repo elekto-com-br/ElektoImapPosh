@@ -41,4 +41,5 @@ $accountCompleter = {
     $file = try { Read-AccountFile } catch { $null }
     if ($file) { $file.Accounts.psbase.Keys | Where-Object { $_ -like "$wordToComplete*" } }
 }
+Register-ArgumentCompleter -CommandName Test-ImapAccount -ParameterName Account -ScriptBlock $accountCompleter
 Register-ArgumentCompleter -CommandName Get-ImapAccount, Set-ImapAccount, Remove-ImapAccount -ParameterName Name -ScriptBlock $accountCompleter

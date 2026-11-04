@@ -82,7 +82,23 @@ Without accounts, set the IMAP settings via environment variables. This keeps se
 
 ### Server Notes
 
+- The connection is always encrypted: TLS from the start on port 993, and STARTTLS on any other port, required (a server that does not offer it is refused, rather than read in plain text).
+- `-NoTls` connects in plain text, password included. It is meant for test servers on your own machine that have no TLS, such as [smtp4dev](https://github.com/rnwood/smtp4dev). Always use TLS with a real mailbox, and be responsible.
 - Gmail and Google Workspace need an [app password](https://myaccount.google.com/apppasswords), which requires 2-Step Verification. In Google Workspace, the administrator can turn app passwords off, and IMAP must be enabled for the users in the Admin console.
+
+## Usage
+
+### Testing an Account
+
+`Test-ImapAccount` connects and authenticates, and shows how the connection was secured, the authentication mechanisms the server offers and its capabilities. It reads nothing from the mailbox:
+
+```powershell
+Test-ImapAccount work            # the account "work"
+Test-ImapAccount                 # the default account, or else the IMAP_* environment variables
+Get-ImapAccount | Test-ImapAccount   # every account; one that fails is an error, and the others go on
+```
+
+Failures are errors with an id that tells them apart: `ConnectionFailed`, `AuthenticationFailed`, `AccountNotFound`, `PasswordMissing` and `NoConfiguration`. Each one is a single error, also in `-ErrorVariable` and `$Error`. Ctrl+C stops a command at once, even while it waits for a server that does not answer.
 
 ## Building from Source
 

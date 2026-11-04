@@ -34,8 +34,19 @@ jobs:
           Install-PSResource -Name Pester -Version '[6.2.0]' -Repository PSGallery -TrustRepository -Quiet
           Install-PSResource -Name PSScriptAnalyzer -Version '[1.25.0]' -Repository PSGallery -TrustRepository -Quiet
 
+      # smtp4dev, a fake mail server, for the tests against a real IMAP server (Tests/Smtp4dev.ps1 starts it
+      # on the loopback only). A tool of the tests, never in the package.
+      - name: Install smtp4dev
+        shell: pwsh
+        run: |
+          dotnet tool install --global Rnwood.Smtp4dev --version 3.15.0
+          Join-Path $HOME .dotnet tools >> $env:GITHUB_PATH
+
       # Restores the mail libraries (failing on a known vulnerability), parses every script, validates the
       # manifest, runs PSScriptAnalyzer and the Pester tests, stages ./out/ElektoImapPosh and imports it.
+      # Without smtp4dev on the PATH, the tests against it would be skipped rather than fail.
       - name: Build and test
         shell: pwsh
-        run: ./Build.ps1
+        run: |
+          Get-Command smtp4dev -CommandType Application -ErrorAction Stop | Out-Null
+          ./Build.ps1
