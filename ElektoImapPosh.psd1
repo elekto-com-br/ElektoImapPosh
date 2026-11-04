@@ -35,8 +35,11 @@ Description = 'Read email by IMAP from PowerShell, from several accounts (Gmail 
 # Minimum version of the PowerShell engine required by this module (7.6 runs on .NET 10, the target of the mail libraries shipped)
 PowerShellVersion = '7.6'
 
+# Format files (.ps1xml) to be loaded when importing this module
+FormatsToProcess = @('ElektoImapPosh.Format.ps1xml')
+
 # Functions to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no functions to export.
-FunctionsToExport = @('Get-ImapAccount', 'Set-ImapAccount', 'Remove-ImapAccount', 'Test-ImapAccount')
+FunctionsToExport = @('Get-ImapAccount', 'Set-ImapAccount', 'Remove-ImapAccount', 'Test-ImapAccount', 'Get-ImapFolder')
 
 # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no cmdlets to export.
 CmdletsToExport = @()

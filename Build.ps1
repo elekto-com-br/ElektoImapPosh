@@ -37,7 +37,7 @@ param (
 $ErrorActionPreference = 'Stop'
 $moduleName = 'ElektoImapPosh'
 $manifestPath = Join-Path $PSScriptRoot "$moduleName.psd1"
-$packageFiles = @("$moduleName.psd1", 'lib', 'LICENSE', 'THIRD-PARTY-NOTICES.md', 'README.md')
+$packageFiles = @("$moduleName.psd1", "$moduleName.Format.ps1xml", 'lib', 'LICENSE', 'THIRD-PARTY-NOTICES.md', 'README.md')
 $libraries = @('MailKitLite', 'MimeKitLite')
 
 # 1. The mail libraries: restored into out/packages, kept between builds, and copied to ./lib

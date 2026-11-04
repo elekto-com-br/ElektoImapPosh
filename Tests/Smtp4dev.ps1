@@ -53,3 +53,23 @@ function Stop-Smtp4dev($Server) {
         $Server.Process.WaitForExit(10000) | Out-Null
     }
 }
+
+# Delivers a message to smtp4dev by SMTP, where it lands in the INBOX of its IMAP server. The
+# login is needed when smtp4dev was started with --authenticationrequired, which applies to SMTP as well.
+function Send-Smtp4devMessage($Server, [string]$Subject, [Net.NetworkCredential]$Login) {
+    $message = [MimeKit.MimeMessage]::new()
+    $message.From.Add([MimeKit.MailboxAddress]::new('Sender', 'sender@example.com'))
+    $message.To.Add([MimeKit.MailboxAddress]::new('Tester', 'tester@example.com'))
+    $message.Subject = $Subject
+    $message.Body = [MimeKit.TextPart]::new('plain')
+    $message.Body.Text = "The body of $Subject."
+    $smtp = [MailKit.Net.Smtp.SmtpClient]::new()
+    try {
+        $smtp.Connect('127.0.0.1', $Server.SmtpPort, [MailKit.Security.SecureSocketOptions]::None)
+        if ($Login) { $smtp.Authenticate($Login) }
+        $null = $smtp.Send($message)
+        $smtp.Disconnect($true)
+    } finally {
+        $smtp.Dispose()
+    }
+}
