@@ -158,6 +158,19 @@ Describe 'The permission to change the mailbox' {
 }
 
 Describe 'Closing the connections of a command' {
+    # '' and the name of the default account share their session
+    It 'closes a session kept under two names once' {
+        $disposals = InModuleScope ElektoImapPosh {
+            $client = [PSCustomObject]@{ IsConnected = $false; Disposals = 0 }
+            $client | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $this.Disposals++ }
+            $session = @{ Client = $client }
+            Close-ImapSession @{ '' = $session; work = $session }
+            $client.Disposals
+        }
+
+        $disposals | Should -Be 1
+    }
+
     # The keys are account names, and a key hides a property of the same name
     It 'closes every connection, even with an account named Values (abort: <Abort>)' -TestCases @(
         @{ Abort = $false }

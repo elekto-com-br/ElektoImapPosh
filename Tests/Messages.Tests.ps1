@@ -21,16 +21,20 @@ BeforeAll {
     }
 
     # Writes an accounts file in a folder of its own, every account on the port given, with its password in the
-    # environment; returns the names of the password variables, for AfterAll to remove
-    function Set-TestAccount([string]$Folder, [int]$Port, [hashtable]$Accounts, [hashtable]$Policies = @{}) {
+    # environment; returns the names of the password variables, for AfterAll to remove. The values they had before
+    # are kept with the others, which the AfterAll of the file restores.
+    function Set-TestAccount([string]$Folder, [int]$Port, [hashtable]$Accounts, [hashtable]$Policies = @{}, [string]$Default) {
         $env:IMAP_CONFIG_DIR = Join-Path $TestDrive $Folder
         New-Item -ItemType Directory -Path $env:IMAP_CONFIG_DIR -Force | Out-Null
         $file = @{ Accounts = @{}; Policies = $Policies }
+        if ($Default) { $file.Default = $Default }
         foreach ($entry in $Accounts.GetEnumerator()) {
             $account = @{ Server = '127.0.0.1'; Port = $Port; User = 'tester'; NoTls = $true }
             foreach ($setting in $entry.Value.GetEnumerator()) { $account[$setting.Key] = $setting.Value }
             $file.Accounts[$entry.Key] = $account
-            [Environment]::SetEnvironmentVariable("IMAP_PASS_$($entry.Key.ToUpperInvariant())", 'not-a-password')
+            $variable = "IMAP_PASS_$($entry.Key.ToUpperInvariant())"
+            if (-not $savedEnvironment.ContainsKey($variable)) { $savedEnvironment[$variable] = [Environment]::GetEnvironmentVariable($variable) }
+            [Environment]::SetEnvironmentVariable($variable, 'not-a-password')
         }
         Set-Content -Path (Join-Path $env:IMAP_CONFIG_DIR 'accounts.json') -Value ($file | ConvertTo-Json -Depth 5)
         return @($Accounts.Keys | ForEach-Object { "IMAP_PASS_$($_.ToUpperInvariant())" })
@@ -64,7 +68,7 @@ Describe 'What a policy withholds' {
 
         # A summary as Get-ImapMessageSummary fetches it; -From may have several addresses, and -AuthenticationResults
         # are the headers from the topmost down
-        function New-Summary([string]$From = 'client@client.example', [string[]]$AuthenticationResults = @(), [string[]]$Labels, [long]$Size = 1000, [datetime]$Date = (Get-Date)) {
+        function New-Summary([string]$From = 'client@client.example', [string[]]$AuthenticationResults = @(), [string[]]$Labels, [long]$Size = 1000, $Date = (Get-Date)) {
             $envelope = [MailKit.Envelope]::new()
             if ($From) { $envelope.From.AddRange([MimeKit.InternetAddressList]::Parse($From)) }
             $headers = [MimeKit.HeaderList]::new()
@@ -118,6 +122,17 @@ Describe 'What a policy withholds' {
 
         Get-Reason @{ MaxAgeDays = 90 } -Summary (New-Summary -Date (Get-Date).AddDays(-91)) | Should -Be "It was received before $start, and MaxAgeDays of the policy 'agent' is 90."
         Get-Reason @{ MaxAgeDays = 90 } -Summary (New-Summary -Date (Get-Date).AddDays(-89)) | Should -BeNullOrEmpty
+    }
+
+    # As IMAP's SINCE, which the search of the commands uses: the day the server keeps, ignoring its time zone
+    It 'takes the day a message was received in the time zone the server keeps it in' {
+        $first = [datetime]::SpecifyKind([datetime]::Today.AddDays(-90), 'Unspecified')
+        # The first minutes of the first day allowed, and the last of the day before, in time zones far from any here
+        $early = [DateTimeOffset]::new($first.AddMinutes(30), [TimeSpan]::FromHours(14))
+        $late = [DateTimeOffset]::new($first.AddMinutes(-30), [TimeSpan]::FromHours(-12))
+
+        Get-Reason @{ MaxAgeDays = 90 } -Summary (New-Summary -Date $early) | Should -BeNullOrEmpty
+        Get-Reason @{ MaxAgeDays = 90 } -Summary (New-Summary -Date $late) | Should -BeLike 'It was received before*'
     }
 
     It 'withholds a message larger than MaxMessageSize' {
@@ -225,7 +240,7 @@ Describe 'Get-ImapMessage against smtp4dev' -Skip:(-not $smtp4devInstalled) {
             inbox     = @{ DenyFolders = @('Inbox') }
             few       = @{ MaxMessages = 3; MaxAgeDays = 30 }
         }
-        $passwords = Set-TestAccount 'config' $server.ImapPort -Policies $policies -Accounts @{
+        $passwords = Set-TestAccount 'config' $server.ImapPort -Policies $policies -Default few -Accounts @{
             local     = @{}
             closed    = @{ Port = (Get-FreeTcpPort) }
             agent     = @{ Policy = 'agent' }
@@ -373,6 +388,17 @@ Describe 'Get-ImapMessage against smtp4dev' -Skip:(-not $smtp4devInstalled) {
         "$($warnings[1])" | Should -BeLike "*of those found in 'INBOX', 6 more were left out."
     }
 
+    It 'counts MaxMessages once for the default account, named or not, on one connection (-Account <Names>)' -TestCases @(
+        @{ Names = @('', 'few') }
+        @{ Names = @('few', '') }
+    ) {
+        $output = Get-ImapMessage -Account $Names -WarningVariable warnings -WarningAction SilentlyContinue -Verbose 4>&1
+
+        @($output | Where-Object { $_ -isnot [System.Management.Automation.VerboseRecord] }).Subject | Should -Be 'Hello', 'Big', 'Elsewhere'
+        @($output | Where-Object { $_ -is [System.Management.Automation.VerboseRecord] -and $_.Message -like 'Connecting to*' }).Count | Should -Be 1
+        $warnings.Count | Should -Be 2
+    }
+
     It 'does not warn when -First asks for fewer than MaxMessages' {
         $result = Get-ImapMessage few -First 2 -WarningVariable warnings -WarningAction SilentlyContinue
 
@@ -425,7 +451,7 @@ Describe 'Get-ImapMessage on Gmail' {
     BeforeAll {
         $now = [DateTimeOffset]::Now
         $server = Start-FakeGmail @(
-            @{ Uid = 1; Folders = 'INBOX', '[Gmail]/All Mail', 'Finance/Bank'; Labels = '\Inbox', 'Finance/Bank'; ThreadId = 111; From = 'Bank <alerts@bank.example>'; Subject = 'Statement'; Date = $now.AddHours(-4); Size = 5000; Attachment = 'statement.pdf'; AuthenticationResults = 'mx.google.com; dmarc=pass header.from=bank.example'; Raw = 'has:attachment', 'from:bank.example' }
+            @{ Uid = 1; ChangedElsewhere = $true; Folders = 'INBOX', '[Gmail]/All Mail', 'Finance/Bank'; Labels = '\Inbox', 'Finance/Bank'; ThreadId = 111; From = 'Bank <alerts@bank.example>'; Subject = 'Statement'; Date = $now.AddHours(-4); Size = 5000; Attachment = 'statement.pdf'; AuthenticationResults = 'mx.google.com; dmarc=pass header.from=bank.example'; Raw = 'has:attachment', 'from:bank.example' }
             @{ Uid = 2; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = '\Inbox', '\Important'; ThreadId = 222; From = 'Client <client@client.example>'; Subject = 'Proposal'; Date = $now.AddHours(-3); Size = 3000; Seen = $true; AuthenticationResults = 'mx.google.com; dmarc=pass header.from=client.example' }
             @{ Uid = 3; Folders = '[Gmail]/All Mail', '[Gmail]/Sent Mail'; Labels = '\Sent'; ThreadId = 222; From = 'Me <me@gmail.com>'; Subject = 'Re: Proposal'; Date = $now.AddHours(-2); Size = 2000; Seen = $true; Raw = 'in:sent proposal' }
             @{ Uid = 4; Folders = '[Gmail]/All Mail', 'Sent'; Labels = @('Sent'); ThreadId = 444; From = 'Me <me@gmail.com>'; Subject = 'Labelled Sent'; Date = $now.AddHours(-1); Size = 1000 }
@@ -457,6 +483,13 @@ Describe 'Get-ImapMessage on Gmail' {
         $commands = $server.State.Commands.ToArray()
         $commands | Where-Object { $_ -like '* EXAMINE "`[Gmail`]/All Mail"' } | Should -Not -BeNullOrEmpty
         $commands | Where-Object { $_ -like '* UID SEARCH *X-GM-RAW "in:sent proposal"*' } | Should -Not -BeNullOrEmpty
+    }
+
+    It 'returns only the messages asked for, when the server adds what another client changed' {
+        $result = Get-ImapMessage open -Folder All -First 1
+
+        $result.Subject | Should -Be 'Labelled Sent'
+        @($server.State.Commands.ToArray() | Where-Object { $_ -like '* UID FETCH *' })[-1] | Should -BeLike '* UID FETCH 4 (*'
     }
 
     It 'returns the thread and labels of each message, and whether it has attachments' {

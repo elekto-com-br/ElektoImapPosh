@@ -198,8 +198,9 @@ function Get-WithheldReason($Session, $Folder, $Summary) {
         }
     }
 
+    # The day as the server keeps it, without changing its time zone: the one its SINCE compares
     $start = Get-PolicyStartDate $policy
-    if ($start -and -not ($Summary.InternalDate -and $Summary.InternalDate.LocalDateTime -ge $start)) {
+    if ($start -and -not ($Summary.InternalDate -and $Summary.InternalDate.Date -ge $start)) {
         return "It was received before $($start.ToString('yyyy-MM-dd')), and MaxAgeDays $of is $($policy.MaxAgeDays)."
     }
     if ($policy.MaxMessageSize -and -not ($null -ne $Summary.Size -and $Summary.Size -le $policy.MaxMessageSize)) {

@@ -38,14 +38,16 @@ function Find-ImapMessage($Cmdlet, $Session, $Folder, [MailKit.Search.SearchQuer
 }
 
 # The summaries of the messages of an open folder with the UIDs given, the newest first, in an array: their metadata,
-# with all that the check of the policy needs; or $null after reporting why not
+# with all that the check of the policy needs; or $null after reporting why not. Only those of the UIDs given: when
+# another client changes the folder, the server may add what changed in other messages, which MailKit returns too.
 function Get-ImapMessageSummary($Cmdlet, $Session, $Folder, $Uids) {
     $items = [MailKit.MessageSummaryItems]'UniqueId, Envelope, Flags, InternalDate, Size, BodyStructure'
     if (Test-GMailServer $Session) { $items = $items -bor [MailKit.MessageSummaryItems]'GMailThreadId, GMailLabels' }
     $request = [MailKit.FetchRequest]::new($items)
     $request.Headers = [MailKit.HeaderSet]::new([string[]]@('Authentication-Results'))
     $list = [System.Collections.Generic.List[MailKit.UniqueId]]::new()
-    foreach ($uid in $Uids) { $list.Add($uid) }
+    $wanted = [System.Collections.Generic.HashSet[uint]]::new()
+    foreach ($uid in $Uids) { $list.Add($uid); $null = $wanted.Add($uid.Id) }
 
     $task = $Folder.FetchAsync([System.Collections.Generic.IList[MailKit.UniqueId]]$list, [MailKit.IFetchRequest]$request, [System.Threading.CancellationToken]::None)
     $failure = Wait-ImapTask $task
@@ -53,7 +55,7 @@ function Get-ImapMessageSummary($Cmdlet, $Session, $Folder, $Uids) {
         Write-ImapError $Cmdlet "Could not read the messages of the folder '$($Folder.FullName)' of $($Session.Settings.User): $failure" 'MessageFetchFailed' ReadError $Folder.FullName
         return $null
     }
-    return , @($task.Result | Sort-Object { $_.UniqueId.Id } -Descending)
+    return , @($task.Result | Where-Object { $_.UniqueId.IsValid -and $wanted.Contains($_.UniqueId.Id) } | Sort-Object { $_.UniqueId.Id } -Descending)
 }
 
 # The addresses of a list as text, each as "Name <address>", or the address alone when it has no name

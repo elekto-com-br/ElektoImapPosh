@@ -130,25 +130,37 @@ function Disconnect-ImapClient($Client, [switch]$Abort) {
 # a hashtable of the command, until it ends: its end block logs out with Close-ImapSession, and its clean
 # block disposes of what is left after Ctrl+C or a terminating error. Returns the settings and the client,
 # or $null after reporting why not, only the first time for each account. '' is the default account, or
-# else the IMAP_* environment variables.
+# else the IMAP_* environment variables. The session is kept under the name of the account too, so that ''
+# and the name of the default account share it: one connection, and one count of what the command handled
+# (MaxMessages), whichever way the account is named.
 function Get-ImapSession($Cmdlet, [hashtable]$Sessions, [string]$Account) {
     if ($Sessions.ContainsKey($Account)) { return $Sessions[$Account] }
     $Sessions[$Account] = $null
     $settings = Resolve-ImapConfiguration $Cmdlet $Account
     if (-not $settings) { return $null }
+    $name = [string]$settings.Account
+    if ($name -ne $Account -and $Sessions.ContainsKey($name)) {
+        $Sessions[$Account] = $Sessions[$name]
+        return $Sessions[$Account]
+    }
+    $Sessions[$name] = $null
     $client = Connect-ImapClient $Cmdlet $settings
     if (-not $client) { return $null }
-    $Sessions[$Account] = @{ Settings = $settings; Client = $client }
+    $Sessions[$Account] = $Sessions[$name] = @{ Settings = $settings; Client = $client }
     return $Sessions[$Account]
 }
 
 # Closes the connections of a command: logging out, from its end block, or with -Abort, from its clean
 # block, only disposing of them, since the server may be the reason it stopped. The keys are account names,
-# and a key hides a property of the same name: an account called "Values" would hide .Values.
+# and a key hides a property of the same name: an account called "Values" would hide .Values. A session kept
+# under two names is closed once.
 function Close-ImapSession([hashtable]$Sessions, [switch]$Abort) {
     if (-not $Sessions) { return }
+    $closed = [System.Collections.Generic.List[object]]::new()
     foreach ($session in @($Sessions.psbase.Values)) {
-        if ($session) { Disconnect-ImapClient $session.Client -Abort:$Abort }
+        if (-not $session -or $closed.Contains($session)) { continue }
+        $closed.Add($session)
+        Disconnect-ImapClient $session.Client -Abort:$Abort
     }
     $Sessions.Clear()
 }

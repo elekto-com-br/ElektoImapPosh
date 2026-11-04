@@ -9,8 +9,9 @@
 # its commands. It proves the module's reading of those answers, not Gmail's: what an Authentication-Results header of
 # Gmail says, for one, comes from a real message.
 # Each message is a hashtable: Uid, Folders (the full names of those it is in), Labels, ThreadId, From, Subject, Date,
-# Size, Seen, AuthenticationResults (the value of the topmost header), Attachment (a file name), and Raw (the X-GM-RAW
-# searches it matches; any other search matches every message of the folder).
+# Size, Seen, AuthenticationResults (the value of the topmost header), Attachment (a file name), Raw (the X-GM-RAW
+# searches it matches; any other search matches every message of the folder), and ChangedElsewhere: as if another
+# client had changed its flags, a FETCH of them comes, unasked, with every UID FETCH that does not ask for it.
 
 # The folders of the mailbox, with their attributes: Gmail's in English, and labels of the user, one named Sent
 $script:FakeGmailFolders = [ordered]@{
@@ -146,6 +147,13 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                                 foreach ($uid in (Expand-UidSet $set $inFolder)) {
                                     $index = [array]::IndexOf(@($inFolder | ForEach-Object { $_.Uid }), $uid)
                                     Write-Fetch $writer ($index + 1) $inFolder[$index] $items
+                                }
+                                $asked = Expand-UidSet $set $inFolder
+                                for ($index = 0; $index -lt $inFolder.Count; $index++) {
+                                    $message = $inFolder[$index]
+                                    if ($message.ChangedElsewhere -and $asked -notcontains $message.Uid) {
+                                        $writer.Write("* $($index + 1) FETCH (UID $($message.Uid) FLAGS ($(if ($message.Seen) { '\Seen' })))`r`n")
+                                    }
                                 }
                             }
                             'LOGOUT' { $writer.WriteLine('* BYE Fake Gmail logging out') }
