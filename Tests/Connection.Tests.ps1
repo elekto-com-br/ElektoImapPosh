@@ -11,7 +11,7 @@ BeforeAll {
     . (Join-Path $PSScriptRoot 'Smtp4dev.ps1')
     Import-Module (Join-Path (Split-Path $PSScriptRoot) 'ElektoImapPosh.psd1') -Force
 
-    $variableNames = 'IMAP_CONFIG_DIR', 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_PASS_LOCAL', 'IMAP_PASS_CLOSED'
+    $variableNames = 'IMAP_CONFIG_DIR', 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_PASS_LOCAL', 'IMAP_PASS_CLOSED', 'IMAP_PASS_STARTTLS', 'IMAP_PASS_IMPLICIT'
     $savedEnvironment = @{}
     foreach ($name in $variableNames) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
@@ -319,5 +319,71 @@ Describe 'Test-ImapAccount against smtp4dev' -Skip:(-not $smtp4devInstalled) {
             $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config'
             foreach ($name in 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS') { [Environment]::SetEnvironmentVariable($name, $null) }
         }
+    }
+}
+
+# Encrypted connections, which smtp4dev has not on IMAP: a proxy in front of it puts TLS, with a self-signed
+# certificate that only -SkipCertificateCheck accepts
+Describe 'Encrypted connections, through a TLS proxy in front of smtp4dev' -Skip:(-not $smtp4devInstalled) {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot 'TlsProxy.ps1')
+        $server = Start-Smtp4dev -LogDirectory (Join-Path $TestDrive 'smtp4dev-tls') -ArgumentList '--authenticationrequired', '--user=tester=not-a-password'
+        $startTls = [ElektoImapPoshTests.TlsProxy]::new($server.ImapPort, $true, 0)
+        # Implicit TLS is for port 993 only, which an ordinary user cannot open on Linux and macOS
+        $implicit = try { [ElektoImapPoshTests.TlsProxy]::new($server.ImapPort, $false, 993) } catch { $null }
+
+        $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config-tls'
+        New-Item -ItemType Directory -Path $env:IMAP_CONFIG_DIR -Force | Out-Null
+        $accounts = @{
+            Accounts = @{
+                starttls = @{ Server = '127.0.0.1'; Port = $startTls.Port; User = 'tester' }
+                implicit = @{ Server = '127.0.0.1'; Port = 993; User = 'tester' }
+            }
+        }
+        Set-Content -Path (Join-Path $env:IMAP_CONFIG_DIR 'accounts.json') -Value ($accounts | ConvertTo-Json -Depth 5)
+        $env:IMAP_PASS_STARTTLS = 'not-a-password'
+        $env:IMAP_PASS_IMPLICIT = 'not-a-password'
+    }
+
+    AfterAll {
+        $startTls.Dispose()
+        if ($implicit) { $implicit.Dispose() }
+        Stop-Smtp4dev $server
+        $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config'
+    }
+
+    It 'connects by STARTTLS and authenticates, accepting the certificate with -SkipCertificateCheck' {
+        $result = Test-ImapAccount starttls -SkipCertificateCheck
+
+        $result.Security | Should -Be 'StartTls'
+        $result.SslProtocol | Should -BeIn 'Tls12', 'Tls13'
+        $result.User | Should -Be 'tester'
+        $startTls.Handshakes | Should -BeGreaterThan 0
+    }
+
+    It 'refuses a certificate that does not validate, without -SkipCertificateCheck' {
+        $result = Test-ImapAccount starttls -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $result | Should -BeNullOrEmpty
+        $errors.Count | Should -Be 1
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'ConnectionFailed,*'
+        "$errors" | Should -BeLike '*certificate*-SkipCertificateCheck accepts it.)'
+    }
+
+    It 'lists folders over TLS, -SkipCertificateCheck going through the connection of the command' {
+        (Get-ImapFolder starttls Inbox -SkipCertificateCheck).Folder | Should -Be 'INBOX'
+    }
+
+    It 'connects with TLS from the start on port 993' {
+        if (-not $implicit) {
+            Set-ItResult -Skipped -Because 'port 993 of the loopback cannot be opened here (by an ordinary user on Linux and macOS, or in use)'
+            return
+        }
+
+        $result = Test-ImapAccount implicit -SkipCertificateCheck
+
+        $result.Security | Should -Be 'SslOnConnect'
+        $result.SslProtocol | Should -BeIn 'Tls12', 'Tls13'
+        $implicit.Handshakes | Should -BeGreaterThan 0
     }
 }

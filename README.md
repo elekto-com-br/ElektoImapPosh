@@ -95,6 +95,7 @@ Gmail has no read-only IMAP password, so ElektoImapPosh guards the mailbox itsel
 
 - The connection is always encrypted: TLS from the start on port 993, and STARTTLS on any other port, required (a server that does not offer it is refused, rather than read in plain text).
 - `-NoTls` connects in plain text, password included. It is meant for test servers on your own machine that have no TLS, such as [smtp4dev](https://github.com/rnwood/smtp4dev). Always use TLS with a real mailbox, and be responsible.
+- The server's certificate is checked: issued by an authority the machine trusts, for the name of the server, and in date. `-SkipCertificateCheck` accepts any certificate, for servers with one of their own and for test servers: the connection is still encrypted, but nothing proves that the other end is the server you meant. Gmail never needs it. Be responsible.
 - Gmail and Google Workspace need an [app password](https://myaccount.google.com/apppasswords), which requires 2-Step Verification. In Google Workspace, the administrator can turn app passwords off, and IMAP must be enabled for the users in the Admin console.
 
 ## Usage
