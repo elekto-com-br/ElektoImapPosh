@@ -5,12 +5,16 @@
 # Writing needs a permission of the account, AllowWrite (or IMAP_ALLOW_WRITE), false unless set: without it
 # the module only reads: folders are opened read-only, so the server refuses changes to their messages, and
 # every command that would change the mailbox asks Test-ImapWriteAllowed first (see Folders.ps1).
+# How the connection is secured is of the account too, since it is of its server: NoTls and
+# SkipCertificateCheck (or IMAP_NO_TLS and IMAP_SKIP_CERTIFICATE_CHECK), false unless set (see Connection.ps1).
 
-$script:AccountSettingNames = @('Server', 'Port', 'User', 'AllowWrite')
+$script:AccountSettingNames = @('Server', 'Port', 'User', 'NoTls', 'SkipCertificateCheck', 'AllowWrite')
+# The settings that are true or false, each with its environment variable
+$script:AccountSwitches = [ordered]@{ NoTls = 'IMAP_NO_TLS'; SkipCertificateCheck = 'IMAP_SKIP_CERTIFICATE_CHECK'; AllowWrite = 'IMAP_ALLOW_WRITE' }
 $script:AccountNamePattern = '^[A-Za-z0-9][A-Za-z0-9_.-]*$'
 $script:DefaultServer = 'imap.gmail.com'
 $script:DefaultPort = 993
-$script:EnvironmentVariableNames = @('IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_ALLOW_WRITE')
+$script:EnvironmentVariableNames = @('IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS') + $script:AccountSwitches.Values
 
 # Account names are keys of dictionaries, where PowerShell gives a key precedence over a property of the
 # same name: an account called "Keys" would hide .Keys. So the names are always listed with .psbase.Keys.
@@ -45,18 +49,21 @@ function Get-EnvironmentConfiguration {
             throw "The environment variable IMAP_PORT must be a number from 1 to 65535, not '$env:IMAP_PORT'."
         }
     }
-    # Anything but a plain yes or no is refused, rather than read as a no that would surprise, or a yes
-    $allowWrite = $env:IMAP_ALLOW_WRITE -in 'true', '1'
-    if (-not $allowWrite -and $env:IMAP_ALLOW_WRITE -and $env:IMAP_ALLOW_WRITE -notin 'false', '0') {
-        throw "The environment variable IMAP_ALLOW_WRITE must be true or false (or 1 or 0), not '$env:IMAP_ALLOW_WRITE'."
+    $settings = @{
+        Server   = if ($env:IMAP_SERVER) { $env:IMAP_SERVER } else { $script:DefaultServer }
+        Port     = $port
+        User     = $env:IMAP_USER
+        Password = $env:IMAP_PASS
     }
-    return @{
-        Server     = if ($env:IMAP_SERVER) { $env:IMAP_SERVER } else { $script:DefaultServer }
-        Port       = $port
-        User       = $env:IMAP_USER
-        Password   = $env:IMAP_PASS
-        AllowWrite = $allowWrite
+    foreach ($switch in $script:AccountSwitches.GetEnumerator()) {
+        # Anything but a plain yes or no is refused, rather than read as a no that would surprise, or a yes
+        $value = [Environment]::GetEnvironmentVariable($switch.Value)
+        $settings[$switch.Key] = $value -in 'true', '1'
+        if (-not $settings[$switch.Key] -and $value -and $value -notin 'false', '0') {
+            throw "The environment variable $($switch.Value) must be true or false (or 1 or 0), not '$value'."
+        }
     }
+    return $settings
 }
 
 # Reads the accounts file into Path, Default (an account name or $null) and Accounts (name -> settings,
@@ -115,8 +122,8 @@ function Read-AccountFile {
                 if ($key -eq 'Port') {
                     if (($value -isnot [int] -and $value -isnot [long]) -or $value -lt 1 -or $value -gt 65535) { throw "Port of account '$name' in '$path' must be a number from 1 to 65535." }
                     $value = [int]$value
-                } elseif ($key -eq 'AllowWrite') {
-                    if ($value -isnot [bool]) { throw "AllowWrite of account '$name' in '$path' must be true or false." }
+                } elseif ($script:AccountSwitches.Contains($key)) {
+                    if ($value -isnot [bool]) { throw "$key of account '$name' in '$path' must be true or false." }
                 } elseif ($value -isnot [string]) {
                     throw "$key of account '$name' in '$path' must be a string."
                 }
@@ -245,13 +252,14 @@ function Resolve-ImapConfiguration($Cmdlet, [string]$Account) {
     }
 
     $accountSettings = $file.Accounts[$name]
-    return @{
+    $settings = @{
         Account        = $name
         Server         = $accountSettings.Server
         Port           = if ($accountSettings.Port) { $accountSettings.Port } else { $script:DefaultPort }
         User           = $accountSettings.User
         Password       = $password.Password
         PasswordSource = $password.Source
-        AllowWrite     = $accountSettings.AllowWrite -eq $true
     }
+    foreach ($switch in $script:AccountSwitches.Keys) { $settings[$switch] = $accountSettings[$switch] -eq $true }
+    return $settings
 }

@@ -11,7 +11,7 @@ BeforeAll {
     . (Join-Path $PSScriptRoot 'Smtp4dev.ps1')
     Import-Module (Join-Path (Split-Path $PSScriptRoot) 'ElektoImapPosh.psd1') -Force
 
-    $variableNames = 'IMAP_CONFIG_DIR', 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_PASS_LOCAL', 'IMAP_PASS_CLOSED', 'IMAP_PASS_WRITER'
+    $variableNames = 'IMAP_CONFIG_DIR', 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_NO_TLS', 'IMAP_PASS_LOCAL', 'IMAP_PASS_CLOSED', 'IMAP_PASS_WRITER'
     $savedEnvironment = @{}
     foreach ($name in $variableNames) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
@@ -27,7 +27,7 @@ BeforeAll {
             param($Cmdlet, $Account, $Script)
             $sessions = @{}
             try {
-                $session = Get-ImapSession $Cmdlet $sessions $Account -NoTls
+                $session = Get-ImapSession $Cmdlet $sessions $Account
                 # Made again here, so that it runs in the module, where its private functions are
                 & ([scriptblock]::Create($Script)) $Cmdlet $session
             } finally {
@@ -262,9 +262,9 @@ Describe 'Folders against smtp4dev' -Skip:(-not $smtp4devInstalled) {
         New-Item -ItemType Directory -Path $env:IMAP_CONFIG_DIR -Force | Out-Null
         $accounts = @{
             Accounts = @{
-                local  = @{ Server = '127.0.0.1'; Port = $server.ImapPort; User = 'tester' }
-                closed = @{ Server = '127.0.0.1'; Port = (Get-FreeTcpPort); User = 'tester' }
-                writer = @{ Server = '127.0.0.1'; Port = $server.ImapPort; User = 'tester'; AllowWrite = $true }
+                local  = @{ Server = '127.0.0.1'; Port = $server.ImapPort; User = 'tester'; NoTls = $true }
+                closed = @{ Server = '127.0.0.1'; Port = (Get-FreeTcpPort); User = 'tester'; NoTls = $true }
+                writer = @{ Server = '127.0.0.1'; Port = $server.ImapPort; User = 'tester'; NoTls = $true; AllowWrite = $true }
             }
         }
         Set-Content -Path (Join-Path $env:IMAP_CONFIG_DIR 'accounts.json') -Value ($accounts | ConvertTo-Json -Depth 5)
@@ -285,7 +285,7 @@ Describe 'Folders against smtp4dev' -Skip:(-not $smtp4devInstalled) {
     }
 
     It 'lists the folders of an account, with their counts' {
-        $result = Get-ImapFolder local -NoTls
+        $result = Get-ImapFolder local
 
         $result.Folder | Should -Be 'INBOX', 'Sent'
         $result[0].PSObject.TypeNames[0] | Should -Be 'ElektoImapPosh.Folder'
@@ -298,14 +298,14 @@ Describe 'Folders against smtp4dev' -Skip:(-not $smtp4devInstalled) {
     }
 
     It 'shows only the folders named by -Folder, each once' {
-        $result = Get-ImapFolder local -Folder Inbox, sent, 'In*', INBOX -NoTls
+        $result = Get-ImapFolder local -Folder Inbox, sent, 'In*', INBOX
 
         $result.Folder | Should -Be 'INBOX', 'Sent'
         $result[0].Count | Should -Be 2
     }
 
     It 'reports a folder that does not exist, but not a pattern that matches none' {
-        $result = Get-ImapFolder local -Folder Trash, 'X*' -NoTls -ErrorVariable errors -ErrorAction SilentlyContinue
+        $result = Get-ImapFolder local -Folder Trash, 'X*' -ErrorVariable errors -ErrorAction SilentlyContinue
 
         $result | Should -BeNullOrEmpty
         $errors.Count | Should -Be 1
@@ -313,7 +313,7 @@ Describe 'Folders against smtp4dev' -Skip:(-not $smtp4devInstalled) {
     }
 
     It 'reads every account a pattern matches, reporting the one that fails' {
-        $result = Get-ImapFolder -Account * -Folder Inbox -NoTls -ErrorVariable errors -ErrorAction SilentlyContinue
+        $result = Get-ImapFolder -Account * -Folder Inbox -ErrorVariable errors -ErrorAction SilentlyContinue
 
         @($result).Account | Sort-Object | Should -Be 'local', 'writer'
         $errors.Count | Should -Be 1
@@ -321,7 +321,7 @@ Describe 'Folders against smtp4dev' -Skip:(-not $smtp4devInstalled) {
     }
 
     It 'takes accounts and folders from the pipeline, with one connection and one listing for each account' {
-        $output = Get-ImapFolder local -NoTls | Get-ImapFolder -NoTls -Verbose 4>&1
+        $output = Get-ImapFolder local | Get-ImapFolder -Verbose 4>&1
 
         $verbose = @($output | Where-Object { $_ -is [System.Management.Automation.VerboseRecord] })
         @($verbose | Where-Object Message -Like 'Connecting to*').Count | Should -Be 1
@@ -332,7 +332,7 @@ Describe 'Folders against smtp4dev' -Skip:(-not $smtp4devInstalled) {
     # The end block, which logs out, does not run then (nor after Ctrl+C): the clean block closes the connection.
     # Checked at once, without waiting: a client left open would soon be closed by the garbage collector.
     It 'closes its connection when the pipeline stops it early, as Select-Object -First does' {
-        $first = Get-ImapFolder local -NoTls | Select-Object -First 1
+        $first = Get-ImapFolder local | Select-Object -First 1
 
         $first.Folder | Should -Be 'INBOX'
         Get-OpenConnectionCount | Should -Be 0
@@ -350,7 +350,7 @@ Describe 'Folders against smtp4dev' -Skip:(-not $smtp4devInstalled) {
         $run.Result.Opened | Should -BeTrue
         $run.Result.Access | Should -Be 'ReadOnly'
         $run.Result.Failure | Should -BeNullOrEmpty
-        (Get-ImapFolder local Inbox -NoTls).Unread | Should -Be 2
+        (Get-ImapFolder local Inbox).Unread | Should -Be 2
     }
 
     It 'refuses to open a folder for writing in an account that does not allow changes' {
@@ -388,7 +388,7 @@ Describe 'Folders against smtp4dev' -Skip:(-not $smtp4devInstalled) {
         }
 
         $run.Result | Should -BeLike '*not currently open in read-write mode*'
-        (Get-ImapFolder local Inbox -NoTls).Unread | Should -Be 2
+        (Get-ImapFolder local Inbox).Unread | Should -Be 2
     }
 
     It 'uses the IMAP_* environment variables when there is no account' {
@@ -397,14 +397,15 @@ Describe 'Folders against smtp4dev' -Skip:(-not $smtp4devInstalled) {
         $env:IMAP_PORT = "$($server.ImapPort)"
         $env:IMAP_USER = 'tester'
         $env:IMAP_PASS = 'not-a-password'
+        $env:IMAP_NO_TLS = 'true'
         try {
-            $result = Get-ImapFolder -Folder Inbox -NoTls
+            $result = Get-ImapFolder -Folder Inbox
 
             $result.Account | Should -BeNullOrEmpty
             $result.Count | Should -Be 2
         } finally {
             $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config'
-            foreach ($name in 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS') { [Environment]::SetEnvironmentVariable($name, $null) }
+            foreach ($name in 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_NO_TLS') { [Environment]::SetEnvironmentVariable($name, $null) }
         }
     }
 }
@@ -417,7 +418,7 @@ Describe 'Marking as read against smtp4dev' -Skip:(-not $smtp4devInstalled) {
         Send-Smtp4devMessage $server 'To be read'
         $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config-seen'
         New-Item -ItemType Directory -Path $env:IMAP_CONFIG_DIR -Force | Out-Null
-        $accounts = @{ Accounts = @{ writer = @{ Server = '127.0.0.1'; Port = $server.ImapPort; User = 'tester'; AllowWrite = $true } } }
+        $accounts = @{ Accounts = @{ writer = @{ Server = '127.0.0.1'; Port = $server.ImapPort; User = 'tester'; NoTls = $true; AllowWrite = $true } } }
         Set-Content -Path (Join-Path $env:IMAP_CONFIG_DIR 'accounts.json') -Value ($accounts | ConvertTo-Json -Depth 5)
         $env:IMAP_PASS_WRITER = 'not-a-password'
     }
@@ -428,7 +429,7 @@ Describe 'Marking as read against smtp4dev' -Skip:(-not $smtp4devInstalled) {
     }
 
     It 'can mark a message as read in a folder opened for writing, and the count shows it' {
-        (Get-ImapFolder writer Inbox -NoTls).Unread | Should -Be 1
+        (Get-ImapFolder writer Inbox).Unread | Should -Be 1
 
         $run = Invoke-InSession writer {
             param($Cmdlet, $Session)
@@ -439,6 +440,6 @@ Describe 'Marking as read against smtp4dev' -Skip:(-not $smtp4devInstalled) {
         }
 
         $run.Result | Should -BeNullOrEmpty
-        (Get-ImapFolder writer Inbox -NoTls).Unread | Should -Be 0
+        (Get-ImapFolder writer Inbox).Unread | Should -Be 0
     }
 }

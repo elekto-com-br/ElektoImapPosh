@@ -28,18 +28,6 @@ is reported as an error.
 Also taken from the pipeline, as the folders listed by Get-ImapFolder: each is then the folder of
 that exact full name, so that a label "Sent" of the user stays that label.
 
-.PARAMETER NoTls
-Connects in plain text, without TLS: the password and everything read cross the network
-unencrypted. Meant for test servers on the same machine that have no TLS, such as smtp4dev.
-Always use TLS with a real mailbox, and be responsible.
-
-.PARAMETER SkipCertificateCheck
-Accepts the server's certificate without checking it: one that is self-signed, issued by an
-authority this machine does not trust, expired, or for another name. The connection is still
-encrypted, but nothing proves that the other end is the server meant, rather than someone in
-between. Meant for test servers and servers with a certificate of their own; a mailbox such as
-Gmail never needs it. Be responsible.
-
 .EXAMPLE
 Get-ImapFolder
 
@@ -65,11 +53,7 @@ Function Get-ImapFolder {
 
         [Parameter(Position = 1, ValueFromPipelineByPropertyName = $true)]
         [SupportsWildcards()]
-        [string[]]$Folder,
-
-        [switch]$NoTls,
-
-        [switch]$SkipCertificateCheck
+        [string[]]$Folder
     )
 
     begin {
@@ -82,7 +66,7 @@ Function Get-ImapFolder {
 
     process {
         foreach ($accountName in (Resolve-ImapAccountName $Account)) {
-            $session = Get-ImapSession $PSCmdlet $sessions $accountName -NoTls:$NoTls -SkipCertificateCheck:$SkipCertificateCheck
+            $session = Get-ImapSession $PSCmdlet $sessions $accountName
             if (-not $session) { continue }
             $settings = $session.Settings
 

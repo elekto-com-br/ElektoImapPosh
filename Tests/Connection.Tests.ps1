@@ -1,4 +1,4 @@
-# The connection: always encrypted unless -NoTls says otherwise, and Test-ImapAccount against a real IMAP
+# The connection: always encrypted unless the account's NoTls says otherwise, and Test-ImapAccount against a real IMAP
 # server, smtp4dev, which requires a user and password here so that a wrong one can be told apart. The tests
 # that need smtp4dev are skipped where it is not installed.
 
@@ -11,7 +11,8 @@ BeforeAll {
     . (Join-Path $PSScriptRoot 'Smtp4dev.ps1')
     Import-Module (Join-Path (Split-Path $PSScriptRoot) 'ElektoImapPosh.psd1') -Force
 
-    $variableNames = 'IMAP_CONFIG_DIR', 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_PASS_LOCAL', 'IMAP_PASS_CLOSED', 'IMAP_PASS_STARTTLS', 'IMAP_PASS_IMPLICIT'
+    $variableNames = 'IMAP_CONFIG_DIR', 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_NO_TLS', 'IMAP_SKIP_CERTIFICATE_CHECK',
+    'IMAP_PASS_LOCAL', 'IMAP_PASS_CLOSED', 'IMAP_PASS_ENCRYPTED', 'IMAP_PASS_STARTTLS', 'IMAP_PASS_CHECKED', 'IMAP_PASS_IMPLICIT'
     $savedEnvironment = @{}
     foreach ($name in $variableNames) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
@@ -81,19 +82,20 @@ BeforeAll {
         $env:IMAP_PORT = "$Port"
         $env:IMAP_USER = 'tester'
         $env:IMAP_PASS = 'not-a-password'
+        $env:IMAP_NO_TLS = 'true'
         $runspace = [powershell]::Create()
         $null = $runspace.AddScript({
             param($Manifest, $State, $ThenWait)
             Import-Module $Manifest
-            if ($ThenWait) { Test-ImapAccount -NoTls | ForEach-Object { $State.Output = $true; Start-Sleep -Seconds 30 } }
-            else { Test-ImapAccount -NoTls }
+            if ($ThenWait) { Test-ImapAccount | ForEach-Object { $State.Output = $true; Start-Sleep -Seconds 30 } }
+            else { Test-ImapAccount }
         }).AddArgument((Join-Path (Split-Path $PSScriptRoot) 'ElektoImapPosh.psd1')).AddArgument($State).AddArgument([bool]$ThenWait)
         [pscustomobject]@{ Runspace = $runspace; Result = $runspace.BeginInvoke() }
     }
 
     function Reset-ImapVariables {
         $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config'
-        foreach ($name in 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS') { [Environment]::SetEnvironmentVariable($name, $null) }
+        foreach ($name in 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_NO_TLS', 'IMAP_SKIP_CERTIFICATE_CHECK') { [Environment]::SetEnvironmentVariable($name, $null) }
     }
 }
 
@@ -114,7 +116,7 @@ Describe 'How the connection is secured' {
         InModuleScope ElektoImapPosh -Parameters @{ Port = $Port } { param($Port) "$(Get-SecureSocketOption $Port)" } | Should -Be $Expected
     }
 
-    It 'is none at all with -NoTls, on any port' {
+    It 'is none at all with NoTls, on any port' {
         InModuleScope ElektoImapPosh { "$(Get-SecureSocketOption 993 -NoTls)" } | Should -Be 'None'
     }
 }
@@ -132,10 +134,11 @@ Describe 'Waiting for the server' {
             $env:IMAP_PORT = "$($listener.LocalEndpoint.Port)"
             $env:IMAP_USER = 'tester'
             $env:IMAP_PASS = 'not-a-password'
+            $env:IMAP_NO_TLS = 'true'
             $null = $powershell.AddScript({
                 param($Manifest)
                 Import-Module $Manifest
-                Test-ImapAccount -NoTls
+                Test-ImapAccount
             }).AddArgument((Join-Path (Split-Path $PSScriptRoot) 'ElektoImapPosh.psd1'))
             $null = $powershell.BeginInvoke()
             $deadline = [DateTime]::UtcNow.AddSeconds(30)
@@ -150,8 +153,7 @@ Describe 'Waiting for the server' {
         } finally {
             $powershell.Dispose()
             $listener.Stop()
-            $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config'
-            foreach ($name in 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS') { [Environment]::SetEnvironmentVariable($name, $null) }
+            Reset-ImapVariables
         }
     }
 
@@ -237,12 +239,13 @@ Describe 'Test-ImapAccount against smtp4dev' -Skip:(-not $smtp4devInstalled) {
     BeforeAll {
         $server = Start-Smtp4dev -LogDirectory (Join-Path $TestDrive 'smtp4dev') -ArgumentList '--authenticationrequired', '--user=tester=not-a-password'
 
-        # "closed" points at a port where nothing listens
+        # "closed" points at a port where nothing listens, and "encrypted" is the server of "local" without NoTls
         New-Item -ItemType Directory -Path $env:IMAP_CONFIG_DIR -Force | Out-Null
         $accounts = @{
             Accounts = @{
-                local  = @{ Server = '127.0.0.1'; Port = $server.ImapPort; User = 'tester' }
-                closed = @{ Server = '127.0.0.1'; Port = (Get-FreeTcpPort); User = 'tester' }
+                local     = @{ Server = '127.0.0.1'; Port = $server.ImapPort; User = 'tester'; NoTls = $true }
+                closed    = @{ Server = '127.0.0.1'; Port = (Get-FreeTcpPort); User = 'tester'; NoTls = $true }
+                encrypted = @{ Server = '127.0.0.1'; Port = $server.ImapPort; User = 'tester' }
             }
         }
         Set-Content -Path (Join-Path $env:IMAP_CONFIG_DIR 'accounts.json') -Value ($accounts | ConvertTo-Json -Depth 5)
@@ -255,10 +258,11 @@ Describe 'Test-ImapAccount against smtp4dev' -Skip:(-not $smtp4devInstalled) {
     BeforeEach {
         $env:IMAP_PASS_LOCAL = 'not-a-password'
         $env:IMAP_PASS_CLOSED = 'not-a-password'
+        $env:IMAP_PASS_ENCRYPTED = 'not-a-password'
     }
 
-    It 'connects in plain text with -NoTls and authenticates' {
-        $result = Test-ImapAccount local -NoTls
+    It 'connects in plain text to an account with NoTls, and authenticates' {
+        $result = Test-ImapAccount local
 
         $result.Account | Should -Be 'local'
         $result.Port | Should -Be $server.ImapPort
@@ -268,8 +272,8 @@ Describe 'Test-ImapAccount against smtp4dev' -Skip:(-not $smtp4devInstalled) {
     }
 
     # Each failure is one error, also in -ErrorVariable and $Error (see Private/Errors.ps1)
-    It 'refuses to go on in plain text without -NoTls' {
-        $result = Test-ImapAccount local -ErrorVariable errors -ErrorAction SilentlyContinue
+    It 'refuses to go on in plain text with an account without NoTls' {
+        $result = Test-ImapAccount encrypted -ErrorVariable errors -ErrorAction SilentlyContinue
 
         $result | Should -BeNullOrEmpty
         $errors.Count | Should -Be 1
@@ -280,7 +284,7 @@ Describe 'Test-ImapAccount against smtp4dev' -Skip:(-not $smtp4devInstalled) {
     It 'reports a password the server does not accept' {
         $env:IMAP_PASS_LOCAL = 'wrong-password'
 
-        $result = Test-ImapAccount local -NoTls -ErrorVariable errors -ErrorAction SilentlyContinue
+        $result = Test-ImapAccount local -ErrorVariable errors -ErrorAction SilentlyContinue
 
         $result | Should -BeNullOrEmpty
         $errors.Count | Should -Be 1
@@ -289,19 +293,19 @@ Describe 'Test-ImapAccount against smtp4dev' -Skip:(-not $smtp4devInstalled) {
     }
 
     It 'reports an account that does not exist' {
-        $result = Test-ImapAccount office -NoTls -ErrorVariable errors -ErrorAction SilentlyContinue
+        $result = Test-ImapAccount office -ErrorVariable errors -ErrorAction SilentlyContinue
 
         $result | Should -BeNullOrEmpty
         $errors.Count | Should -Be 1
         $errors[0].FullyQualifiedErrorId | Should -BeLike 'AccountNotFound,*'
     }
 
-    It 'tests every account piped from Get-ImapAccount, reporting the one that fails' {
-        $results = Get-ImapAccount | Test-ImapAccount -NoTls -ErrorVariable errors -ErrorAction SilentlyContinue
+    It 'tests every account piped from Get-ImapAccount, reporting those that fail' {
+        $results = Get-ImapAccount | Test-ImapAccount -ErrorVariable errors -ErrorAction SilentlyContinue
 
         @($results).Account | Should -Be 'local'
-        $errors.Count | Should -Be 1
-        "$errors" | Should -BeLike '*Could not connect to 127.0.0.1:*'
+        $errors.Count | Should -Be 2
+        foreach ($item in $errors) { "$item" | Should -BeLike '*Could not connect to 127.0.0.1:*' }
     }
 
     It 'uses the IMAP_* environment variables when there is no account' {
@@ -310,20 +314,21 @@ Describe 'Test-ImapAccount against smtp4dev' -Skip:(-not $smtp4devInstalled) {
         $env:IMAP_PORT = "$($server.ImapPort)"
         $env:IMAP_USER = 'tester'
         $env:IMAP_PASS = 'not-a-password'
+        $env:IMAP_NO_TLS = 'true'
         try {
-            $result = Test-ImapAccount -NoTls
+            $result = Test-ImapAccount
 
             $result.Account | Should -BeNullOrEmpty
             $result.User | Should -Be 'tester'
+            $result.Security | Should -Be 'None'
         } finally {
-            $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config'
-            foreach ($name in 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS') { [Environment]::SetEnvironmentVariable($name, $null) }
+            Reset-ImapVariables
         }
     }
 }
 
 # Encrypted connections, which smtp4dev has not on IMAP: a proxy in front of it puts TLS, with a self-signed
-# certificate that only -SkipCertificateCheck accepts
+# certificate that only SkipCertificateCheck accepts
 Describe 'Encrypted connections, through a TLS proxy in front of smtp4dev' -Skip:(-not $smtp4devInstalled) {
     BeforeAll {
         . (Join-Path $PSScriptRoot 'TlsProxy.ps1')
@@ -334,14 +339,17 @@ Describe 'Encrypted connections, through a TLS proxy in front of smtp4dev' -Skip
 
         $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config-tls'
         New-Item -ItemType Directory -Path $env:IMAP_CONFIG_DIR -Force | Out-Null
+        # "checked" is the server of "starttls", checking its certificate
         $accounts = @{
             Accounts = @{
-                starttls = @{ Server = '127.0.0.1'; Port = $startTls.Port; User = 'tester' }
-                implicit = @{ Server = '127.0.0.1'; Port = 993; User = 'tester' }
+                starttls = @{ Server = '127.0.0.1'; Port = $startTls.Port; User = 'tester'; SkipCertificateCheck = $true }
+                checked  = @{ Server = '127.0.0.1'; Port = $startTls.Port; User = 'tester' }
+                implicit = @{ Server = '127.0.0.1'; Port = 993; User = 'tester'; SkipCertificateCheck = $true }
             }
         }
         Set-Content -Path (Join-Path $env:IMAP_CONFIG_DIR 'accounts.json') -Value ($accounts | ConvertTo-Json -Depth 5)
         $env:IMAP_PASS_STARTTLS = 'not-a-password'
+        $env:IMAP_PASS_CHECKED = 'not-a-password'
         $env:IMAP_PASS_IMPLICIT = 'not-a-password'
     }
 
@@ -352,8 +360,8 @@ Describe 'Encrypted connections, through a TLS proxy in front of smtp4dev' -Skip
         $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config'
     }
 
-    It 'connects by STARTTLS and authenticates, accepting the certificate with -SkipCertificateCheck' {
-        $result = Test-ImapAccount starttls -SkipCertificateCheck
+    It 'connects by STARTTLS and authenticates, accepting the certificate for an account with SkipCertificateCheck' {
+        $result = Test-ImapAccount starttls
 
         $result.Security | Should -Be 'StartTls'
         $result.SslProtocol | Should -BeIn 'Tls12', 'Tls13'
@@ -361,17 +369,40 @@ Describe 'Encrypted connections, through a TLS proxy in front of smtp4dev' -Skip
         $startTls.Handshakes | Should -BeGreaterThan 0
     }
 
-    It 'refuses a certificate that does not validate, without -SkipCertificateCheck' {
-        $result = Test-ImapAccount starttls -ErrorVariable errors -ErrorAction SilentlyContinue
+    It 'refuses a certificate that does not validate, for an account without SkipCertificateCheck' {
+        $result = Test-ImapAccount checked -ErrorVariable errors -ErrorAction SilentlyContinue
 
         $result | Should -BeNullOrEmpty
         $errors.Count | Should -Be 1
         $errors[0].FullyQualifiedErrorId | Should -BeLike 'ConnectionFailed,*'
-        "$errors" | Should -BeLike '*certificate*-SkipCertificateCheck accepts it.)'
+        "$errors" | Should -BeLike '*certificate*Set-ImapAccount checked -SkipCertificateCheck accepts it.)'
     }
 
-    It 'lists folders over TLS, -SkipCertificateCheck going through the connection of the command' {
-        (Get-ImapFolder starttls Inbox -SkipCertificateCheck).Folder | Should -Be 'INBOX'
+    It 'lists folders over TLS, SkipCertificateCheck going through the connection of the command' {
+        (Get-ImapFolder starttls Inbox).Folder | Should -Be 'INBOX'
+    }
+
+    It 'accepts the certificate with IMAP_SKIP_CERTIFICATE_CHECK when there is no account, and refuses it without' {
+        $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'no-accounts'
+        $env:IMAP_SERVER = '127.0.0.1'
+        $env:IMAP_PORT = "$($startTls.Port)"
+        $env:IMAP_USER = 'tester'
+        $env:IMAP_PASS = 'not-a-password'
+        try {
+            $result = Test-ImapAccount -ErrorVariable errors -ErrorAction SilentlyContinue
+
+            $result | Should -BeNullOrEmpty
+            "$errors" | Should -BeLike '*IMAP_SKIP_CERTIFICATE_CHECK=true accepts it.)'
+
+            $env:IMAP_SKIP_CERTIFICATE_CHECK = 'true'
+            $result = Test-ImapAccount
+
+            $result.Security | Should -Be 'StartTls'
+            $result.SslProtocol | Should -BeIn 'Tls12', 'Tls13'
+        } finally {
+            Reset-ImapVariables
+            $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config-tls'
+        }
     }
 
     It 'connects with TLS from the start on port 993' {
@@ -380,7 +411,7 @@ Describe 'Encrypted connections, through a TLS proxy in front of smtp4dev' -Skip
             return
         }
 
-        $result = Test-ImapAccount implicit -SkipCertificateCheck
+        $result = Test-ImapAccount implicit
 
         $result.Security | Should -Be 'SslOnConnect'
         $result.SslProtocol | Should -BeIn 'Tls12', 'Tls13'

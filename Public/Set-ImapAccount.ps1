@@ -19,7 +19,8 @@ Passwords are never written there:
 - On any platform, the environment variable IMAP_PASS_<NAME> (the name in upper case, with any
   character other than letters and digits as "_") takes precedence over the stored password.
 
-Only the settings given are changed. An empty value removes a setting.
+Only the settings given are changed. An empty value removes a setting, and a switch given as
+$false (-NoTls:$false) turns it off.
 
 .PARAMETER Name
 The name of the account: letters, digits, '.', '-' and '_', starting with a letter or digit.
@@ -37,6 +38,19 @@ The IMAP user name, usually the email address. Required for a new account.
 
 .PARAMETER Password
 The IMAP password (for Gmail, an app password), stored as described above.
+
+.PARAMETER NoTls
+Connects to this account in plain text, without TLS: the password and everything read cross the
+network unencrypted. Meant for test servers on the same machine that have no TLS, such as
+smtp4dev. Always use TLS with a real mailbox, and be responsible. Without it, the connection is
+encrypted: TLS from the start on port 993, and STARTTLS, required, on any other port.
+
+.PARAMETER SkipCertificateCheck
+Accepts the certificate of this account's server without checking it: one that is self-signed,
+issued by an authority this machine does not trust, expired, or for another name. The connection
+is still encrypted, but nothing proves that the other end is the server meant, rather than someone
+in between. Meant for test servers and servers with a certificate of their own; a mailbox such as
+Gmail never needs it. Be responsible.
 
 .PARAMETER Default
 Makes this the default account. -Default:$false stops it from being the default.
@@ -62,6 +76,12 @@ Replaces the stored password of the account "work".
 Set-ImapAccount -Name work -AllowWrite
 
 Allows the commands that change the mailbox to do so in the account "work".
+
+.EXAMPLE
+Set-ImapAccount -Name office -SkipCertificateCheck
+
+Accepts the certificate of the server of the account "office", which no authority this machine
+trusts has issued.
 #>
 Function Set-ImapAccount {
     [CmdletBinding(SupportsShouldProcess)]
@@ -75,6 +95,8 @@ Function Set-ImapAccount {
         [int]$Port,
         [string]$User,
         [securestring]$Password,
+        [switch]$NoTls,
+        [switch]$SkipCertificateCheck,
         [switch]$Default,
         [switch]$AllowWrite
     )
@@ -98,7 +120,7 @@ Function Set-ImapAccount {
     foreach ($key in $script:AccountSettingNames) {
         if (-not $PSBoundParameters.ContainsKey($key)) { continue }
         $value = $PSBoundParameters[$key]
-        # A permission kept only when given: -AllowWrite:$false removes it, as an empty value removes a setting
+        # A switch kept only when on: -AllowWrite:$false removes it, as an empty value removes a setting
         if ($value -is [switch]) { $value = if ($value) { $true } else { '' } }
         if ("$value" -eq '') { $settings.Remove($key) } else { $settings[$key] = $value }
     }
