@@ -279,10 +279,17 @@ Describe 'Keeping the accounts file whole' {
 
         (Get-ImapAccount).Name | Should -Be 'work'
     }
+}
 
-    # The real password file, under the test folder, in a folder where it cannot be deleted
-    It 'reports a password file that could not be deleted, and keeps its account' -Skip:$IsWindows {
+# The real password file, under the test folder (so not on Windows, where the store is the Credential Manager),
+# in a folder where it cannot be deleted
+Describe 'A password file that cannot be deleted' -Skip:$IsWindows {
+    BeforeAll {
+        Set-Content -Path $accountsFile -Value '{ "Accounts": { "work": { "Server": "imap.example.com", "User": "me@example.com" } } }'
         $env:IMAP_PASS_WORK = $null
+    }
+
+    It 'is reported, and its account kept' {
         Set-ImapAccount -Name work -Password ([Net.NetworkCredential]::new('', 'not-a-password').SecurePassword)
         $secrets = Join-Path $env:IMAP_CONFIG_DIR 'secrets'
         [IO.File]::SetUnixFileMode($secrets, 'UserRead, UserExecute')
