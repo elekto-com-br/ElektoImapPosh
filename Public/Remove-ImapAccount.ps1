@@ -6,7 +6,8 @@ Removes accounts and their stored passwords.
 The `Remove-ImapAccount` function removes accounts from accounts.json and deletes their passwords
 from the Windows Credential Manager (or, on Linux and macOS, their password files). If the default
 account is removed, there is no default account afterwards, and the commands go back to the IMAP_*
-environment variables. An IMAP_PASS_<NAME> environment variable is not touched.
+environment variables. An IMAP_PASS_<NAME> environment variable is not touched, nor are the policies the
+accounts followed.
 
 .PARAMETER Name
 The names of the accounts, or wildcard patterns. Also taken from the pipeline, as names or as the
@@ -56,7 +57,7 @@ Function Remove-ImapAccount {
 
                 $file.Accounts.Remove($existingName)
                 if ($defaultName -eq $existingName) { $defaultName = $null }
-                Write-AccountFile $defaultName $file.Accounts
+                Write-AccountFile $defaultName $file.Accounts $file.Policies
                 Write-Verbose "Account '$existingName' removed from '$($file.Path)'."
 
                 $variable = Get-PasswordVariableName $existingName

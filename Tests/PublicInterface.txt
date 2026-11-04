@@ -10,7 +10,17 @@ Get-ImapFolder
     -Account String[], position 0, from the pipeline by property name, alias Name, SupportsWildcards
     -Folder String[], position 1, from the pipeline by property name, SupportsWildcards
 
+Get-ImapPolicy
+  __AllParameterSets
+    -Name String, position 0, SupportsWildcards, default '*'
+
 Remove-ImapAccount
+  __AllParameterSets
+    -Name String[], position 0, mandatory, from the pipeline, from the pipeline by property name, SupportsWildcards
+    -Confirm SwitchParameter, alias cf, ConfirmImpact Medium
+    -WhatIf SwitchParameter, alias wi
+
+Remove-ImapPolicy
   __AllParameterSets
     -Name String[], position 0, mandatory, from the pipeline, from the pipeline by property name, SupportsWildcards
     -Confirm SwitchParameter, alias cf, ConfirmImpact Medium
@@ -24,10 +34,28 @@ Set-ImapAccount
     -Default SwitchParameter
     -NoTls SwitchParameter
     -Password SecureString
+    -Policy String
     -Port Int32, ValidateRange(1, 65535)
     -Server String
     -SkipCertificateCheck SwitchParameter
     -User String
+    -WhatIf SwitchParameter, alias wi
+
+Set-ImapPolicy
+  __AllParameterSets
+    -Name String, position 0, mandatory, ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+    -AllowAttachmentsFrom String[]
+    -AllowAttachmentTypes String[]
+    -AllowReadFrom String[]
+    -Confirm SwitchParameter, alias cf, ConfirmImpact Medium
+    -DenyAttachmentTypes String[]
+    -DenyFolders String[]
+    -DenyReadFrom String[]
+    -MaxAgeDays Int32, ValidateRange('NonNegative')
+    -MaxAttachmentSize Int64, ValidateRange('NonNegative')
+    -MaxMessages Int32, ValidateRange('NonNegative')
+    -MaxMessageSize Int64, ValidateRange('NonNegative')
+    -TrustAuthenticationResults String
     -WhatIf SwitchParameter, alias wi
 
 Test-ImapAccount

@@ -67,6 +67,11 @@ Without the permission, ElektoImapPosh only reads: a command that would make a c
 not allowed stops with an error, and folders are opened read-only, so that the server itself
 refuses changes to their messages and nothing is marked as read.
 
+.PARAMETER Policy
+The policy that the commands follow when they read from this account, created with Set-ImapPolicy:
+what of its messages may be read in full or saved, and how much one command may download. An empty
+value ('') removes it, and the account allows all reading again.
+
 .EXAMPLE
 Set-ImapAccount -Name work -Server imap.gmail.com -User me@example.com -Password (Read-Host -AsSecureString 'Password') -Default
 
@@ -87,6 +92,11 @@ Allows the commands that change the mailbox to mark messages and to move them in
 Set-ImapAccount -Name work -AllowWrite None
 
 Takes back the permission to change the mailbox of the account "work".
+
+.EXAMPLE
+Set-ImapAccount -Name work -Policy agent
+
+Makes the commands follow the policy "agent" when they read from the account "work".
 
 .EXAMPLE
 Set-ImapAccount -Name office -SkipCertificateCheck
@@ -110,7 +120,8 @@ Function Set-ImapAccount {
         [switch]$SkipCertificateCheck,
         [switch]$Default,
         [ValidateSet('Flags', 'Move', 'Labels', 'All', 'None')]
-        [string[]]$AllowWrite
+        [string[]]$AllowWrite,
+        [string]$Policy
     )
 
     # $writeKinds, since $allowWrite would be the parameter itself (variable names ignore case)
@@ -122,6 +133,14 @@ Function Set-ImapAccount {
     $file = Read-AccountFile
     $accounts = if ($file) { $file.Accounts } else { [ordered]@{} }
     $defaultName = if ($file) { $file.Default } else { $null }
+    $policies = if ($file) { $file.Policies } else { [ordered]@{} }
+
+    # The policy as the file spells it: one that does not exist would leave the account unable to read
+    $policyName = Find-PolicyName $file $Policy
+    if ($Policy -and -not $policyName) {
+        $known = if ($policies.psbase.Count) { " Policies: $($policies.psbase.Keys -join ', ')." } else { '' }
+        throw "There is no policy '$Policy' in '$(Get-AccountFilePath)': create it with Set-ImapPolicy first.$known"
+    }
 
     # An existing account keeps the spelling of its name
     $existingName = Find-AccountName $file $Name
@@ -137,7 +156,7 @@ Function Set-ImapAccount {
 
     foreach ($key in $script:AccountSettingNames) {
         if (-not $PSBoundParameters.ContainsKey($key)) { continue }
-        $value = if ($key -eq 'AllowWrite') { , $writeKinds } else { $PSBoundParameters[$key] }
+        $value = if ($key -eq 'AllowWrite') { , $writeKinds } elseif ($key -eq 'Policy') { $policyName } else { $PSBoundParameters[$key] }
         # A switch kept only when on: -NoTls:$false removes it, as an empty value (or -AllowWrite None) removes a setting
         if ($value -is [switch]) { $value = if ($value) { $true } else { '' } }
         if ("$value" -eq '') { $settings.Remove($key) } else { $settings[$key] = $value }
@@ -155,7 +174,7 @@ Function Set-ImapAccount {
     if (-not $PSCmdlet.ShouldProcess("account '$Name' in '$(Get-AccountFilePath)'", 'Save')) { return }
 
     $accounts[$Name] = $settings
-    Write-AccountFile $defaultName $accounts
+    Write-AccountFile $defaultName $accounts $policies
     Write-Verbose "Account '$Name' saved in '$(Get-AccountFilePath)'."
 
     if ($secret) {
