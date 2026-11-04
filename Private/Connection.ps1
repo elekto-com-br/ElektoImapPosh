@@ -4,12 +4,20 @@
 # Failures are reported as Errors.ps1 says, so the operations of MailKit run by their Async methods, through
 # Wait-ImapTask.
 
+# How long the LOGOUT at the end may wait for the server: a courtesy, after which the connection is closed all
+# the same (MailKit would wait two minutes)
+$script:LogoutTimeout = [TimeSpan]::FromSeconds(2)
+
 # Waits for the task of an Async method of MailKit and returns $null when it succeeded, or else the message
 # of its exception, without throwing it. The wait goes in short steps, so that Ctrl+C stops the command at
 # once, where a synchronous call would hold PowerShell until the server answers; the command's finally block
-# then disposes of the client, which ends the task.
-function Wait-ImapTask([System.Threading.Tasks.Task]$Task) {
-    while ([System.Threading.Tasks.Task]::WaitAny([System.Threading.Tasks.Task[]]@($Task), 200) -lt 0) { }
+# then disposes of the client, which ends the task. With -Timeout, it stops waiting after that long, and the
+# caller disposes of the client.
+function Wait-ImapTask([System.Threading.Tasks.Task]$Task, [TimeSpan]$Timeout = [System.Threading.Timeout]::InfiniteTimeSpan) {
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    while ([System.Threading.Tasks.Task]::WaitAny([System.Threading.Tasks.Task[]]@($Task), 200) -lt 0) {
+        if ($Timeout -ge [TimeSpan]::Zero -and $stopwatch.Elapsed -ge $Timeout) { return "No answer in $($Timeout.TotalSeconds) seconds." }
+    }
     if ($Task.IsFaulted) { return $Task.Exception.InnerException.Message }
     if ($Task.IsCanceled) { return 'The operation was canceled.' }
     return $null
@@ -62,22 +70,36 @@ function Connect-ImapClient($Cmdlet, $Settings, [switch]$NoTls) {
     $client = Connect-ImapServer $Cmdlet $Settings -NoTls:$NoTls
     if (-not $client) { return $null }
     $authenticated = $false
+    $answered = $false
     try {
         $authenticated = Invoke-ImapLogin $Cmdlet $client $Settings
+        $answered = $true
         if ($authenticated) { return $client }
         return $null
     } finally {
-        if (-not $authenticated) { Disconnect-ImapClient $client }
+        # Refused, it logs out; stopped during the login (by Ctrl+C), it only closes the connection
+        if (-not $authenticated) { Disconnect-ImapClient $client -Abort:(-not $answered) }
     }
 }
 
-# Logs out, as a courtesy to the server, and closes the connection all the same when that fails
-function Disconnect-ImapClient($Client) {
-    if ($Client.IsConnected) {
-        $failure = Wait-ImapTask ($Client.DisconnectAsync($true))
-        if ($failure) { Write-Verbose "Disconnecting: $failure" }
+# Logs out, as a courtesy to the server, for LogoutTimeout at most, and closes the connection whatever happens:
+# when the server does not answer, and when Ctrl+C cuts the wait short. With -Abort (a command stopped by
+# Ctrl+C or a terminating error, where the server may be the reason), it only closes the connection.
+function Disconnect-ImapClient($Client, [switch]$Abort) {
+    try {
+        if ($Abort -or -not $Client.IsConnected) { return }
+        # The token ends MailKit's wait for the answer; the timeout of Wait-ImapTask, a little longer, stops
+        # this one even if MailKit misses the token
+        $cancel = [System.Threading.CancellationTokenSource]::new($script:LogoutTimeout)
+        try {
+            $failure = Wait-ImapTask ($Client.DisconnectAsync($true, $cancel.Token)) -Timeout ($script:LogoutTimeout + [TimeSpan]::FromSeconds(1))
+            if ($failure) { Write-Verbose "Logging out: $failure" }
+        } finally {
+            $cancel.Dispose()
+        }
+    } finally {
+        $Client.Dispose()
     }
-    $Client.Dispose()
 }
 
 # The connection of a command to an account, opened when the command first needs it and kept in $Sessions,
@@ -102,8 +124,7 @@ function Get-ImapSession($Cmdlet, [hashtable]$Sessions, [string]$Account, [switc
 function Close-ImapSession([hashtable]$Sessions, [switch]$Abort) {
     if (-not $Sessions) { return }
     foreach ($session in @($Sessions.psbase.Values)) {
-        if (-not $session) { continue }
-        if ($Abort) { $session.Client.Dispose() } else { Disconnect-ImapClient $session.Client }
+        if ($session) { Disconnect-ImapClient $session.Client -Abort:$Abort }
     }
     $Sessions.Clear()
 }
