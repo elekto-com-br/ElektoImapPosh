@@ -126,8 +126,11 @@ Function Read-ImapMessage {
 
         $summaries = Get-ImapMessageSummary $PSCmdlet $session $item @($Uid | ForEach-Object { [MailKit.UniqueId]::new($item.UidValidity, $_) })
         if ($null -eq $summaries) { return }
+        # By UID, found once: a search of the list for each of many UIDs would take their square
+        $byUid = @{}
+        foreach ($summary in $summaries) { $byUid[$summary.UniqueId.Id] = $summary }
         foreach ($id in $Uid) {
-            $summary = @($summaries | Where-Object { $_.UniqueId.Id -eq $id })[0]
+            $summary = $byUid[$id]
             if (-not $summary) {
                 Write-ImapError $PSCmdlet "There is no message with the UID $id in the folder '$($item.FullName)' of $($settings.User)." 'MessageNotFound' ObjectNotFound $id
                 continue

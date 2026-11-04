@@ -700,7 +700,7 @@ Describe 'Read-ImapMessage against smtp4dev' -Skip:(-not $smtp4devInstalled) {
     It 'reads no more than MaxMessages in a command, saying how many it left out' {
         $result = Read-ImapMessage two -Uid $messages.Uid -WarningVariable warnings -WarningAction SilentlyContinue
 
-        $result.Count | Should -Be 2
+        $result.Uid | Should -Be $messages.Uid[0..1] -Because 'the messages are read in the order of -Uid'
         "$warnings" | Should -Be "The policy 'two' lets one command read 2 messages of tester: 2 more were not read."
     }
 }
