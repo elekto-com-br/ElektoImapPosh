@@ -100,6 +100,27 @@ Get-ImapAccount | Test-ImapAccount   # every account; one that fails is an error
 
 Failures are errors with an id that tells them apart: `ConnectionFailed`, `AuthenticationFailed`, `AccountNotFound`, `PasswordMissing` and `NoConfiguration`. Each one is a single error, also in `-ErrorVariable` and `$Error`. Ctrl+C stops a command at once, even while it waits for a server that does not answer.
 
+### Listing Folders
+
+`Get-ImapFolder` lists the folders that can hold messages, with how many each holds and how many are unread. `-Account` takes several accounts and wildcards, and each folder carries the account it came from; an account that fails is an error, and the others go on:
+
+```powershell
+Get-ImapFolder                             # the folders of the default account
+Get-ImapFolder -Account * -Folder Inbox    # the inbox of every account
+Get-ImapFolder work | Where-Object Unread -gt 0
+```
+
+```
+Account Folder                   SpecialUse Count Unread
+------- ------                   ---------- ----- ------
+work    INBOX                    Inbox        812      3
+work    Clients                                40      0
+work    [Gmail]/E-mails enviados Sent        1204      0
+work    [Gmail]/Todos os e-mails All         9731      3
+```
+
+Gmail translates the names of its special folders, so `-Folder` also takes their special use, the same in any language: `Inbox`, `All`, `Archive`, `Drafts`, `Flagged`, `Important`, `Junk`, `Sent` and `Trash`. It stands for the folder the server marks so, or else, on a server that marks none, for the folder of that name. `-Folder` takes full folder names too (`'[Gmail]/Sent Mail'`, `Clients/2026`), ignoring case, and wildcards; a name that matches no folder is a `FolderNotFound` error, a pattern that matches none is not. Each command opens one connection per account, however many folders it reads.
+
 ## Building from Source
 
 Building needs the [.NET SDK](https://dotnet.microsoft.com/download) 10 or later, which restores the mail libraries from NuGet:

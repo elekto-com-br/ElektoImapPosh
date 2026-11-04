@@ -79,3 +79,30 @@ function Disconnect-ImapClient($Client) {
     }
     $Client.Dispose()
 }
+
+# The connection of a command to an account, opened when the command first needs it and kept in $Sessions,
+# a hashtable of the command, until it ends: its end block logs out with Close-ImapSession, and its clean
+# block disposes of what is left after Ctrl+C or a terminating error. Returns the settings and the client,
+# or $null after reporting why not, only the first time for each account. '' is the default account, or
+# else the IMAP_* environment variables.
+function Get-ImapSession($Cmdlet, [hashtable]$Sessions, [string]$Account, [switch]$NoTls) {
+    if ($Sessions.ContainsKey($Account)) { return $Sessions[$Account] }
+    $Sessions[$Account] = $null
+    $settings = Resolve-ImapConfiguration $Cmdlet $Account
+    if (-not $settings) { return $null }
+    $client = Connect-ImapClient $Cmdlet $settings -NoTls:$NoTls
+    if (-not $client) { return $null }
+    $Sessions[$Account] = @{ Settings = $settings; Client = $client }
+    return $Sessions[$Account]
+}
+
+# Closes the connections of a command: logging out, from its end block, or with -Abort, from its clean
+# block, only disposing of them, since the server may be the reason it stopped
+function Close-ImapSession([hashtable]$Sessions, [switch]$Abort) {
+    if (-not $Sessions) { return }
+    foreach ($session in @($Sessions.Values)) {
+        if (-not $session) { continue }
+        if ($Abort) { $session.Client.Dispose() } else { Disconnect-ImapClient $session.Client }
+    }
+    $Sessions.Clear()
+}

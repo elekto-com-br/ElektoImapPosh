@@ -142,6 +142,28 @@ function Find-AccountName($File, [string]$Name) {
     return @($File.Accounts.psbase.Keys | Where-Object { $_ -eq $Name })[0]
 }
 
+# The accounts a command reads from, given its -Account: the accounts of the file that match each pattern,
+# and each name without wildcards as given (Resolve-ImapConfiguration reports one that does not exist),
+# once each; '' without -Account, for the default account or else the IMAP_* environment variables
+function Resolve-ImapAccountName([string[]]$Account) {
+    if (-not $Account) { return '' }
+    $file = $null
+    $names = [System.Collections.Generic.List[string]]::new()
+    foreach ($pattern in $Account) {
+        $found = if (-not [WildcardPattern]::ContainsWildcardCharacters($pattern)) { $pattern }
+        else {
+            if (-not $file) { $file = Read-AccountFile }
+            $matching = @(if ($file) { $file.Accounts.psbase.Keys | Where-Object { $_ -like $pattern } })
+            if (-not $matching) { Write-Verbose "No account matches '$pattern'." }
+            $matching
+        }
+        foreach ($name in $found) {
+            if (-not ($names | Where-Object { $_ -eq $name })) { $names.Add($name) }
+        }
+    }
+    return $names
+}
+
 # The settings a command connects with: those of the account given, or of the default account of the
 # file, or else the IMAP_* environment variables. Reports an error of the command ($Cmdlet is its
 # $PSCmdlet) and returns $null when the account does not exist or has no password, or when there is no

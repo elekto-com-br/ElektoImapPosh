@@ -5,6 +5,12 @@ Get-ImapAccount
   __AllParameterSets
     -Name String, position 0, SupportsWildcards, default '*'
 
+Get-ImapFolder
+  __AllParameterSets
+    -Account String[], position 0, from the pipeline by property name, alias Name, SupportsWildcards
+    -Folder String[], position 1, from the pipeline by property name, SupportsWildcards
+    -NoTls SwitchParameter
+
 Remove-ImapAccount
   __AllParameterSets
     -Name String[], position 0, mandatory, from the pipeline, from the pipeline by property name, SupportsWildcards
