@@ -12,7 +12,7 @@ BeforeAll {
     Import-Module (Join-Path (Split-Path $PSScriptRoot) 'ElektoImapPosh.psd1') -Force
 
     # An empty configuration folder and no variable of either module: a machine without accounts
-    $variableNames = 'IMAP_CONFIG_DIR', 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_PASS_WORK',
+    $variableNames = 'IMAP_CONFIG_DIR', 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_PASS_WORK', 'IMAP_ALLOW_WRITE',
     'SMTP_SERVER', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS'
     $savedEnvironment = @{}
     foreach ($name in $variableNames) {
@@ -90,6 +90,29 @@ Describe 'Settings without accounts' {
         { Resolve-Configuration } | Should -Throw -ExpectedMessage '*IMAP_USER and IMAP_PASS*'
     }
 
+    It 'allow no changes to the mailbox unless IMAP_ALLOW_WRITE says so' {
+        $env:IMAP_USER = 'me@example.com'
+        $env:IMAP_PASS = 'not-a-password'
+
+        (Resolve-Configuration).AllowWrite | Should -BeFalse
+        foreach ($value in 'true', 'TRUE', '1') {
+            $env:IMAP_ALLOW_WRITE = $value
+            (Resolve-Configuration).AllowWrite | Should -BeTrue -Because "IMAP_ALLOW_WRITE is '$value'"
+        }
+        foreach ($value in 'false', '0') {
+            $env:IMAP_ALLOW_WRITE = $value
+            (Resolve-Configuration).AllowWrite | Should -BeFalse -Because "IMAP_ALLOW_WRITE is '$value'"
+        }
+    }
+
+    It 'refuse an IMAP_ALLOW_WRITE that is neither true nor false' {
+        $env:IMAP_USER = 'me@example.com'
+        $env:IMAP_PASS = 'not-a-password'
+        $env:IMAP_ALLOW_WRITE = 'yes'
+
+        { Resolve-Configuration } | Should -Throw -ExpectedMessage '*IMAP_ALLOW_WRITE must be true or false*'
+    }
+
     It 'need both IMAP_USER and IMAP_PASS' {
         $env:IMAP_USER = 'me@example.com'
         $env:SMTP_PASS = 'not-a-password'
@@ -129,6 +152,13 @@ Describe 'Settings of an account' {
         $settings.Account | Should -Be 'home'
         $settings.Port | Should -Be 143
         $settings.Password | Should -Be 'stored-password'
+    }
+
+    It 'allow no changes to the mailbox unless the account does, whatever IMAP_ALLOW_WRITE says' {
+        $env:IMAP_PASS_WORK = 'not-a-password'
+        $env:IMAP_ALLOW_WRITE = 'true'
+
+        (Resolve-Configuration work).AllowWrite | Should -BeFalse
     }
 
     It 'are refused for an account without a password' {
@@ -204,6 +234,23 @@ Describe 'The account commands' {
         $json.Accounts.work.Port | Should -Be 993
         $json.Accounts.work.Server | Should -Be 'imap.example.com'
         Should -Invoke -ModuleName ElektoImapPosh Save-StoredPassword -Times 0 -Exactly
+    }
+
+    It 'allow changes to the mailbox of an account given -AllowWrite, until -AllowWrite:$false' {
+        Set-Content -Path $accountsFile -Value '{ "Accounts": { "work": { "Server": "imap.example.com", "User": "me@example.com" } } }'
+        $env:IMAP_PASS_WORK = 'not-a-password'
+        (Get-ImapAccount work).AllowWrite | Should -BeFalse
+
+        Set-ImapAccount -Name work -AllowWrite
+
+        (Get-Content -Path $accountsFile -Raw | ConvertFrom-Json -AsHashtable).Accounts.work.AllowWrite | Should -BeTrue
+        (Get-ImapAccount work).AllowWrite | Should -BeTrue
+        (Resolve-Configuration work).AllowWrite | Should -BeTrue
+
+        Set-ImapAccount -Name work -AllowWrite:$false
+
+        (Get-Content -Path $accountsFile -Raw | ConvertFrom-Json -AsHashtable).Accounts.work.Keys | Should -Not -Contain 'AllowWrite'
+        (Resolve-Configuration work).AllowWrite | Should -BeFalse
     }
 
     It 'remove accounts piped from Get-ImapAccount, with their stored passwords' {
@@ -350,12 +397,20 @@ Describe 'The accounts file, read ignoring case' {
     }
 
     It 'reads the settings in any case' {
-        Set-Content -Path $accountsFile -Value '{ "Accounts": { "work": { "server": "imap.example.com", "USER": "me@example.com", "port": 143 } } }'
+        Set-Content -Path $accountsFile -Value '{ "Accounts": { "work": { "server": "imap.example.com", "USER": "me@example.com", "port": 143, "allowwrite": true } } }'
 
         $account = Get-ImapAccount work
         $account.Server | Should -Be 'imap.example.com'
         $account.User | Should -Be 'me@example.com'
         $account.Port | Should -Be 143
+        $account.AllowWrite | Should -BeTrue
+    }
+
+    # A string such as "false" would be true for PowerShell
+    It 'refuses an AllowWrite that is not true or false' {
+        Set-Content -Path $accountsFile -Value '{ "Accounts": { "work": { "Server": "imap.example.com", "User": "me@example.com", "AllowWrite": "false" } } }'
+
+        { Get-ImapAccount } | Should -Throw -ExpectedMessage "*AllowWrite of account 'work'*must be true or false*"
     }
 
     It 'finds an account by its name in any case' {

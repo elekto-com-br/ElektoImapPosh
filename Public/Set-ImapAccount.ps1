@@ -41,6 +41,12 @@ The IMAP password (for Gmail, an app password), stored as described above.
 .PARAMETER Default
 Makes this the default account. -Default:$false stops it from being the default.
 
+.PARAMETER AllowWrite
+Allows the commands that change the mailbox (to come: marking as read, moving, labels) to do so
+in this account. Without it, which is the default, ElektoImapPosh only reads: folders are opened
+read-only, which the server itself enforces, nothing is marked as read, and a command that would
+write stops with an error. -AllowWrite:$false takes the permission back.
+
 .EXAMPLE
 Set-ImapAccount -Name work -Server imap.gmail.com -User me@example.com -Password (Read-Host -AsSecureString 'Password') -Default
 
@@ -50,6 +56,11 @@ Creates the account "work", asking for its password without showing it, and make
 Set-ImapAccount -Name work -Password (Read-Host -AsSecureString 'Password')
 
 Replaces the stored password of the account "work".
+
+.EXAMPLE
+Set-ImapAccount -Name work -AllowWrite
+
+Allows the commands that change the mailbox to do so in the account "work".
 #>
 Function Set-ImapAccount {
     [CmdletBinding(SupportsShouldProcess)]
@@ -63,7 +74,8 @@ Function Set-ImapAccount {
         [int]$Port,
         [string]$User,
         [securestring]$Password,
-        [switch]$Default
+        [switch]$Default,
+        [switch]$AllowWrite
     )
 
     $file = Read-AccountFile
@@ -85,6 +97,8 @@ Function Set-ImapAccount {
     foreach ($key in $script:AccountSettingNames) {
         if (-not $PSBoundParameters.ContainsKey($key)) { continue }
         $value = $PSBoundParameters[$key]
+        # A permission kept only when given: -AllowWrite:$false removes it, as an empty value removes a setting
+        if ($value -is [switch]) { $value = if ($value) { $true } else { '' } }
         if ("$value" -eq '') { $settings.Remove($key) } else { $settings[$key] = $value }
     }
     $secret = if ($Password) { [Net.NetworkCredential]::new('', $Password).Password } else { $null }

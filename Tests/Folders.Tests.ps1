@@ -11,11 +11,30 @@ BeforeAll {
     . (Join-Path $PSScriptRoot 'Smtp4dev.ps1')
     Import-Module (Join-Path (Split-Path $PSScriptRoot) 'ElektoImapPosh.psd1') -Force
 
-    $variableNames = 'IMAP_CONFIG_DIR', 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_PASS_LOCAL', 'IMAP_PASS_CLOSED'
+    $variableNames = 'IMAP_CONFIG_DIR', 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_PASS_LOCAL', 'IMAP_PASS_CLOSED', 'IMAP_PASS_WRITER'
     $savedEnvironment = @{}
     foreach ($name in $variableNames) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
         [Environment]::SetEnvironmentVariable($name, $null)
+    }
+
+    # Runs a script in the module with the session of an account, as a command would, and closes it after;
+    # the script gets the stand-in for the command's $PSCmdlet, which keeps the errors, and the session
+    function Invoke-InSession([string]$Account, [scriptblock]$Script) {
+        $cmdlet = [pscustomobject]@{ Errors = [System.Collections.Generic.List[object]]::new() }
+        $cmdlet | Add-Member -MemberType ScriptMethod -Name WriteError -Value { param($record) $this.Errors.Add($record) }
+        $result = InModuleScope ElektoImapPosh -Parameters @{ Cmdlet = $cmdlet; Account = $Account; Script = "$Script" } {
+            param($Cmdlet, $Account, $Script)
+            $sessions = @{}
+            try {
+                $session = Get-ImapSession $Cmdlet $sessions $Account -NoTls
+                # Made again here, so that it runs in the module, where its private functions are
+                & ([scriptblock]::Create($Script)) $Cmdlet $session
+            } finally {
+                Close-ImapSession $sessions
+            }
+        }
+        [pscustomobject]@{ Result = $result; Errors = $cmdlet.Errors }
     }
 }
 
@@ -205,7 +224,7 @@ Describe 'Get-ImapFolder on a Gmail mailbox' {
     }
 }
 
-Describe 'Get-ImapFolder against smtp4dev' -Skip:(-not $smtp4devInstalled) {
+Describe 'Folders against smtp4dev' -Skip:(-not $smtp4devInstalled) {
     BeforeAll {
         $server = Start-Smtp4dev -LogDirectory (Join-Path $TestDrive 'smtp4dev') -ArgumentList '--authenticationrequired', '--user=tester=not-a-password'
         $login = [Net.NetworkCredential]::new('tester', 'not-a-password')
@@ -219,11 +238,13 @@ Describe 'Get-ImapFolder against smtp4dev' -Skip:(-not $smtp4devInstalled) {
             Accounts = @{
                 local  = @{ Server = '127.0.0.1'; Port = $server.ImapPort; User = 'tester' }
                 closed = @{ Server = '127.0.0.1'; Port = (Get-FreeTcpPort); User = 'tester' }
+                writer = @{ Server = '127.0.0.1'; Port = $server.ImapPort; User = 'tester'; AllowWrite = $true }
             }
         }
         Set-Content -Path (Join-Path $env:IMAP_CONFIG_DIR 'accounts.json') -Value ($accounts | ConvertTo-Json -Depth 5)
         $env:IMAP_PASS_LOCAL = 'not-a-password'
         $env:IMAP_PASS_CLOSED = 'not-a-password'
+        $env:IMAP_PASS_WRITER = 'not-a-password'
 
         # The connections open to the IMAP server of smtp4dev, on the side of the client
         function Get-OpenConnectionCount {
@@ -268,7 +289,7 @@ Describe 'Get-ImapFolder against smtp4dev' -Skip:(-not $smtp4devInstalled) {
     It 'reads every account a pattern matches, reporting the one that fails' {
         $result = Get-ImapFolder -Account * -Folder Inbox -NoTls -ErrorVariable errors -ErrorAction SilentlyContinue
 
-        @($result).Account | Should -Be 'local'
+        @($result).Account | Sort-Object | Should -Be 'local', 'writer'
         $errors.Count | Should -Be 1
         $errors[0].FullyQualifiedErrorId | Should -BeLike 'ConnectionFailed,*'
     }
@@ -291,6 +312,59 @@ Describe 'Get-ImapFolder against smtp4dev' -Skip:(-not $smtp4devInstalled) {
         Get-OpenConnectionCount | Should -Be 0
     }
 
+    # Read-only by EXAMINE, which the server enforces: the guarantee that reading never changes the mailbox
+    It 'opens a folder read-only, and a message read stays unread' {
+        $run = Invoke-InSession local {
+            param($Cmdlet, $Session)
+            $inbox = $Session.Client.Inbox
+            $opened = Open-ImapFolder $Cmdlet $Session $inbox
+            @{ Opened = $opened; Access = "$($inbox.Access)"; Failure = Wait-ImapTask ($inbox.GetMessageAsync(0, [System.Threading.CancellationToken]::None, $null)) }
+        }
+
+        $run.Result.Opened | Should -BeTrue
+        $run.Result.Access | Should -Be 'ReadOnly'
+        $run.Result.Failure | Should -BeNullOrEmpty
+        (Get-ImapFolder local Inbox -NoTls).Unread | Should -Be 2
+    }
+
+    It 'refuses to open a folder for writing in an account that does not allow changes' {
+        $run = Invoke-InSession local {
+            param($Cmdlet, $Session)
+            @{ Opened = Open-ImapFolder $Cmdlet $Session $Session.Client.Inbox -ForWrite; IsOpen = $Session.Client.Inbox.IsOpen }
+        }
+
+        $run.Result.Opened | Should -BeFalse
+        $run.Result.IsOpen | Should -BeFalse
+        $run.Errors.Count | Should -Be 1
+        $run.Errors[0].FullyQualifiedErrorId | Should -Be 'WriteNotAllowed'
+        "$($run.Errors[0])" | Should -BeLike '*Set-ImapAccount local -AllowWrite*'
+    }
+
+    It 'opens a folder for writing in an account that allows changes' {
+        $run = Invoke-InSession writer {
+            param($Cmdlet, $Session)
+            @{ Opened = Open-ImapFolder $Cmdlet $Session $Session.Client.Inbox -ForWrite; Access = "$($Session.Client.Inbox.Access)" }
+        }
+
+        $run.Result.Opened | Should -BeTrue
+        $run.Result.Access | Should -Be 'ReadWrite'
+        $run.Errors.Count | Should -Be 0
+    }
+
+    # Even in an account that allows changes, a folder opened to be read cannot be changed
+    It 'cannot mark a message as read in a folder opened read-only' {
+        $run = Invoke-InSession writer {
+            param($Cmdlet, $Session)
+            $inbox = $Session.Client.Inbox
+            $null = Open-ImapFolder $Cmdlet $Session $inbox
+            $seen = [MailKit.StoreFlagsRequest]::new([MailKit.StoreAction]::Add, [MailKit.MessageFlags]::Seen)
+            Wait-ImapTask ($inbox.StoreAsync([int]0, [MailKit.IStoreFlagsRequest]$seen, [System.Threading.CancellationToken]::None))
+        }
+
+        $run.Result | Should -BeLike '*not currently open in read-write mode*'
+        (Get-ImapFolder local Inbox -NoTls).Unread | Should -Be 2
+    }
+
     It 'uses the IMAP_* environment variables when there is no account' {
         $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'no-accounts'
         $env:IMAP_SERVER = '127.0.0.1'
@@ -306,5 +380,39 @@ Describe 'Get-ImapFolder against smtp4dev' -Skip:(-not $smtp4devInstalled) {
             $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config'
             foreach ($name in 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS') { [Environment]::SetEnvironmentVariable($name, $null) }
         }
+    }
+}
+
+# So the tests above would see a message marked as read, one is, with a server of its own: smtp4dev adds
+# flags, but ignores taking them away, so the message stays read
+Describe 'Marking as read against smtp4dev' -Skip:(-not $smtp4devInstalled) {
+    BeforeAll {
+        $server = Start-Smtp4dev -LogDirectory (Join-Path $TestDrive 'smtp4dev-seen')
+        Send-Smtp4devMessage $server 'To be read'
+        $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config-seen'
+        New-Item -ItemType Directory -Path $env:IMAP_CONFIG_DIR -Force | Out-Null
+        $accounts = @{ Accounts = @{ writer = @{ Server = '127.0.0.1'; Port = $server.ImapPort; User = 'tester'; AllowWrite = $true } } }
+        Set-Content -Path (Join-Path $env:IMAP_CONFIG_DIR 'accounts.json') -Value ($accounts | ConvertTo-Json -Depth 5)
+        $env:IMAP_PASS_WRITER = 'not-a-password'
+    }
+
+    AfterAll {
+        Stop-Smtp4dev $server
+        $env:IMAP_CONFIG_DIR = $null
+    }
+
+    It 'can mark a message as read in a folder opened for writing, and the count shows it' {
+        (Get-ImapFolder writer Inbox -NoTls).Unread | Should -Be 1
+
+        $run = Invoke-InSession writer {
+            param($Cmdlet, $Session)
+            $inbox = $Session.Client.Inbox
+            $null = Open-ImapFolder $Cmdlet $Session $inbox -ForWrite
+            $seen = [MailKit.StoreFlagsRequest]::new([MailKit.StoreAction]::Add, [MailKit.MessageFlags]::Seen)
+            Wait-ImapTask ($inbox.StoreAsync([int]0, [MailKit.IStoreFlagsRequest]$seen, [System.Threading.CancellationToken]::None))
+        }
+
+        $run.Result | Should -BeNullOrEmpty
+        (Get-ImapFolder writer Inbox -NoTls).Unread | Should -Be 0
     }
 }

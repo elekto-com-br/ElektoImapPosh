@@ -67,3 +67,25 @@ function Get-ImapFolderList($Cmdlet, $Session, [MailKit.StatusItems]$StatusItems
     $Session.Folders = $folders.ToArray()
     return , $Session.Folders
 }
+
+# Opens a folder to read its messages: read-only, by EXAMINE, so the server itself refuses any change to the
+# mailbox, flags included, whatever a command asks of it (RFC 3501; MailKit also refuses to send one), and a
+# message read is not marked as read. Only a command that writes opens it with -ForWrite (SELECT), and only on
+# an account that allows it (AllowWrite, or IMAP_ALLOW_WRITE). Returns $true, or $false after reporting why
+# not. A connection has one folder open at a time: opening another closes the one before.
+function Open-ImapFolder($Cmdlet, $Session, $Folder, [switch]$ForWrite) {
+    $settings = $Session.Settings
+    if ($ForWrite -and -not $settings.AllowWrite) {
+        $how = if ($settings.Account) { "Set-ImapAccount $($settings.Account) -AllowWrite" } else { 'the environment variable IMAP_ALLOW_WRITE=true' }
+        Write-ImapError $Cmdlet "Changes are not allowed in the mailbox of $($settings.User), so '$($Folder.FullName)' was left as it is. To allow them: $how." 'WriteNotAllowed' PermissionDenied $Folder.FullName
+        return $false
+    }
+    $access = if ($ForWrite) { [MailKit.FolderAccess]::ReadWrite } else { [MailKit.FolderAccess]::ReadOnly }
+    if ($Folder.IsOpen -and $Folder.Access -eq $access) { return $true }
+    $failure = Wait-ImapTask ($Folder.OpenAsync($access, [System.Threading.CancellationToken]::None))
+    if ($failure) {
+        Write-ImapError $Cmdlet "Could not open the folder '$($Folder.FullName)' of $($settings.User): $failure" 'FolderOpenFailed' ReadError $Folder.FullName
+        return $false
+    }
+    return $true
+}
