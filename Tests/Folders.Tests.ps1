@@ -42,10 +42,10 @@ Describe 'Special uses' {
             New-Folder '[Gmail]/Todos os e-mails' 'HasNoChildren, All'
         )
 
-        function Select-Folder([string]$Name, $Folders = $gmail) {
-            InModuleScope ElektoImapPosh -Parameters @{ Folders = $Folders; Name = $Name } {
-                param($Folders, $Name)
-                (Select-ImapFolder $Folders $Name).FullName
+        function Select-Folder([string]$Name, $Folders = $gmail, [switch]$Literal) {
+            InModuleScope ElektoImapPosh -Parameters @{ Folders = $Folders; Name = $Name; Literal = $Literal } {
+                param($Folders, $Name, $Literal)
+                (Select-ImapFolder $Folders $Name -Literal:$Literal).FullName
             }
         }
     }
@@ -66,6 +66,13 @@ Describe 'Special uses' {
         Select-Folder 'trash' | Should -Be '[Gmail]/Lixeira'
     }
 
+    It 'finds a folder by any of the special uses the server marks it with' {
+        $marked = @(New-Folder '[Gmail]/Todos os e-mails' 'HasNoChildren, All, Archive'; New-Folder 'Archive')
+
+        Select-Folder 'Archive' $marked | Should -Be '[Gmail]/Todos os e-mails'
+        Select-Folder 'All' $marked | Should -Be '[Gmail]/Todos os e-mails'
+    }
+
     It 'finds the folder named as a special use when the server marks none' {
         $plain = $gmail | Where-Object FullName -NotLike '`[Gmail`]*'
 
@@ -84,11 +91,39 @@ Describe 'Special uses' {
         Select-Folder 'Nothing*' | Should -BeNullOrEmpty
     }
 
+    # As a name from the pipeline is taken: the full name of a folder the server listed
+    It 'takes a name as the exact full name of a folder with -Literal, neither a special use nor a pattern' {
+        Select-Folder 'Sent' -Literal | Should -Be 'Sent'
+        Select-Folder '[Gmail]/Lixeira' -Literal | Should -Be '[Gmail]/Lixeira'
+        Select-Folder 'Work*' -Literal | Should -BeNullOrEmpty
+        Select-Folder 'sent' -Literal | Should -BeNullOrEmpty
+    }
+
     It 'leaves out the folders that cannot hold messages' {
         InModuleScope ElektoImapPosh {
             Test-SelectableFolder ([PSCustomObject]@{ FullName = '[Gmail]'; Attributes = [MailKit.FolderAttributes]'HasChildren, NoSelect' })
         } | Should -BeFalse
         InModuleScope ElektoImapPosh -Parameters @{ Folder = $gmail[0] } { param($Folder) Test-SelectableFolder $Folder } | Should -BeTrue
+    }
+}
+
+Describe 'Closing the connections of a command' {
+    # The keys are account names, and a key hides a property of the same name
+    It 'closes every connection, even with an account named Values (abort: <Abort>)' -TestCases @(
+        @{ Abort = $false }
+        @{ Abort = $true }
+    ) {
+        $disposed = InModuleScope ElektoImapPosh -Parameters @{ Abort = $Abort } {
+            param($Abort)
+            $client = [PSCustomObject]@{ IsConnected = $false; Disposed = $false }
+            $client | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $this.Disposed = $true }
+            # "Values" failed to connect, "work" did
+            $sessions = @{ Values = $null; work = @{ Client = $client } }
+            Close-ImapSession $sessions -Abort:$Abort
+            $client.Disposed
+        }
+
+        $disposed | Should -BeTrue
     }
 }
 
@@ -123,6 +158,50 @@ Describe 'The accounts a command reads from' {
 
     It 'stands for the default account, or the IMAP_* variables, without -Account' {
         Resolve-Name | Should -BeExactly ''
+    }
+}
+
+# The command over a Gmail mailbox that the session and the listing, mocked, serve: a label "Sent" of the user
+# beside the sent folder, and the folders in the pipeline from one Get-ImapFolder to another
+Describe 'Get-ImapFolder on a Gmail mailbox' {
+    BeforeAll {
+        function New-Folder([string]$FullName, [MailKit.FolderAttributes]$Attributes, [int]$Count) {
+            $folder = [PSCustomObject]@{ FullName = $FullName; Attributes = $Attributes; Count = $Count; Unread = 0 }
+            $folder | Add-Member -MemberType ScriptMethod -Name StatusAsync -Value { [System.Threading.Tasks.Task]::CompletedTask }
+            $folder
+        }
+        $mailbox = @(
+            New-Folder 'INBOX' 'HasNoChildren, Inbox' 10
+            New-Folder 'Sent' 'HasNoChildren' 2
+            New-Folder '[Gmail]/E-mails enviados' 'HasNoChildren, Sent' 30
+            New-Folder '[Gmail]/Todos os e-mails' 'HasNoChildren, All' 50
+        )
+        Mock -ModuleName ElektoImapPosh Get-ImapSession { @{ Settings = @{ Account = 'gmail'; User = 'me@gmail.com' }; Client = $null } }
+        Mock -ModuleName ElektoImapPosh Get-ImapFolderList { , $mailbox }
+        Mock -ModuleName ElektoImapPosh Close-ImapSession { }
+    }
+
+    It 'takes -Folder Sent typed as the sent folder' {
+        (Get-ImapFolder gmail -Folder Sent).Folder | Should -Be '[Gmail]/E-mails enviados'
+    }
+
+    It 'takes a folder from the pipeline by its exact name, so a label "Sent" stays that label' {
+        $result = [PSCustomObject]@{ Account = 'gmail'; Folder = 'Sent' } | Get-ImapFolder
+
+        $result.Folder | Should -Be 'Sent'
+        $result.Count | Should -Be 2
+    }
+
+    It 'gives the same folders when piped to itself' {
+        (Get-ImapFolder gmail | Get-ImapFolder).Folder | Should -Be $mailbox.FullName
+    }
+
+    It 'reports a folder from the pipeline that is no longer there' {
+        $result = [PSCustomObject]@{ Account = 'gmail'; Folder = 'Old label' } | Get-ImapFolder -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $result | Should -BeNullOrEmpty
+        $errors.Count | Should -Be 1
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'FolderNotFound,*'
     }
 }
 
@@ -194,11 +273,12 @@ Describe 'Get-ImapFolder against smtp4dev' -Skip:(-not $smtp4devInstalled) {
         $errors[0].FullyQualifiedErrorId | Should -BeLike 'ConnectionFailed,*'
     }
 
-    It 'takes accounts and folders from the pipeline, with one connection for each account' {
+    It 'takes accounts and folders from the pipeline, with one connection and one listing for each account' {
         $output = Get-ImapFolder local -NoTls | Get-ImapFolder -NoTls -Verbose 4>&1
 
         $verbose = @($output | Where-Object { $_ -is [System.Management.Automation.VerboseRecord] })
         @($verbose | Where-Object Message -Like 'Connecting to*').Count | Should -Be 1
+        @($verbose | Where-Object Message -Like 'Listing the folders*').Count | Should -Be 1
         ($output | Where-Object { $_ -isnot [System.Management.Automation.VerboseRecord] }).Folder | Should -Be 'INBOX', 'Sent'
     }
 

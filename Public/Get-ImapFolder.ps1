@@ -25,6 +25,8 @@ Important, Junk, Sent or Trash), which stands for the folder the server marks so
 folder of that name; or a full folder name, such as "[Gmail]/Sent Mail" or "Work/Clients",
 ignoring case; or a wildcard pattern matched against the full names. A name that matches no folder
 is reported as an error.
+Also taken from the pipeline, as the folders listed by Get-ImapFolder: each is then the folder of
+that exact full name, so that a label "Sent" of the user stays that label.
 
 .PARAMETER NoTls
 Connects in plain text, without TLS: the password and everything read cross the network
@@ -64,6 +66,9 @@ Function Get-ImapFolder {
     begin {
         $sessions = @{}
         $statusItems = [MailKit.StatusItems]'Count, Unread'
+        # Here, before any input, only what was typed is bound; a -Folder typed is never replaced by the
+        # pipeline, so one that was not typed comes from the pipeline, with the exact name of a folder
+        $folderFromPipeline = -not $PSBoundParameters.ContainsKey('Folder')
     }
 
     process {
@@ -80,8 +85,8 @@ Function Get-ImapFolder {
             if ($Folder) {
                 $chosen = [System.Collections.Generic.List[object]]::new()
                 foreach ($name in $Folder) {
-                    $found = Select-ImapFolder $folders $name
-                    if ($found.Count -eq 0 -and -not [WildcardPattern]::ContainsWildcardCharacters($name)) {
+                    $found = Select-ImapFolder $folders $name -Literal:$folderFromPipeline
+                    if ($found.Count -eq 0 -and ($folderFromPipeline -or -not [WildcardPattern]::ContainsWildcardCharacters($name))) {
                         Write-ImapError $PSCmdlet "There is no folder '$name' in the mailbox of $($settings.User). Get-ImapFolder lists them." 'FolderNotFound' ObjectNotFound $name
                     }
                     foreach ($item in $found) {

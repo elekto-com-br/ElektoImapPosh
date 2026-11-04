@@ -97,10 +97,11 @@ function Get-ImapSession($Cmdlet, [hashtable]$Sessions, [string]$Account, [switc
 }
 
 # Closes the connections of a command: logging out, from its end block, or with -Abort, from its clean
-# block, only disposing of them, since the server may be the reason it stopped
+# block, only disposing of them, since the server may be the reason it stopped. The keys are account names,
+# and a key hides a property of the same name: an account called "Values" would hide .Values.
 function Close-ImapSession([hashtable]$Sessions, [switch]$Abort) {
     if (-not $Sessions) { return }
-    foreach ($session in @($Sessions.Values)) {
+    foreach ($session in @($Sessions.psbase.Values)) {
         if (-not $session) { continue }
         if ($Abort) { $session.Client.Dispose() } else { Disconnect-ImapClient $session.Client }
     }
