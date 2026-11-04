@@ -1,2 +1,23 @@
 # The public interface of ElektoImapPosh, written by Tests/Get-PublicInterface.ps1. Tests/PublicInterface.Tests.ps1
 # fails when the module differs from it: regenerate it only for a change made on purpose.
+
+Get-ImapAccount
+  __AllParameterSets
+    -Name String, position 0, SupportsWildcards, default '*'
+
+Remove-ImapAccount
+  __AllParameterSets
+    -Name String[], position 0, mandatory, from the pipeline, from the pipeline by property name, SupportsWildcards
+    -Confirm SwitchParameter, alias cf, ConfirmImpact Medium
+    -WhatIf SwitchParameter, alias wi
+
+Set-ImapAccount
+  __AllParameterSets
+    -Name String, position 0, mandatory, ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+    -Confirm SwitchParameter, alias cf, ConfirmImpact Medium
+    -Default SwitchParameter
+    -Password SecureString
+    -Port Int32, ValidateRange(1, 65535)
+    -Server String
+    -User String
+    -WhatIf SwitchParameter, alias wi
