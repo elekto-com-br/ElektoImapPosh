@@ -1,8 +1,9 @@
 # Messages: how a command finds them, by a SEARCH on the server, and what it fetches of each before the policy decides
-# whether its body may be read (Get-WithheldReason, in Policies.ps1). Only metadata is fetched here: the envelope, the
-# flags, the size, the date the server received it, the structure of its parts (whether it has attachments), on Gmail
-# its thread and labels, and the Authentication-Results headers that tell an authenticated sender. Bodies are fetched
-# with BODY.PEEK from folders opened read-only, so nothing is marked as read.
+# whether its body may be read (Get-WithheldReason, in Policies.ps1). First only metadata: the envelope, the flags,
+# the size, the date the server received it, the structure of its parts (its text parts and attachments), on Gmail its
+# thread and labels, and the Authentication-Results headers that tell an authenticated sender. Then, when the policy
+# allows it, the text part alone (Get-ImapMessageText). Parts are fetched with BODY.PEEK from folders opened read-only,
+# so nothing is marked as read.
 
 # Whether the server has the Gmail extensions (labels, threads, X-GM-RAW). They are used only when it announces them.
 function Test-GMailServer($Session) {
@@ -93,4 +94,30 @@ function ConvertTo-ImapMessage($Session, $Folder, $Summary) {
         Labels         = $labels
         Withheld       = Get-WithheldReason $Session $Folder $Summary
     }
+}
+
+# The text of a message, in a hashtable with Text and Format (Text or Html, both $null when the message has no text):
+# its text/plain part, or else its text/html part, as they are; with -Html, the other way round. MimeKit decodes them
+# (base64 or quoted-printable, and their charset); nothing converts the HTML. Only that part is fetched, by BODY.PEEK:
+# of a multipart message, never its attachments; of a message of one part, all of it, which is that part and its
+# headers. $null after reporting why not.
+function Get-ImapMessageText($Cmdlet, $Session, $Folder, $Summary, [switch]$Html) {
+    $parts = if ($Html) { $Summary.HtmlBody, $Summary.TextBody } else { $Summary.TextBody, $Summary.HtmlBody }
+    $part = @($parts | Where-Object { $_ })[0]
+    if (-not $part) { return @{ Text = $null; Format = $null } }
+    $task = $Folder.GetBodyPartAsync($Summary.UniqueId, $part, [System.Threading.CancellationToken]::None, $null)
+    $failure = Wait-ImapTask $task
+    if ($failure) {
+        Write-ImapError $Cmdlet "Could not read the message $($Summary.UniqueId.Id) of the folder '$($Folder.FullName)' of $($Session.Settings.User): $failure" 'MessageFetchFailed' ReadError $Summary.UniqueId.Id
+        return $null
+    }
+    return @{ Text = $task.Result.Text; Format = if ($part.IsHtml) { 'Html' } else { 'Text' } }
+}
+
+# The attachments of a message, as its structure describes them, without fetching them: name, MIME type, and size as
+# the message carries them (encoded: a file sent in base64 is about three quarters of it)
+function Get-ImapAttachmentList($Summary) {
+    return , [object[]]@($Summary.Attachments | ForEach-Object {
+            [PSCustomObject]@{ Name = $_.FileName; ContentType = $_.ContentType.MimeType; Size = [long]$_.Octets }
+        })
 }

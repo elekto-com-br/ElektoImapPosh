@@ -57,5 +57,30 @@
         </TableRowEntries>
       </TableControl>
     </View>
+    <View>
+      <Name>ElektoImapPosh.MessageText</Name>
+      <ViewSelectedBy>
+        <TypeName>ElektoImapPosh.MessageText</TypeName>
+      </ViewSelectedBy>
+      <ListControl>
+        <ListEntries>
+          <ListEntry>
+            <ListItems>
+              <ListItem><PropertyName>Account</PropertyName></ListItem>
+              <ListItem><PropertyName>Folder</PropertyName></ListItem>
+              <ListItem><PropertyName>Uid</PropertyName></ListItem>
+              <ListItem><Label>Date</Label><ScriptBlock>if ($_.Date) { $_.Date.ToString('yyyy-MM-dd HH:mm') }</ScriptBlock></ListItem>
+              <ListItem><PropertyName>From</PropertyName></ListItem>
+              <ListItem><Label>To</Label><ScriptBlock>$_.To -join ', '</ScriptBlock></ListItem>
+              <ListItem><Label>Cc</Label><ScriptBlock>$_.Cc -join ', '</ScriptBlock></ListItem>
+              <ListItem><PropertyName>Subject</PropertyName></ListItem>
+              <ListItem><Label>Attachments</Label><ScriptBlock>@($_.Attachments | ForEach-Object { "$($_.Name) ($($_.ContentType), $($_.Size) bytes)" }) -join ', '</ScriptBlock></ListItem>
+              <ListItem><PropertyName>Format</PropertyName></ListItem>
+              <ListItem><Label>Text</Label><ScriptBlock>if ($_.Truncated) { "$($_.Text) [...]" } else { $_.Text }</ScriptBlock></ListItem>
+            </ListItems>
+          </ListEntry>
+        </ListEntries>
+      </ListControl>
+    </View>
   </ViewDefinitions>
 </Configuration>

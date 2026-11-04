@@ -1,7 +1,7 @@
-# Messages: the one check of a policy, on the metadata of each message; Get-ImapMessage against smtp4dev, for the
-# search, the filters and the policies; and against a fake Gmail, for what only Gmail has (labels, threads, X-GM-RAW)
-# and for attachments, which the BODYSTRUCTURE of smtp4dev leaves out. The tests that need smtp4dev are skipped where
-# it is not installed.
+# Messages: the one check of a policy, on the metadata of each message; Get-ImapMessage and Read-ImapMessage against
+# smtp4dev, for the search, the filters, the policies and the decoding of texts; and against a fake Gmail, for what
+# only Gmail has (labels, threads, X-GM-RAW) and for attachments, which the BODYSTRUCTURE of smtp4dev leaves out. The
+# tests that need smtp4dev are skipped where it is not installed.
 
 BeforeDiscovery {
     . (Join-Path $PSScriptRoot 'Smtp4dev.ps1')
@@ -451,7 +451,7 @@ Describe 'Get-ImapMessage on Gmail' {
     BeforeAll {
         $now = [DateTimeOffset]::Now
         $server = Start-FakeGmail @(
-            @{ Uid = 1; ChangedElsewhere = $true; Folders = 'INBOX', '[Gmail]/All Mail', 'Finance/Bank'; Labels = '\Inbox', 'Finance/Bank'; ThreadId = 111; From = 'Bank <alerts@bank.example>'; Subject = 'Statement'; Date = $now.AddHours(-4); Size = 5000; Attachment = 'statement.pdf'; AuthenticationResults = 'mx.google.com; dmarc=pass header.from=bank.example'; Raw = 'has:attachment', 'from:bank.example' }
+            @{ Uid = 1; ChangedElsewhere = $true; Text = 'Your statement is attached: total R$ 1.234,56.'; Folders = 'INBOX', '[Gmail]/All Mail', 'Finance/Bank'; Labels = '\Inbox', 'Finance/Bank'; ThreadId = 111; From = 'Bank <alerts@bank.example>'; Subject = 'Statement'; Date = $now.AddHours(-4); Size = 5000; Attachment = 'statement.pdf'; AuthenticationResults = 'mx.google.com; dmarc=pass header.from=bank.example'; Raw = 'has:attachment', 'from:bank.example' }
             @{ Uid = 2; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = '\Inbox', '\Important'; ThreadId = 222; From = 'Client <client@client.example>'; Subject = 'Proposal'; Date = $now.AddHours(-3); Size = 3000; Seen = $true; AuthenticationResults = 'mx.google.com; dmarc=pass header.from=client.example' }
             @{ Uid = 3; Folders = '[Gmail]/All Mail', '[Gmail]/Sent Mail'; Labels = '\Sent'; ThreadId = 222; From = 'Me <me@gmail.com>'; Subject = 'Re: Proposal'; Date = $now.AddHours(-2); Size = 2000; Seen = $true; Raw = 'in:sent proposal' }
             @{ Uid = 4; Folders = '[Gmail]/All Mail', 'Sent'; Labels = @('Sent'); ThreadId = 444; From = 'Me <me@gmail.com>'; Subject = 'Labelled Sent'; Date = $now.AddHours(-1); Size = 1000 }
@@ -539,5 +539,168 @@ Describe 'Get-ImapMessage on Gmail' {
         ($all | Where-Object Subject -EQ 'Re: Proposal').Withheld | Should -BeNullOrEmpty
         ($all | Where-Object Subject -EQ 'Labelled Sent').Withheld | Should -BeLike 'The sender is not authenticated*'
         ($all | Where-Object Subject -EQ 'Proposal').Withheld | Should -BeNullOrEmpty
+    }
+    It 'reads the text part of a message, and lists its attachment without fetching it' {
+        $result = Read-ImapMessage open -Folder All -Uid 1
+
+        $result.PSObject.TypeNames[0] | Should -Be 'ElektoImapPosh.MessageText'
+        $result.Subject | Should -Be 'Statement'
+        $result.Text | Should -Be 'Your statement is attached: total R$ 1.234,56.'
+        $result.Format | Should -Be 'Text'
+        $result.Attachments.Count | Should -Be 1
+        $result.Attachments[0].Name | Should -Be 'statement.pdf'
+        $result.Attachments[0].ContentType | Should -Be 'application/pdf'
+        $result.Attachments[0].Size | Should -Be 1000
+        $fetch = @($server.State.Commands.ToArray() | Where-Object { $_ -like '* UID FETCH *BODY.PEEK`[1`]*' })
+        $fetch.Count | Should -Be 1
+        $server.State.Commands.ToArray() | Where-Object { $_ -like '*BODY.PEEK`[2*' -or $_ -like '*BODY.PEEK`[`]*' } | Should -BeNullOrEmpty
+    }
+
+    It 'reads a message of one part, whole' {
+        (Read-ImapMessage open -Folder All -Uid 2).Text | Should -Be 'The body of Proposal.'
+    }
+
+    It 'refuses a message the policy withholds, fetching nothing of its body' {
+        $before = $server.State.Commands.Count
+        $result = Read-ImapMessage agent -Folder Inbox -Uid 1 -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $result | Should -BeNullOrEmpty
+        $errors.Count | Should -Be 1
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'MessageWithheld,*'
+        "$($errors[0])" | Should -Be "The message 1 in the folder 'INBOX' of tester was not read: It has the label 'Finance/Bank', and the folder 'Finance/Bank' is in DenyFolders of the policy 'agent'."
+        $server.State.Commands.ToArray() | Select-Object -Skip $before | Where-Object { $_ -like '*BODY.PEEK`[1*' -or $_ -like '*BODY.PEEK`[`]*' } | Should -BeNullOrEmpty
+    }
+
+    # Listed first: the fake serves one connection at a time, and in a pipeline both commands are connected at once
+    It 'reads the messages listed by Get-ImapMessage, from the folder each came from' {
+        $listed = Get-ImapMessage agent -Folder Sent
+        $result = $listed | Read-ImapMessage
+
+        $result.Subject | Should -Be 'Re: Proposal'
+        $result.Folder | Should -Be '[Gmail]/Sent Mail'
+        $result.Text | Should -Be 'The body of Re: Proposal.'
+    }
+
+    It 'takes a folder from the pipeline by its exact name, so a label "Sent" stays that label' {
+        $result = [PSCustomObject]@{ Account = 'open'; Folder = 'Sent'; Uid = 4 } | Read-ImapMessage
+
+        $result.Subject | Should -Be 'Labelled Sent'
+        $result.Folder | Should -Be 'Sent'
+    }
+}
+
+Describe 'Read-ImapMessage against smtp4dev' -Skip:(-not $smtp4devInstalled) {
+    BeforeAll {
+        $server = Start-Smtp4dev -LogDirectory (Join-Path $TestDrive 'smtp4dev-read')
+        # Accented texts, written with escapes so that the file stays ASCII
+        $utf8Text = "Aten`u{e7}`u{e3}o: a`u{e7}`u{e3}o j`u{e1} feita, 50 `u{20ac}."
+        $latinText = "Aten`u{e7}`u{e3}o: a`u{e7}`u{e3}o j`u{e1} feita."
+        $htmlText = "<p>Only <i>HTML</i>, a`u{e7}`u{e3}o.</p>"
+        function New-Text([string]$Subtype, [string]$Charset, [string]$Text, [MimeKit.ContentEncoding]$Encoding) {
+            $part = [MimeKit.TextPart]::new($Subtype)
+            $part.SetText($Charset, $Text)
+            $part.ContentTransferEncoding = $Encoding
+            $part
+        }
+        Send-Smtp4devMessage $server 'Base64 UTF-8' -Body (New-Text 'plain' 'utf-8' $utf8Text 'Base64')
+        Send-Smtp4devMessage $server 'Quoted-printable ISO-8859-1' -Body (New-Text 'plain' 'iso-8859-1' $latinText 'QuotedPrintable')
+        $alternative = [MimeKit.MultipartAlternative]::new()
+        $alternative.Add((New-Text 'plain' 'utf-8' 'Plain version.' 'QuotedPrintable'))
+        $alternative.Add((New-Text 'html' 'utf-8' '<p>HTML <b>version</b>.</p>' 'QuotedPrintable'))
+        Send-Smtp4devMessage $server 'Alternative' -Body $alternative
+        Send-Smtp4devMessage $server 'HTML only' -Body (New-Text 'html' 'utf-8' $htmlText 'Base64')
+
+        $passwords = Set-TestAccount 'config-read' $server.ImapPort -Policies @{ inbox = @{ DenyFolders = @('Inbox') }; two = @{ MaxMessages = 2 } } -Accounts @{
+            local  = @{}
+            denied = @{ Policy = 'inbox' }
+            two    = @{ Policy = 'two' }
+        }
+        $messages = Get-ImapMessage local
+        function Get-TestUid([string]$Subject) { ($messages | Where-Object Subject -EQ $Subject).Uid }
+    }
+
+    AfterAll {
+        Stop-Smtp4dev $server
+        foreach ($name in $passwords) { [Environment]::SetEnvironmentVariable($name, $null) }
+        $env:IMAP_CONFIG_DIR = $null
+    }
+
+    # The texts are named by their variables, which BeforeAll sets after the cases are made
+    It 'reads the text of <Subject>, decoded' -TestCases @(
+        @{ Subject = 'Base64 UTF-8'; TextVariable = 'utf8Text'; Format = 'Text' }
+        @{ Subject = 'Quoted-printable ISO-8859-1'; TextVariable = 'latinText'; Format = 'Text' }
+        @{ Subject = 'Alternative'; TextVariable = $null; Format = 'Text' }
+        @{ Subject = 'HTML only'; TextVariable = 'htmlText'; Format = 'Html' }
+    ) {
+        $result = Read-ImapMessage local -Uid (Get-TestUid $Subject)
+        $expected = if ($TextVariable) { Get-Variable $TextVariable -ValueOnly } else { 'Plain version.' }
+
+        $result.Subject | Should -Be $Subject
+        $result.Text | Should -BeExactly $expected
+        $result.Format | Should -Be $Format
+        $result.Truncated | Should -BeFalse
+        $result.Attachments.Count | Should -Be 0
+    }
+
+    It 'gives the HTML with -Html, and the plain text of a message that has no HTML' {
+        (Read-ImapMessage local -Uid (Get-TestUid 'Alternative') -Html).Text | Should -BeExactly '<p>HTML <b>version</b>.</p>'
+        $plain = Read-ImapMessage local -Uid (Get-TestUid 'Base64 UTF-8') -Html
+
+        $plain.Format | Should -Be 'Text'
+        $plain.Text | Should -BeExactly $utf8Text
+    }
+
+    It 'cuts the text at -MaxLength, saying so' {
+        $result = Read-ImapMessage local -Uid (Get-TestUid 'Base64 UTF-8') -MaxLength 7
+
+        $result.Text | Should -BeExactly $utf8Text.Substring(0, 7)
+        $result.Truncated | Should -BeTrue
+    }
+
+    It 'reads the messages piped from Get-ImapMessage, with one connection, and marks nothing as read' {
+        $output = Get-ImapMessage local | Read-ImapMessage -Verbose 4>&1
+
+        $result = @($output | Where-Object { $_ -isnot [System.Management.Automation.VerboseRecord] })
+        $result.Subject | Should -Be 'HTML only', 'Alternative', 'Quoted-printable ISO-8859-1', 'Base64 UTF-8'
+        @($output | Where-Object { $_ -is [System.Management.Automation.VerboseRecord] -and $_.Message -like 'Connecting to*' }).Count | Should -Be 1
+        (Get-ImapFolder local Inbox).Unread | Should -Be 4
+    }
+
+    It 'reports a UID that is not in the folder' {
+        $result = Read-ImapMessage local -Uid 9999 -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $result | Should -BeNullOrEmpty
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'MessageNotFound,*'
+    }
+
+    It 'refuses to read a message when the folder was numbered anew since it was listed' {
+        $listed = [PSCustomObject]@{ Account = 'local'; Folder = 'INBOX'; Uid = (Get-TestUid 'Alternative'); UidValidity = $messages[0].UidValidity + 1 }
+        $result = $listed | Read-ImapMessage -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $result | Should -BeNullOrEmpty
+        $errors.Count | Should -Be 1
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'UidValidityChanged,*'
+    }
+
+    It 'refuses a folder name that stands for more than one folder' {
+        $result = Read-ImapMessage local -Folder '*' -Uid 1 -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $result | Should -BeNullOrEmpty
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'FolderAmbiguous,*'
+    }
+
+    It 'refuses a message of a denied folder, saying why' {
+        $result = Read-ImapMessage denied -Uid (Get-TestUid 'Alternative') -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $result | Should -BeNullOrEmpty
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'MessageWithheld,*'
+        "$($errors[0])" | Should -BeLike "*was not read: The folder 'INBOX' is in DenyFolders of the policy 'inbox'."
+    }
+
+    It 'reads no more than MaxMessages in a command, saying how many it left out' {
+        $result = Read-ImapMessage two -Uid $messages.Uid -WarningVariable warnings -WarningAction SilentlyContinue
+
+        $result.Count | Should -Be 2
+        "$warnings" | Should -Be "The policy 'two' lets one command read 2 messages of tester: 2 more were not read."
     }
 }
