@@ -18,9 +18,14 @@ function Get-AccountDirectory {
     # A relative IMAP_CONFIG_DIR is resolved here against the current location: the .NET file calls that
     # keep the passwords would resolve it against the process folder, which Set-Location does not change
     if ($env:IMAP_CONFIG_DIR) { return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:IMAP_CONFIG_DIR) }
-    # Without DoNotVerify, a folder that does not exist yet (~/.config of a new Linux user, a container)
-    # comes back as '', and even reading by the IMAP_* variables would fail
-    return Join-Path ([Environment]::GetFolderPath('ApplicationData', 'DoNotVerify')) 'ElektoImapPosh'
+    # Without DoNotVerify, a folder that does not exist yet comes back as '', and even reading by the IMAP_*
+    # variables would fail
+    if ($IsWindows) { return Join-Path ([Environment]::GetFolderPath('ApplicationData', 'DoNotVerify')) 'ElektoImapPosh' }
+    # Linux and macOS alike, as command-line tools do: since .NET 8, ApplicationData is ~/Library/Application
+    # Support on macOS. On Linux this is what .NET gives (XDG_CONFIG_HOME, when an absolute path).
+    $configuration = $env:XDG_CONFIG_HOME
+    if (-not $configuration -or -not [IO.Path]::IsPathRooted($configuration)) { $configuration = Join-Path $HOME '.config' }
+    return Join-Path $configuration 'ElektoImapPosh'
 }
 
 function Get-AccountFilePath {
@@ -55,8 +60,14 @@ function Read-AccountFile {
     $path = Get-AccountFilePath
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
 
+    # A file that cannot be read stops the command: taken as empty, Set-ImapAccount would write over the accounts
     try {
-        $json = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable
+        $text = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
+    } catch {
+        throw "Could not read the accounts file '$path': $($_.Exception.Message)"
+    }
+    try {
+        $json = $text | ConvertFrom-Json -AsHashtable
     } catch {
         throw "The accounts file '$path' is not valid JSON: $($_.Exception.Message)"
     }
@@ -80,6 +91,8 @@ function Read-AccountFile {
             }
             $sameName = @($accounts.psbase.Keys | Where-Object { $_ -eq $name })
             if ($sameName) { throw "The accounts '$($sameName[0])' and '$name' in '$path' differ only in case, which makes them the same account: rename or remove one." }
+            $sameVariable = Find-PasswordVariableOwner $accounts.psbase.Keys $name
+            if ($sameVariable) { throw "The accounts '$sameVariable' and '$name' in '$path' would share the password variable $(Get-PasswordVariableName $name), which would give one the password of the other: rename one." }
             if ($entry.Value -isnot [System.Collections.IDictionary]) { throw "Account '$name' in '$path' must be a JSON object." }
 
             $settings = [ordered]@{}
@@ -115,6 +128,13 @@ function Read-AccountFile {
     return @{ Path = $path; Default = $default; Accounts = $accounts }
 }
 
+# The account of $Names whose password variable (IMAP_PASS_<ACCOUNT>, where all but letters and digits become
+# '_') would be that of $Name, such as work.prod for work-prod; or $null
+function Find-PasswordVariableOwner($Names, [string]$Name) {
+    $variable = Get-PasswordVariableName $Name
+    return @($Names | Where-Object { (Get-PasswordVariableName $_) -eq $variable })[0]
+}
+
 # Writes the accounts file, settings in a fixed order and without the empty ones
 function Write-AccountFile([string]$Default, [System.Collections.IDictionary]$Accounts) {
     $path = Get-AccountFilePath
@@ -133,7 +153,16 @@ function Write-AccountFile([string]$Default, [System.Collections.IDictionary]$Ac
 
     # A failure stops the caller here, before it stores or deletes a password that would then not match
     New-Item -ItemType Directory -Path (Split-Path -Path $path) -Force -ErrorAction Stop | Out-Null
-    Set-Content -LiteralPath $path -Value ($data | ConvertTo-Json -Depth 5) -Encoding utf8NoBOM -ErrorAction Stop
+    # Written beside it and then put in its place (a rename, atomic), so a write that fails or is interrupted
+    # leaves the previous file whole; with its mode, outside Windows
+    $temporary = "$path.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        Set-Content -LiteralPath $temporary -Value ($data | ConvertTo-Json -Depth 5) -Encoding utf8NoBOM -ErrorAction Stop
+        if (-not $IsWindows -and (Test-Path -LiteralPath $path)) { [IO.File]::SetUnixFileMode($temporary, [IO.File]::GetUnixFileMode($path)) }
+        [IO.File]::Move($temporary, $path, $true)
+    } finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction Ignore }
+    }
 }
 
 # The name of an account as the file spells it, or $null when the file has no such account
