@@ -36,7 +36,7 @@ Description = 'Read email by IMAP from PowerShell, from several accounts (Gmail 
 PowerShellVersion = '7.6'
 
 # Functions to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no functions to export.
-FunctionsToExport = @()
+FunctionsToExport = @('Get-ImapAccount', 'Set-ImapAccount', 'Remove-ImapAccount')
 
 # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no cmdlets to export.
 CmdletsToExport = @()

@@ -13,6 +13,77 @@ PowerShell 7.6 or later, on Windows, Linux or macOS. The module carries [MailKit
 
 ElektoImapPosh cannot share a PowerShell session with a module that loads the full MailKit (such as Mailozaurr): both have the same namespaces, and the import stops when the full one is already loaded. Import ElektoImapPosh first, or use another session.
 
+## Configuration
+
+There are two ways to configure the IMAP settings:
+
+- **Accounts**: named sets of settings, for machines that read more than one mailbox. Best for workstations and servers.
+- **Environment variables**: one set of settings, for CI/CD pipelines, containers and machines that read a single mailbox.
+
+When an account is in use (given with `-Account`, or the default account), the `IMAP_*` environment variables are ignored.
+
+The accounts and passwords are not those of [ElektoMailPosh](https://github.com/elekto-com-br/ElektoMailPosh): each module keeps its own, so reading can have an app password of its own, apart from the one for sending. For the same reason, ElektoImapPosh never reads the `SMTP_*` variables.
+
+### Accounts
+
+Create an account with `Set-ImapAccount`, which asks for the password without showing it:
+
+```powershell
+Set-ImapAccount -Name work -Server imap.gmail.com -User me@example.com -Password (Read-Host -AsSecureString 'Password') -Default
+Set-ImapAccount -Name personal -Server imap.gmail.com -User me@gmail.com -Password (Read-Host -AsSecureString 'Password')
+```
+
+`Set-ImapAccount` changes only the settings given (an empty value removes one), `Get-ImapAccount` lists the accounts and where each password comes from, and `Remove-ImapAccount` removes accounts and their stored passwords. Both take wildcards, and `Get-ImapAccount test* | Remove-ImapAccount -WhatIf` shows what would be removed. Account names complete with Tab.
+
+| Setting | Required | Default | Description |
+|---------|----------|---------|-------------|
+| `Server` | Yes | - | IMAP server address |
+| `Port` | No | `993` | IMAP server port |
+| `User` | Yes | - | IMAP user name, usually the email address |
+
+The settings are kept in `accounts.json`, in the folder `ElektoImapPosh` of your configuration folder (`%APPDATA%` on Windows, `~/.config` on Linux and macOS), or in the folder named by `IMAP_CONFIG_DIR`. It holds no passwords, so it can be read and edited by hand:
+
+```json
+{
+  "Default": "work",
+  "Accounts": {
+    "work": { "Server": "imap.gmail.com", "User": "me@example.com" },
+    "personal": { "Server": "imap.gmail.com", "Port": 993, "User": "me@gmail.com" }
+  }
+}
+```
+
+The file is read ignoring case, as PowerShell reads names: keys and settings can be written in any case, and `-Account WORK` reads from the account `work`. So two accounts whose names differ only in case are refused, since they would be the same account and share its password.
+
+#### Where the passwords go
+
+| Platform | Store | Protection |
+|----------|-------|------------|
+| Windows | Credential Manager, generic credential `ElektoImapPosh:<account>` | Encrypted with your logon (DPAPI), like any password Windows remembers |
+| Linux, macOS | File `secrets/<account>` next to `accounts.json` | Readable only by you (mode 600, folder 700), as with msmtp, ssh or `.pgpass`; a file others can read is refused |
+
+On any platform, the environment variable `IMAP_PASS_<ACCOUNT>` (the account name in upper case, other characters than letters and digits as `_`, e.g. `IMAP_PASS_WORK`) takes precedence over the stored password, for pipelines and services that get their secrets from the environment.
+
+On Windows the credential can also be stored or seen with the system tools: `cmdkey /generic:ElektoImapPosh:work /user:me@example.com /pass` asks for the password, and the credentials appear in Control Panel > Credential Manager > Windows Credentials.
+
+> [!WARNING]
+> **Scheduled tasks and services:** accounts and their passwords belong to the user who created them, so a task or service that runs as another user (SYSTEM, a service account, root) doesn't see them. On Windows, a scheduled task set to run whether the user is logged on or not with *Do not store password* (logon type S4U) runs as you but can't read the Credential Manager, which needs your logon password to decrypt. Such tasks should use the environment variables.
+
+### Environment Variables
+
+Without accounts, set the IMAP settings via environment variables. This keeps secrets out of your scripts and works with CI/CD secret management.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `IMAP_USER` | Yes | - | IMAP user name, usually the email address |
+| `IMAP_PASS` | Yes | - | IMAP password |
+| `IMAP_SERVER` | No | `imap.gmail.com` | IMAP server address |
+| `IMAP_PORT` | No | `993` | IMAP server port |
+
+### Server Notes
+
+- Gmail and Google Workspace need an [app password](https://myaccount.google.com/apppasswords), which requires 2-Step Verification. In Google Workspace, the administrator can turn app passwords off, and IMAP must be enabled for the users in the Admin console.
+
 ## Building from Source
 
 Building needs the [.NET SDK](https://dotnet.microsoft.com/download) 10 or later, which restores the mail libraries from NuGet:
