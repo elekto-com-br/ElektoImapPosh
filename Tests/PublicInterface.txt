@@ -1,0 +1,2 @@
+# The public interface of ElektoImapPosh, written by Tests/Get-PublicInterface.ps1. Tests/PublicInterface.Tests.ps1
+# fails when the module differs from it: regenerate it only for a change made on purpose.

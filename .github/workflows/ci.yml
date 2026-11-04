@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  build:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      # Actions are pinned by commit, tools by exact version: nothing new runs here unreviewed. The runner
+      # images bring PowerShell 7.6 and the .NET 10 SDK, which restores the mail libraries.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Pester and PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-PSResource -Name Pester -Version '[6.2.0]' -Repository PSGallery -TrustRepository -Quiet
+          Install-PSResource -Name PSScriptAnalyzer -Version '[1.25.0]' -Repository PSGallery -TrustRepository -Quiet
+
+      # Restores the mail libraries (failing on a known vulnerability), parses every script, validates the
+      # manifest, runs PSScriptAnalyzer and the Pester tests, stages ./out/ElektoImapPosh and imports it.
+      - name: Build and test
+        shell: pwsh
+        run: ./Build.ps1

@@ -1,0 +1,28 @@
+# Nothing new arrives by itself: the actions in the workflows are pinned by commit SHA, and the mail
+# libraries by Dependencies/packages.lock.json. Dependabot proposes new versions in pull requests, where
+# the CI builds and tests them. The PowerShell tools pinned in the workflows (Pester, PSScriptAnalyzer)
+# are not covered: bump them by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns:
+          - '*'
+
+  # MailKitLite and MimeKitLite are released together, and MailKitLite requires the matching MimeKitLite
+  - package-ecosystem: nuget
+    directory: /Dependencies
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+    groups:
+      mail-libraries:
+        patterns:
+          - '*'

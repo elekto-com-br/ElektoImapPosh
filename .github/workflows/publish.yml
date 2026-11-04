@@ -1,0 +1,118 @@
+name: Publish to PowerShell Gallery
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Everything that runs third-party code (PSScriptAnalyzer, Pester) runs here, without the Gallery API key
+  build:
+    name: Validate & Stage
+    runs-on: ubuntu-latest
+
+    steps:
+      # Actions are pinned by commit, tools by exact version, the mail libraries by the hashes in their lock
+      # file: nothing new runs here unreviewed
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Extract version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Install PSScriptAnalyzer and Pester
+        shell: pwsh
+        run: |
+          Install-PSResource -Name PSScriptAnalyzer -Version '[1.25.0]' -Repository PSGallery -TrustRepository -Quiet
+          Install-PSResource -Name Pester -Version '[6.2.0]' -Repository PSGallery -TrustRepository -Quiet
+
+      # Restores the mail libraries, parses every script, validates the manifest (and that it matches the
+      # tag), runs PSScriptAnalyzer and the tests, stages ./out/ElektoImapPosh and imports it.
+      - name: Validate and stage
+        shell: pwsh
+        run: ./Build.ps1 -ExpectedVersion $env:VERSION
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package
+          path: out/ElektoImapPosh
+          if-no-files-found: error
+          retention-days: 7
+
+  # The API key exists only here, in a job that installs nothing: it takes the staged package and
+  # publishes it with PSResourceGet, which ships with PowerShell
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions: {}
+
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package
+          path: out/ElektoImapPosh
+
+      - name: Publish
+        shell: pwsh
+        env:
+          PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
+        run: |
+          if (-not $env:PSGALLERY_API_KEY) { throw "Secret PSGALLERY_API_KEY is not set." }
+          Publish-PSResource -Path ./out/ElektoImapPosh -Repository PSGallery -ApiKey $env:PSGALLERY_API_KEY
+
+  # Once the package is on the Gallery: a GitHub release for the tag, with that version's notes from
+  # the manifest and the package as a zip for machines without the Gallery. The token that can write
+  # to the repository exists only here, in a job that installs nothing.
+  release:
+    name: GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package
+          path: out/ElektoImapPosh
+
+      - name: Create the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $manifest = Import-PowerShellDataFile ./out/ElektoImapPosh/ElektoImapPosh.psd1
+          $version = $manifest.ModuleVersion
+          $pattern = '(?ms)^## ' + [regex]::Escape($version) + '[ \t]*\r?\n(.*?)(?=^## |\z)'
+          $section = [regex]::Match($manifest.PrivateData.PSData.ReleaseNotes, $pattern).Groups[1].Value.Trim()
+          if (-not $section) { throw "The manifest has no release notes for $version." }
+
+          $zip = "ElektoImapPosh-$version.zip"
+          Compress-Archive -Path ./out/ElektoImapPosh -DestinationPath $zip
+
+          $fence = '```'
+          $notes = @(
+              $section
+              ''
+              "Install it from the [PowerShell Gallery](https://www.powershellgallery.com/packages/ElektoImapPosh/$version):"
+              ''
+              "${fence}powershell"
+              "Install-Module -Name ElektoImapPosh -RequiredVersion $version"
+              $fence
+              ''
+              'Without access to the Gallery, extract `' + $zip + '` into a folder listed in `$env:PSModulePath`.'
+          )
+          Set-Content -Path notes.md -Value $notes -Encoding utf8
+
+          gh release create $env:GITHUB_REF_NAME $zip --repo $env:GITHUB_REPOSITORY --verify-tag `
+              --title $env:GITHUB_REF_NAME --notes-file notes.md

@@ -1,0 +1,26 @@
+<!--
+  The mail libraries the module ships. This project is only restored, never built: Build.ps1 restores it
+  as pinned by packages.lock.json and copies the net10.0 assemblies to ./lib. It is a project so that
+  Dependabot proposes the updates, and so that the NuGet audit fails the restore on a known vulnerability,
+  in these packages or in theirs.
+
+  The Lite packages are MailKit and MimeKit without BouncyCastle, which makes most of the weight of the
+  full ones and serves S/MIME, PGP and DKIM, none of which reading mail by IMAP needs.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NuGetAudit>true</NuGetAudit>
+    <NuGetAuditMode>all</NuGetAuditMode>
+    <NuGetAuditLevel>low</NuGetAuditLevel>
+    <WarningsAsErrors>$(WarningsAsErrors);NU1901;NU1902;NU1903;NU1904</WarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MailKitLite" Version="4.18.1" />
+    <PackageReference Include="MimeKitLite" Version="4.18.1" />
+  </ItemGroup>
+
+</Project>
