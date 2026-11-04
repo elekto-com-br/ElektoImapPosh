@@ -23,6 +23,8 @@ Only the settings given are changed. An empty value removes a setting.
 
 .PARAMETER Name
 The name of the account: letters, digits, '.', '-' and '_', starting with a letter or digit.
+A new account cannot differ from another only in case or in '.', '-' and '_' (work.prod and
+work-prod): both would read their password from the same IMAP_PASS_<NAME> variable.
 
 .PARAMETER Server
 The IMAP server, such as imap.gmail.com. Required for a new account.
@@ -71,6 +73,12 @@ Function Set-ImapAccount {
     # An existing account keeps the spelling of its name
     $existingName = Find-AccountName $file $Name
     if ($existingName) { $Name = $existingName }
+    else {
+        $sameVariable = Find-PasswordVariableOwner $accounts.psbase.Keys $Name
+        if ($sameVariable) {
+            throw "Account '$Name' would share the password variable $(Get-PasswordVariableName $Name) with the account '$sameVariable', which would give one the password of the other: choose a name that differs in its letters or digits."
+        }
+    }
     $settings = [ordered]@{}
     if ($existingName) { foreach ($key in $accounts[$Name].psbase.Keys) { $settings[$key] = $accounts[$Name][$key] } }
 

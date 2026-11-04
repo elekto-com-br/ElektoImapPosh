@@ -137,6 +137,8 @@ function Read-StoredPassword([string]$Account) {
     if ([IO.File]::GetUnixFileMode($path) -band $othersAccess) {
         throw "The password file '$path' can be read by other users. Restrict it with: chmod 600 '$path'"
     }
+    # The file may be written by hand (echo, an editor), which ends it with a newline that is not part of the
+    # password; one that really ends in CR or LF cannot be typed at Read-Host
     return ([IO.File]::ReadAllText($path)).TrimEnd("`r", "`n")
 }
 
@@ -173,7 +175,8 @@ function Clear-StoredPassword([string]$Account) {
 
     $path = Get-PasswordFilePath $Account
     if (-not (Test-Path -LiteralPath $path)) { return $false }
-    Remove-Item -LiteralPath $path -Force
+    # A file that stays is an error that stops the caller, not a password reported as deleted
+    Remove-Item -LiteralPath $path -Force -ErrorAction Stop
     return $true
 }
 
