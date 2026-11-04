@@ -107,7 +107,7 @@ Gmail has no read-only IMAP password, so ElektoImapPosh guards the mailbox itsel
 
 ### Policies
 
-A policy says what the commands may read from the accounts that follow it. It is meant above all for mailboxes read by AI agents: it keeps the full text of some messages, and some attachments, from being read by accident, limits how much one command downloads, and makes your intent explicit. The commands that read messages (not in this version yet) follow it.
+A policy says what the commands may read from the accounts that follow it. It is meant above all for mailboxes read by AI agents: it keeps the full text of some messages, and some attachments, from being read by accident, limits how much one command downloads, and makes your intent explicit. The commands that read messages follow it: `Get-ImapMessage` says of each message whether its body may be read, and why not.
 
 ```powershell
 Set-ImapPolicy agent -DenyFolders 'Finance/*', Junk -DenyReadFrom '*@bank.example' -MaxAgeDays 90 -MaxMessages 200 -MaxMessageSize 25MB
@@ -117,21 +117,24 @@ Get-ImapPolicy                  # the policies, and the accounts that follow eac
 
 | Setting | What it does |
 |---------|--------------|
-| `DenyFolders` | Folders whose messages are listed but not read nor changed: full names, special uses (`Junk`, `Trash`...) or patterns, as `-Folder` takes them |
+| `DenyFolders` | Folders whose messages are listed but not read nor changed: full names, special uses (`Junk`, `Trash`...) or patterns, as `-Folder` takes them. On Gmail, also the messages with their label, wherever they are read from |
 | `AllowReadFrom` | The senders whose messages may be read in full; those of any other sender are withheld |
 | `DenyReadFrom` | The senders whose messages are withheld, even if `AllowReadFrom` names them |
 | `AllowAttachmentsFrom` | The senders whose attachments may be saved |
 | `AllowAttachmentTypes` | The attachments that may be saved, by MIME type (`application/pdf`, `image/*`) or by file name (`*.pdf`) |
 | `DenyAttachmentTypes` | The attachments that may not be saved, even if `AllowAttachmentTypes` names them: denied when either the type or the name matches |
-| `MaxAgeDays` | Older messages are not searched nor read |
-| `MaxMessages` | How many messages one command may handle |
+| `MaxAgeDays` | Older messages are not searched nor read: every search is narrowed to these days |
+| `MaxMessages` | How many messages of each account one command may handle, over all its folders |
 | `MaxMessageSize` | The largest message read in full, in bytes (`25MB`); of a larger one, only its metadata |
 | `MaxAttachmentSize` | The largest attachment that may be saved, in bytes (`10MB`) |
 | `TrustAuthenticationResults` | The receiving server whose `Authentication-Results` headers tell an authenticated sender: `mx.google.com` on Gmail |
 
 - Senders are addresses or wildcard patterns (`jp@example.com`, `*@example.com`), read ignoring case. Anyone can write any address as the sender, so the allow lists match only a sender authenticated by the server named in `TrustAuthenticationResults` (the topmost of its headers says that DMARC passed for the domain of the sender); without it, they pass no sender. The deny lists match the sender as the message gives it, since a forged sender there only withholds more.
+- Your own messages, in the sent folder, have no such header: they count as authenticated, so an allow list that names your address lets them be read. The sent folder is the one the server marks so, or else, on a server that marks none, the folder named `Sent`; on Gmail, the messages with the label `\Sent` too.
 - An allow list, when given, withholds what it does not name, and a deny list wins over it. An account without a policy allows all reading.
-- What a policy withholds is the body and the attachments. The metadata of every message (sender, recipients, subject, date, labels, the names and sizes of its attachments) can always be read, and a message withheld says so, rather than missing without a word.
+- What a policy withholds is the body and the attachments. The metadata of every message (sender, recipients, subject, date, labels, the names and sizes of its attachments) can always be read, and a message withheld says so, rather than missing without a word: `Get-ImapMessage` lists it, with the reason in its property `Withheld`.
+- On Gmail, a label is a folder, a message is in the folder of each of its labels, and All Mail holds them all. A message with the label of a denied folder is therefore withheld wherever it is read from: All Mail (where `-Query` searches), the inbox or another label. The system labels (`\Inbox`, `\Sent`, `\Important`...) stand for their special folders.
+- A command never goes beyond the limits: `-Since` earlier than `MaxAgeDays` allows is narrowed to its days, with a warning, and `-First` is lowered to what `MaxMessages` leaves; when that leaves messages out, a warning says how many.
 - `Set-ImapPolicy` changes only the settings given (an empty list or value removes one, and `0` removes a limit), `Get-ImapPolicy` lists the policies and the accounts that follow each, and `Remove-ImapPolicy` removes those that no account follows. Several accounts may follow the same policy. Without accounts, `IMAP_POLICY` names the policy.
 - An account whose policy does not exist (in a file edited by hand, say) reads nothing: its commands stop with a `PolicyNotFound` error.
 - In `accounts.json`, the policies are kept apart from the accounts, as `"Policies": { "agent": { "DenyFolders": ["Junk"], "MaxMessages": 200 } }`, and an account follows one with `"Policy": "agent"`.
@@ -181,6 +184,32 @@ work    [Gmail]/Todos os e-mails All         9731      3
 ```
 
 Gmail translates the names of its special folders, so `-Folder` also takes their special use, the same in any language: `Inbox`, `All`, `Archive`, `Drafts`, `Flagged`, `Important`, `Junk`, `Sent` and `Trash`. It stands for the folder the server marks so, or else, on a server that marks none, for the folder of that name. `-Folder` takes full folder names too (`'[Gmail]/Sent Mail'`, `Clients/2026`), ignoring case, and wildcards; a name that matches no folder is a `FolderNotFound` error, a pattern that matches none is not. Folders piped from `Get-ImapFolder` are taken by their exact full name, so a label of your own named `Sent` stays that label. Each command opens one connection per account and lists its folders once, however many folders it reads.
+
+### Listing Messages
+
+`Get-ImapMessage` searches folders, on the server, and lists the newest messages that match, with their metadata: sender, recipients, subject, the date the server received them, size, flags, whether they have attachments and, on Gmail, their thread and labels. It downloads no body and marks nothing as read. Without `-Folder` it searches the inbox, and `-First` (50 by default) says how many messages of each folder it returns, the newest first:
+
+```powershell
+Get-ImapMessage                                      # the 50 newest messages in the inbox of the default account
+Get-ImapMessage -Account * -Unread -Since (Get-Date).AddDays(-7)
+Get-ImapMessage work -Folder Sent -Subject proposal -First 10
+Get-ImapFolder work -Folder 'Clients/*' | Get-ImapMessage -From client.example
+```
+
+```
+   Folder: INBOX (work)
+
+  Uid Date             Marks                From                           Subject
+  --- ----             -----                ----                           -------
+12045 2026-11-04 09:12 unread               Ana Souza <ana@client.example> Proposal for 2027
+12044 2026-11-04 08:40 attachments withheld Bank <alerts@bank.example>     Your statement
+```
+
+- `-From` and `-Subject` find part of the text, ignoring case, and `-Since` takes the day the server received the message. The server makes the search.
+- `Date` is when the server received the message, which the sender cannot forge, and the day `-Since` and `MaxAgeDays` go by.
+- On Gmail and Google Workspace, `-Query` takes a search as typed in the search box of Gmail, and searches All Mail unless `-Folder` says otherwise: `Get-ImapMessage work -Query 'from:bank.example has:attachment newer_than:30d'`. Elsewhere it is a `QueryNotSupported` error.
+- Each message carries its `Account`, `Folder` and `Uid`, which identify it, and `UidValidity`, which changes when the server numbers the folder anew.
+- Under a policy, `Withheld` says why the body of a message may not be read: `Get-ImapMessage | Where-Object Withheld | Select-Object From, Subject, Withheld`.
 
 ## Building from Source
 

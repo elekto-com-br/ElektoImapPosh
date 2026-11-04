@@ -19,6 +19,10 @@
 # An allow list, when present, denies what it does not name; a deny list wins. Senders and attachments are wildcard
 # patterns, ignoring case: senders such as *@example.com, attachments a MIME type when they have a "/" (image/*) and
 # a file name otherwise (*.pdf). Sizes are in bytes.
+# Every command that reads messages makes one check, Get-WithheldReason, on the metadata of each message, before its
+# body or an attachment is fetched: a message withheld is still listed, saying why. On Gmail a message is in every
+# folder its labels name (All Mail holds them all), so a label that names a denied folder withholds it too. Messages
+# in the sent folder are the user's own and have no Authentication-Results: they count as authenticated.
 
 # Each setting of a policy, in the order of the file, with its kind of value
 $script:PolicySettings = [ordered]@{
@@ -118,6 +122,107 @@ function Find-PolicyName($File, [string]$Name) {
 # The accounts of the file that follow a policy
 function Get-PolicyAccount($File, [string]$Name) {
     return , @($File.Accounts.psbase.Keys | Where-Object { $File.Accounts[$_].Policy -eq $Name })
+}
+
+# The Gmail system labels (X-GM-LABELS), and the special uses of the folders they stand for
+$script:SystemLabels = @{
+    '\Inbox' = 'Inbox'; '\Sent' = 'Sent'; '\Draft' = 'Drafts'; '\Drafts' = 'Drafts'; '\Important' = 'Important'
+    '\Starred' = 'Flagged'; '\Flagged' = 'Flagged'; '\Spam' = 'Junk'; '\Junk' = 'Junk'; '\Trash' = 'Trash'
+}
+
+# The first day whose messages a policy lets the commands search and read (MaxAgeDays), or $null without that limit
+function Get-PolicyStartDate($Policy) {
+    if (-not $Policy -or -not $Policy.MaxAgeDays) { return $null }
+    return [datetime]::Today.AddDays(-$Policy.MaxAgeDays)
+}
+
+# The full names of the folders a Gmail label stands for, as the listing spells them: a system label, the folder of its
+# special use; any other, the folder of that name, ignoring case
+function Get-LabelFolder($Folders, [string]$Label) {
+    $use = $script:SystemLabels[$Label]
+    $found = if ($use) { Select-ImapFolder $Folders $use } else { , @($Folders | Where-Object { $_.FullName -eq $Label }) }
+    return , [string[]]@($found | ForEach-Object { $_.FullName })
+}
+
+# The folders of a session that its policy names, found once in its listing, as sets of full names as it spells them:
+# Denied, those of DenyFolders (as -Folder takes them), and Sent, the sent folder, whose messages are the user's own
+function Get-PolicyFolderSet($Session) {
+    if ($Session.PolicyFolders) { return $Session.PolicyFolders }
+    # Without the listing, DenyFolders would find no folder, and withhold nothing
+    if (-not $Session.ContainsKey('Folders')) { throw 'The folders of the mailbox must be listed before its policy is applied.' }
+    $denied = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($pattern in $Session.Settings.Policy.DenyFolders) {
+        foreach ($folder in (Select-ImapFolder $Session.Folders $pattern)) { $null = $denied.Add($folder.FullName) }
+    }
+    $sent = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($folder in (Select-ImapFolder $Session.Folders 'Sent')) { $null = $sent.Add($folder.FullName) }
+    $Session.PolicyFolders = @{ Denied = $denied; Sent = $sent }
+    return $Session.PolicyFolders
+}
+
+# Whether the receiving server named by a policy (TrustAuthenticationResults) authenticated the sender of a message:
+# the topmost Authentication-Results header, which the receiving server adds above any that came with the message, is
+# from that server and says that DMARC passed for the domain of the From. A message with more than one sender in its
+# From, or none, has no sender to authenticate.
+function Test-AuthenticatedSender($Summary, [string]$Server) {
+    $senders = @($Summary.Envelope.From.Mailboxes)
+    if (-not $Server -or $senders.Count -ne 1) { return $false }
+    $header = @($Summary.Headers | Where-Object { $_.Field -eq 'Authentication-Results' })[0]
+    $results = $null
+    if (-not $header -or -not [MimeKit.Cryptography.AuthenticationResults]::TryParse($header.RawValue, [ref]$results)) { return $false }
+    if ($results.AuthenticationServiceIdentifier -ne $Server) { return $false }
+    foreach ($result in $results.Results) {
+        if ($result.Method -ne 'dmarc' -or $result.Result -ne 'pass') { continue }
+        $domains = @($result.Properties | Where-Object { $_.PropertyType -eq 'header' -and $_.Property -eq 'from' } | ForEach-Object { $_.Value })
+        if ($domains -contains $senders[0].Domain) { return $true }
+    }
+    return $false
+}
+
+# Why the policy of a session withholds the body and the attachments of a message, in a sentence, or $null when it does
+# not. The one check for every command that reads messages, made on the summary that Get-ImapMessageSummary fetches,
+# before the body or an attachment is; $Folder is the folder the message was read from. Fails closed: a message whose
+# date or size is unknown is withheld by a limit on them.
+function Get-WithheldReason($Session, $Folder, $Summary) {
+    $policy = $Session.Settings.Policy
+    if (-not $policy) { return $null }
+    $of = "of the policy '$($policy.Name)'"
+    $places = Get-PolicyFolderSet $Session
+
+    if ($places.Denied.Contains($Folder.FullName)) { return "The folder '$($Folder.FullName)' is in DenyFolders $of." }
+    $own = $places.Sent.Contains($Folder.FullName)
+    foreach ($label in $Summary.GMailLabels) {
+        foreach ($name in (Get-LabelFolder $Session.Folders $label)) {
+            if ($places.Denied.Contains($name)) { return "It has the label '$label', and the folder '$name' is in DenyFolders $of." }
+            if ($places.Sent.Contains($name)) { $own = $true }
+        }
+    }
+
+    # The day as the server keeps it, without changing its time zone: the one its SINCE compares
+    $start = Get-PolicyStartDate $policy
+    if ($start -and -not ($Summary.InternalDate -and $Summary.InternalDate.Date -ge $start)) {
+        return "It was received before $($start.ToString('yyyy-MM-dd')), and MaxAgeDays $of is $($policy.MaxAgeDays)."
+    }
+    if ($policy.MaxMessageSize -and -not ($null -ne $Summary.Size -and $Summary.Size -le $policy.MaxMessageSize)) {
+        return "It has $($Summary.Size) bytes, more than MaxMessageSize $of ($($policy.MaxMessageSize))."
+    }
+
+    $senders = @($Summary.Envelope.From.Mailboxes | ForEach-Object { $_.Address })
+    foreach ($pattern in $policy.DenyReadFrom) {
+        $match = @($senders | Where-Object { $_ -like $pattern })
+        if ($match.Count) { return "The sender $($match[0]) matches '$pattern' in DenyReadFrom $of." }
+    }
+    if ($policy.AllowReadFrom) {
+        $server = $policy.TrustAuthenticationResults
+        if (-not $own -and -not (Test-AuthenticatedSender $Summary $server)) {
+            if (-not $server) { return "AllowReadFrom $of passes only authenticated senders, and the policy has no TrustAuthenticationResults to authenticate them." }
+            return "The sender is not authenticated by $server (no DMARC pass for the domain of the From), and AllowReadFrom $of passes only authenticated senders."
+        }
+        if ($senders.Count -eq 0) { return "It has no sender, and AllowReadFrom $of passes only the senders it names." }
+        $outside = @($senders | Where-Object { $address = $_; -not @($policy.AllowReadFrom | Where-Object { $address -like $_ }).Count })
+        if ($outside.Count) { return "The sender $($outside[0]) is not in AllowReadFrom $of." }
+    }
+    return $null
 }
 
 # Adds to the settings of a connection the policy named by its account (or by IMAP_POLICY, without one) as Policy:

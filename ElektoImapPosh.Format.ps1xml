@@ -27,5 +27,35 @@
         </TableRowEntries>
       </TableControl>
     </View>
+    <View>
+      <Name>ElektoImapPosh.Message</Name>
+      <ViewSelectedBy>
+        <TypeName>ElektoImapPosh.Message</TypeName>
+      </ViewSelectedBy>
+      <GroupBy>
+        <ScriptBlock>if ($_.Account) { "$($_.Folder) ($($_.Account))" } else { $_.Folder }</ScriptBlock>
+        <Label>Folder</Label>
+      </GroupBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Uid</Label><Alignment>Right</Alignment></TableColumnHeader>
+          <TableColumnHeader><Label>Date</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Marks</Label></TableColumnHeader>
+          <TableColumnHeader><Label>From</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Subject</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Uid</PropertyName></TableColumnItem>
+              <TableColumnItem><ScriptBlock>if ($_.Date) { $_.Date.ToString('yyyy-MM-dd HH:mm') }</ScriptBlock></TableColumnItem>
+              <TableColumnItem><ScriptBlock>@(if (-not ($_.Flags -band [MailKit.MessageFlags]::Seen)) { 'unread' }; if ($_.HasAttachments) { 'attachments' }; if ($_.Withheld) { 'withheld' }) -join ' '</ScriptBlock></TableColumnItem>
+              <TableColumnItem><PropertyName>From</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Subject</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
   </ViewDefinitions>
 </Configuration>

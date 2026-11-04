@@ -56,13 +56,18 @@ function Stop-Smtp4dev($Server) {
 
 # Delivers a message to smtp4dev by SMTP, where it lands in the INBOX of its IMAP server. The
 # login is needed when smtp4dev was started with --authenticationrequired, which applies to SMTP as well.
-function Send-Smtp4devMessage($Server, [string]$Subject, [Net.NetworkCredential]$Login) {
+# smtp4dev adds no header: those of a receiving server (-AuthenticationResults, the topmost first) go on top
+# of the message as given. -Padding adds about that many characters to the body, in lines of 80.
+function Send-Smtp4devMessage($Server, [string]$Subject, [Net.NetworkCredential]$Login, [string]$From = 'Sender <sender@example.com>', [string[]]$AuthenticationResults = @(), [int]$Padding) {
     $message = [MimeKit.MimeMessage]::new()
-    $message.From.Add([MimeKit.MailboxAddress]::new('Sender', 'sender@example.com'))
+    $message.From.AddRange([MimeKit.InternetAddressList]::Parse($From))
     $message.To.Add([MimeKit.MailboxAddress]::new('Tester', 'tester@example.com'))
     $message.Subject = $Subject
+    for ($i = 0; $i -lt $AuthenticationResults.Count; $i++) {
+        $message.Headers.Insert($i, [MimeKit.Header]::new('Authentication-Results', $AuthenticationResults[$i]))
+    }
     $message.Body = [MimeKit.TextPart]::new('plain')
-    $message.Body.Text = "The body of $Subject."
+    $message.Body.Text = "The body of $Subject.`n" + (('x' * 79 + "`n") * [Math]::Ceiling($Padding / 80))
     $smtp = [MailKit.Net.Smtp.SmtpClient]::new()
     try {
         $smtp.Connect('127.0.0.1', $Server.SmtpPort, [MailKit.Security.SecureSocketOptions]::None)
