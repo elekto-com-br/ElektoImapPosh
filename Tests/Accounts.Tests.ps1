@@ -17,8 +17,17 @@ BeforeAll {
     New-Item -ItemType Directory -Path $env:IMAP_CONFIG_DIR | Out-Null
     $accountsFile = Join-Path $env:IMAP_CONFIG_DIR 'accounts.json'
 
+    # Resolve-ImapConfiguration as a command calls it, with a stand-in for its $PSCmdlet; the error it
+    # reports is thrown here, for Should -Throw
     function Resolve-Configuration([string]$Account) {
-        InModuleScope ElektoImapPosh -Parameters @{ Account = $Account } { param($Account) Resolve-ImapConfiguration $Account }
+        $cmdlet = [pscustomobject]@{ Errors = [System.Collections.Generic.List[object]]::new() }
+        $cmdlet | Add-Member -MemberType ScriptMethod -Name WriteError -Value { param($record) $this.Errors.Add($record) }
+        $settings = InModuleScope ElektoImapPosh -Parameters @{ Cmdlet = $cmdlet; Account = $Account } {
+            param($Cmdlet, $Account)
+            Resolve-ImapConfiguration $Cmdlet $Account
+        }
+        if ($cmdlet.Errors.Count -gt 0) { throw $cmdlet.Errors[0].Exception.Message }
+        return $settings
     }
 }
 
