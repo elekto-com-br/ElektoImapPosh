@@ -198,12 +198,44 @@ Describe 'What a policy withholds' {
         Get-Reason @{ AllowReadFrom = @('me@gmail.com') } '[Gmail]/Sent Mail' (New-Summary '') | Should -Be "It has no sender, and AllowReadFrom of the policy 'agent' passes only the senders it names."
     }
 
+    # On Gmail every message has labels, and a mailbox may have hundreds of them: the check of each message must not
+    # search them all. Compared with itself on few folders, so that a slow machine does not fail it.
+    It 'checks a message in a time that does not grow with the number of folders' {
+        $milliseconds = InModuleScope ElektoImapPosh {
+            foreach ($count in 10, 1000) {
+                $folders = @([PSCustomObject]@{ FullName = '[Gmail]/All Mail'; Attributes = [MailKit.FolderAttributes]'All' }) +
+                    @(foreach ($i in 1..$count) { [PSCustomObject]@{ FullName = "Label $i"; Attributes = [MailKit.FolderAttributes]'None' } })
+                $session = @{ Settings = @{ Policy = @{ Name = 'agent'; DenyFolders = @('Finance/*') } }; Folders = $folders }
+                $summary = [PSCustomObject]@{ GMailLabels = @('\Inbox', '\Important', 'Label 5'); Envelope = [MailKit.Envelope]::new(); Size = 1000; InternalDate = [DateTimeOffset]::Now }
+                # The first check makes what the policy needs of the listing, once for the session
+                $null = Get-WithheldReason $session $folders[0] $summary
+                (Measure-Command { foreach ($i in 1..300) { $null = Get-WithheldReason $session $folders[0] $summary } }).TotalMilliseconds
+            }
+        }
+
+        $milliseconds[1] | Should -BeLessThan ($milliseconds[0] * 5) -Because "with 1000 folders ($($milliseconds[1]) ms) the check should take about as long as with 10 ($($milliseconds[0]) ms)"
+    }
+
     It 'refuses to apply a policy before the folders are listed, rather than withhold nothing' {
         {
             InModuleScope ElektoImapPosh {
                 Get-WithheldReason @{ Settings = @{ Policy = @{ Name = 'agent'; DenyFolders = @('Inbox') } } } ([PSCustomObject]@{ FullName = 'INBOX' }) $null
             }
         } | Should -Throw '*must be listed*'
+    }
+}
+
+Describe 'Addresses as the commands return them' {
+    It 'gives each address with its name, or alone, and none for no list' {
+        $result = InModuleScope ElektoImapPosh {
+            @{
+                List = Format-ImapAddress ([MimeKit.InternetAddressList]::Parse('Ana Souza <ana@client.example>, bob@client.example'))
+                None = Format-ImapAddress $null
+            }
+        }
+
+        $result.List | Should -Be 'Ana Souza <ana@client.example>', 'bob@client.example'
+        $result.None.Count | Should -Be 0
     }
 }
 
