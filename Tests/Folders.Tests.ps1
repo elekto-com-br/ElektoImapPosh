@@ -126,6 +126,32 @@ Describe 'Special uses' {
     }
 }
 
+# What every command that changes the mailbox asks first, whatever it changes: EXAMINE covers only the folder opened
+Describe 'The permission to change the mailbox' {
+    It 'is <Expected> for <Case>' -TestCases @(
+        @{ Case = 'an account that does not allow changes'; Settings = @{ Account = 'work'; User = 'me@example.com'; AllowWrite = $false }; Expected = $false; Hint = 'Set-ImapAccount work -AllowWrite' }
+        @{ Case = 'the IMAP_* variables without IMAP_ALLOW_WRITE'; Settings = @{ Account = $null; User = 'me@example.com'; AllowWrite = $false }; Expected = $false; Hint = 'IMAP_ALLOW_WRITE=true' }
+        @{ Case = 'an account that allows changes'; Settings = @{ Account = 'work'; User = 'me@example.com'; AllowWrite = $true }; Expected = $true; Hint = $null }
+    ) {
+        $cmdlet = [pscustomobject]@{ Errors = [System.Collections.Generic.List[object]]::new() }
+        $cmdlet | Add-Member -MemberType ScriptMethod -Name WriteError -Value { param($record) $this.Errors.Add($record) }
+
+        $allowed = InModuleScope ElektoImapPosh -Parameters @{ Cmdlet = $cmdlet; Session = @{ Settings = $Settings } } {
+            param($Cmdlet, $Session)
+            Test-ImapWriteAllowed $Cmdlet $Session 'Clients/2026'
+        }
+
+        $allowed | Should -Be $Expected
+        if ($Expected) {
+            $cmdlet.Errors.Count | Should -Be 0
+        } else {
+            $cmdlet.Errors.Count | Should -Be 1
+            $cmdlet.Errors[0].FullyQualifiedErrorId | Should -Be 'WriteNotAllowed'
+            "$($cmdlet.Errors[0])" | Should -BeLike "*'Clients/2026' was left as it is*$Hint*"
+        }
+    }
+}
+
 Describe 'Closing the connections of a command' {
     # The keys are account names, and a key hides a property of the same name
     It 'closes every connection, even with an account named Values (abort: <Abort>)' -TestCases @(
@@ -312,7 +338,7 @@ Describe 'Folders against smtp4dev' -Skip:(-not $smtp4devInstalled) {
         Get-OpenConnectionCount | Should -Be 0
     }
 
-    # Read-only by EXAMINE, which the server enforces: the guarantee that reading never changes the mailbox
+    # Read-only by EXAMINE, which the server enforces for the messages of the folder: reading never changes them
     It 'opens a folder read-only, and a message read stays unread' {
         $run = Invoke-InSession local {
             param($Cmdlet, $Session)

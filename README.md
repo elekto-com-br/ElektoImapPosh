@@ -86,8 +86,8 @@ Without accounts, set the IMAP settings via environment variables. This keeps se
 
 Gmail has no read-only IMAP password, so ElektoImapPosh guards the mailbox itself: unless an account allows changes, it only reads.
 
-- Folders are opened read-only (the IMAP command EXAMINE), so the server itself refuses any change made through that connection, and MailKit refuses to send one. Reading a message never marks it as read.
-- Commands that change the mailbox (marking as read, moving, labels: not in this version yet) need the account's permission, `Set-ImapAccount work -AllowWrite`, or `IMAP_ALLOW_WRITE=true` without accounts. Without it they stop with a `WriteNotAllowed` error. `-AllowWrite:$false` takes the permission back.
+- Commands that change the mailbox (marking as read, moving, labels, creating folders: not in this version yet) need the account's permission, `Set-ImapAccount work -AllowWrite`, or `IMAP_ALLOW_WRITE=true` without accounts. Without it they stop with a `WriteNotAllowed` error, before they change anything. `-AllowWrite:$false` takes the permission back.
+- Besides, folders are opened read-only (the IMAP command EXAMINE), so the server itself refuses changes to their messages, flags included, and MailKit refuses to send one. Reading a message never marks it as read. EXAMINE covers the folder opened, not the connection: that is why the permission above is checked for every change.
 
 `Get-ImapAccount` shows which accounts allow changes.
 

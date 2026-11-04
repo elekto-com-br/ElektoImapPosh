@@ -43,9 +43,10 @@ Makes this the default account. -Default:$false stops it from being the default.
 
 .PARAMETER AllowWrite
 Allows the commands that change the mailbox (to come: marking as read, moving, labels) to do so
-in this account. Without it, which is the default, ElektoImapPosh only reads: folders are opened
-read-only, which the server itself enforces, nothing is marked as read, and a command that would
-write stops with an error. -AllowWrite:$false takes the permission back.
+in this account. Without it, which is the default, ElektoImapPosh only reads: a command that would
+change the mailbox stops with an error, and folders are opened read-only, so that the server itself
+refuses changes to their messages and nothing is marked as read. -AllowWrite:$false takes the
+permission back.
 
 .EXAMPLE
 Set-ImapAccount -Name work -Server imap.gmail.com -User me@example.com -Password (Read-Host -AsSecureString 'Password') -Default

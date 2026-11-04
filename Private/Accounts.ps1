@@ -3,7 +3,8 @@
 # self-contained: while one is in use, the IMAP_* environment variables are ignored (its password may still
 # come from IMAP_PASS_<ACCOUNT>, see PasswordStore.ps1).
 # Writing needs a permission of the account, AllowWrite (or IMAP_ALLOW_WRITE), false unless set: without it
-# the module only reads, and folders are opened read-only, which the server enforces (see Open-ImapFolder).
+# the module only reads: folders are opened read-only, so the server refuses changes to their messages, and
+# every command that would change the mailbox asks Test-ImapWriteAllowed first (see Folders.ps1).
 
 $script:AccountSettingNames = @('Server', 'Port', 'User', 'AllowWrite')
 $script:AccountNamePattern = '^[A-Za-z0-9][A-Za-z0-9_.-]*$'
