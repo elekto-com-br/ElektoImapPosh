@@ -486,11 +486,12 @@ Describe 'Get-ImapMessage on Gmail' {
             @{ Uid = 1; ChangedElsewhere = $true; Text = 'Your statement is attached: total R$ 1.234,56.'; Folders = 'INBOX', '[Gmail]/All Mail', 'Finance/Bank'; Labels = '\Inbox', 'Finance/Bank'; ThreadId = 111; From = 'Bank <alerts@bank.example>'; Subject = 'Statement'; Date = $now.AddHours(-4); Size = 5000; Attachment = 'statement.pdf'; AuthenticationResults = 'mx.google.com; dmarc=pass header.from=bank.example'; Raw = 'has:attachment', 'from:bank.example' }
             @{ Uid = 2; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = '\Inbox', '\Important'; ThreadId = 222; From = 'Client <client@client.example>'; Subject = 'Proposal'; Date = $now.AddHours(-3); Size = 3000; Seen = $true; AuthenticationResults = 'mx.google.com; dmarc=pass header.from=client.example' }
             @{ Uid = 3; Folders = '[Gmail]/All Mail', '[Gmail]/Sent Mail'; Labels = '\Sent'; ThreadId = 222; From = 'Me <me@gmail.com>'; Subject = 'Re: Proposal'; Date = $now.AddHours(-2); Size = 2000; Seen = $true; Raw = 'in:sent proposal' }
-            @{ Uid = 4; Folders = '[Gmail]/All Mail', 'Sent'; Labels = @('Sent'); ThreadId = 444; From = 'Me <me@gmail.com>'; Subject = 'Labelled Sent'; Date = $now.AddHours(-1); Size = 1000 }
+            @{ Uid = 4; Folders = '[Gmail]/All Mail', 'Sent'; Labels = @('Sent'); ThreadId = 444; From = 'Me <me@gmail.com>'; Subject = 'Labelled Sent'; Date = $now.AddHours(-1); Size = 1000; Text = "Fine `u{1F600} thanks" }
         )
-        $passwords = Set-TestAccount 'gmail' $server.Port -Accounts @{ open = @{}; agent = @{ Policy = 'agent' }; recent = @{ Policy = 'recent' } } -Policies @{
+        $passwords = Set-TestAccount 'gmail' $server.Port -Accounts @{ open = @{}; agent = @{ Policy = 'agent' }; recent = @{ Policy = 'recent' }; one = @{ Policy = 'one' } } -Policies @{
             agent  = @{ DenyFolders = @('Finance/*'); AllowReadFrom = @('*@client.example', 'me@gmail.com'); TrustAuthenticationResults = 'mx.google.com' }
             recent = @{ MaxAgeDays = 30 }
+            one    = @{ MaxMessages = 1 }
         }
 
         # The SINCE of the last search the server got, as a date
@@ -611,6 +612,27 @@ Describe 'Get-ImapMessage on Gmail' {
         $result.Subject | Should -Be 'Re: Proposal'
         $result.Folder | Should -Be '[Gmail]/Sent Mail'
         $result.Text | Should -Be 'The body of Re: Proposal.'
+    }
+
+    # A character outside the BMP is two UTF-16 chars, and a cut between them would leave half of it, which JSON breaks on
+    It 'does not cut a character outside the BMP in two at -MaxLength' {
+        $result = Read-ImapMessage open -Folder All -Uid 4 -MaxLength 6
+
+        $result.Text | Should -BeExactly 'Fine '
+        $result.Truncated | Should -BeTrue
+        (Read-ImapMessage open -Folder All -Uid 4).Text | Should -BeExactly "Fine `u{1F600} thanks"
+    }
+
+    It 'opens and fetches nothing more once MaxMessages is spent' {
+        $listed = Get-ImapMessage open -Folder All
+        $before = $server.State.Commands.Count
+        $result = $listed | Read-ImapMessage -Account one -WarningVariable warnings -WarningAction SilentlyContinue
+
+        @($result).Count | Should -Be 1
+        "$warnings" | Should -Be "The policy 'one' lets one command read 1 message of tester: 3 more were not read."
+        $commands = @($server.State.Commands.ToArray() | Select-Object -Skip $before)
+        @($commands | Where-Object { $_ -like '* UID FETCH *' }).Count | Should -Be 2 -Because 'the summary and the text of the one message read are fetched, and nothing of the others'
+        @($commands | Where-Object { $_ -like '* EXAMINE *' }).Count | Should -Be 1
     }
 
     It 'takes a folder from the pipeline by its exact name, so a label "Sent" stays that label' {

@@ -103,6 +103,11 @@ Function Read-ImapMessage {
         if (-not $session) { return }
         $settings = $session.Settings
         $policy = $settings.Policy
+        # Once MaxMessages is spent, the messages that come are left out without opening their folder or fetching anything
+        if ($policy -and $policy.MaxMessages -and [int]$session.MessagesHandled -ge $policy.MaxMessages) {
+            $session.MessagesLeftOut = [int]$session.MessagesLeftOut + $Uid.Count
+            return
+        }
 
         $folders = Get-ImapFolderList $PSCmdlet $session
         if ($null -eq $folders) { return }
@@ -152,9 +157,14 @@ Function Read-ImapMessage {
             if ($null -eq $content) { continue }
             $text = $content.Text
             $truncated = [bool]($MaxLength -and $text -and $text.Length -gt $MaxLength)
-            if ($truncated) { $text = $text.Substring(0, $MaxLength) }
+            if ($truncated) {
+                # Not between the two halves of a character outside the BMP (an emoji), which would leave half of it
+                $length = if ([char]::IsHighSurrogate($text[$MaxLength - 1])) { $MaxLength - 1 } else { $MaxLength }
+                $text = $text.Substring(0, $length)
+            }
 
-            $message = ConvertTo-ImapMessage $session $item $summary
+            # Not withheld: the check above passed
+            $message = ConvertTo-ImapMessage $session $item $summary $null
             $message.PSObject.TypeNames.Insert(0, 'ElektoImapPosh.MessageText')
             $message | Add-Member -NotePropertyMembers ([ordered]@{
                     Attachments = Get-ImapAttachmentList $summary
@@ -173,7 +183,8 @@ Function Read-ImapMessage {
             if (-not $session -or -not $session.MessagesLeftOut -or $warned.Contains($session)) { continue }
             $warned.Add($session)
             $more = if ($session.MessagesLeftOut -eq 1) { '1 more was' } else { "$($session.MessagesLeftOut) more were" }
-            Write-Warning "The policy '$($session.Settings.Policy.Name)' lets one command read $($session.Settings.Policy.MaxMessages) messages of $($session.Settings.User): $more not read."
+            $max = $session.Settings.Policy.MaxMessages
+            Write-Warning "The policy '$($session.Settings.Policy.Name)' lets one command read $max message$(if ($max -ne 1) { 's' }) of $($session.Settings.User): $more not read."
         }
         Close-ImapSession $sessions
     }
