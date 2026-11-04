@@ -36,8 +36,10 @@ $script:PolicySettings = [ordered]@{
 }
 
 # Why a value cannot be the setting of a policy, to follow its name in a message; $null when it can. A list may be
-# a single string. A sender without "@" and a file name such as ".pdf" or "pdf" are refused, as patterns that would
-# match nothing: in a deny list, they would let through what was meant to be withheld.
+# a single string. A pattern that -like cannot read ("report[12") is refused here, rather than fail when applied.
+# So are a sender without "@" and a bare extension as a file name (".pdf", "pdf"), patterns that would match
+# nothing or a file of that very name only: in a deny list, they would let through what was meant to be withheld.
+# "*.pdf" matches a file named ".pdf" too, so nothing is lost.
 function Get-PolicyValueError([string]$Setting, $Value) {
     $kind = $script:PolicySettings[$Setting]
     if ($kind -eq 'Limit') {
@@ -54,13 +56,15 @@ function Get-PolicyValueError([string]$Setting, $Value) {
         $what = @{ Folders = 'folder names or patterns'; Senders = 'addresses or patterns, such as *@example.com'; Attachments = 'MIME types or file names, such as application/pdf, image/* or *.pdf' }[$kind]
         return "must be a non-empty list of $what, with no empty entries"
     }
+    $wrong = @($items | Where-Object { try { $null = '' -like $_; $false } catch { $true } })
+    if ($wrong.Count) { return "has '$($wrong[0])', which is not a valid wildcard pattern" }
     if ($kind -eq 'Senders') {
         $wrong = @($items | Where-Object { $_ -notlike '*@*' })
         if ($wrong.Count) { return "must be a list of addresses or patterns, such as jp@example.com or *@example.com, and '$($wrong[0])' has no @" }
     }
     if ($kind -eq 'Attachments') {
-        $wrong = @($items | Where-Object { $_ -notlike '*/*' -and ($_ -like '.*' -or $_ -notmatch '[.*?]') })
-        if ($wrong.Count) { return "must be a list of MIME types or file names, such as application/pdf, image/* or *.pdf, not '$($wrong[0])'" }
+        $wrong = @($items | Where-Object { $_ -notlike '*/*' -and $_ -match '^\.?[^.]+$' -and -not [WildcardPattern]::ContainsWildcardCharacters($_) })
+        if ($wrong.Count) { return "must be a list of MIME types or file names, such as application/pdf, image/* or *.pdf, and '$($wrong[0])' would match only a file of that very name: for the extension, write *.$($wrong[0].TrimStart('.'))" }
     }
     return $null
 }

@@ -91,8 +91,9 @@ Describe 'The policy commands' {
     It 'refuse -<Setting> <Value>, and change nothing' -TestCases @(
         @{ Setting = 'DenyReadFrom'; Value = 'bank.example'; Message = "*-DenyReadFrom must be a list of addresses or patterns*'bank.example' has no @*" }
         @{ Setting = 'AllowAttachmentsFrom'; Value = 'me@example.com', 'example.com'; Message = "*'example.com' has no @*" }
-        @{ Setting = 'DenyAttachmentTypes'; Value = '.exe'; Message = "*-DenyAttachmentTypes must be a list of MIME types or file names, such as application/pdf, image/* or *.pdf, not '.exe'*" }
-        @{ Setting = 'AllowAttachmentTypes'; Value = 'pdf'; Message = "*not 'pdf'*" }
+        @{ Setting = 'DenyAttachmentTypes'; Value = '.exe'; Message = "*-DenyAttachmentTypes must be a list of MIME types or file names, such as application/pdf, image/* or *.pdf, and '.exe' would match only a file of that very name: for the extension, write *.exe." }
+        @{ Setting = 'AllowAttachmentTypes'; Value = 'pdf'; Message = "*'pdf' would match only a file of that very name: for the extension, write *.pdf." }
+        @{ Setting = 'DenyFolders'; Value = 'Finance/[2026'; Message = '*-DenyFolders has ''Finance/`[2026'', which is not a valid wildcard pattern.' }
         @{ Setting = 'DenyFolders'; Value = 'Junk', ''; Message = '*-DenyFolders must be a non-empty list of folder names or patterns, with no empty entries*' }
         @{ Setting = 'TrustAuthenticationResults'; Value = 'mx.google.com; dmarc=pass'; Message = '*-TrustAuthenticationResults must be the name of the receiving server*such as mx.google.com*' }
     ) {
@@ -102,6 +103,15 @@ Describe 'The policy commands' {
 
         { Set-ImapPolicy agent @parameters } | Should -Throw -ExpectedMessage $Message
         Get-Content -Path $accountsFile -Raw | Should -Be $before
+    }
+
+    # A bare extension is refused, not a pattern nor a name with more than an extension
+    It 'accept the file name <Value> for an attachment' -TestCases @(
+        @{ Value = '.env.*' }, @{ Value = 'report[12]' }, @{ Value = '.config.json' }, @{ Value = '*.tar.gz' }, @{ Value = 'README*' }
+    ) {
+        Set-ImapPolicy agent -DenyAttachmentTypes $Value
+
+        (Get-ImapPolicy agent).DenyAttachmentTypes | Should -Be $Value
     }
 
     It 'warn that the allow lists of senders pass no sender without TrustAuthenticationResults' {
@@ -275,6 +285,8 @@ Describe 'Policies in the accounts file' {
             Policies = '{ "agent": { "MaxAgeDays": 0 } }' }
         @{ Case = 'a sender without @'; Message = "*DenyReadFrom of policy 'agent'*'bank.example' has no @*"
             Policies = '{ "agent": { "DenyReadFrom": ["*@example.com", "bank.example"] } }' }
+        @{ Case = 'an invalid pattern'; Message = '*DenyFolders of policy ''agent''*has ''`[Gmail'', which is not a valid wildcard pattern.'
+            Policies = '{ "agent": { "DenyFolders": ["[Gmail"] } }' }
         @{ Case = 'an empty list'; Message = "*AllowReadFrom of policy 'agent'*must be a non-empty list*"
             Policies = '{ "agent": { "AllowReadFrom": [] } }' }
         @{ Case = 'a server that is not a name'; Message = "*TrustAuthenticationResults of policy 'agent'*must be the name*"
