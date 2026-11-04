@@ -154,11 +154,17 @@ function Write-AccountFile([string]$Default, [System.Collections.IDictionary]$Ac
     # A failure stops the caller here, before it stores or deletes a password that would then not match
     New-Item -ItemType Directory -Path (Split-Path -Path $path) -Force -ErrorAction Stop | Out-Null
     # Written beside it and then put in its place (a rename, atomic), so a write that fails or is interrupted
-    # leaves the previous file whole; with its mode, outside Windows
+    # leaves the previous file whole. Outside Windows, the new file has the mode of the one it replaces from
+    # the start, before anything is written: a file the user made owner-only is never readable by others,
+    # not even halfway. The umask can only take bits from the mode it is created with, so it is set again.
     $temporary = "$path.$([guid]::NewGuid().ToString('N')).tmp"
     try {
+        if (-not $IsWindows -and (Test-Path -LiteralPath $path)) {
+            $mode = [IO.File]::GetUnixFileMode($path)
+            [IO.FileStream]::new($temporary, [IO.FileStreamOptions]@{ Mode = 'CreateNew'; Access = 'Write'; UnixCreateMode = $mode }).Dispose()
+            [IO.File]::SetUnixFileMode($temporary, $mode)
+        }
         Set-Content -LiteralPath $temporary -Value ($data | ConvertTo-Json -Depth 5) -Encoding utf8NoBOM -ErrorAction Stop
-        if (-not $IsWindows -and (Test-Path -LiteralPath $path)) { [IO.File]::SetUnixFileMode($temporary, [IO.File]::GetUnixFileMode($path)) }
         [IO.File]::Move($temporary, $path, $true)
     } finally {
         if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction Ignore }

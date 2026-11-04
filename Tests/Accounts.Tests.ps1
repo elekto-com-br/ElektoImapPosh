@@ -3,6 +3,11 @@
 # The password stores are replaced by mocks or by IMAP_PASS_<ACCOUNT>, so no real one is read or written, but
 # for the password files of Linux and macOS, under the test folder, to see a deletion that fails.
 
+BeforeDiscovery {
+    # Root deletes a file whatever the permissions of its folder
+    $isRoot = -not $IsWindows -and (id -u) -eq '0'
+}
+
 BeforeAll {
     Import-Module (Join-Path (Split-Path $PSScriptRoot) 'ElektoImapPosh.psd1') -Force
 
@@ -282,8 +287,8 @@ Describe 'Keeping the accounts file whole' {
 }
 
 # The real password file, under the test folder (so not on Windows, where the store is the Credential Manager),
-# in a folder where it cannot be deleted
-Describe 'A password file that cannot be deleted' -Skip:$IsWindows {
+# in a folder where it cannot be deleted (so not as root)
+Describe 'A password file that cannot be deleted' -Skip:($IsWindows -or $isRoot) {
     BeforeAll {
         Set-Content -Path $accountsFile -Value '{ "Accounts": { "work": { "Server": "imap.example.com", "User": "me@example.com" } } }'
         $env:IMAP_PASS_WORK = $null
@@ -303,6 +308,31 @@ Describe 'A password file that cannot be deleted' -Skip:$IsWindows {
         Join-Path $secrets 'work' | Should -Exist
         Remove-ImapAccount work
         Join-Path $secrets 'work' | Should -Not -Exist
+    }
+}
+
+# The settings hold no password, but servers and users: a file the user made owner-only stays so
+Describe 'The mode of the accounts file' -Skip:$IsWindows {
+    It 'is kept when the file is written, and the new file has it before anything is written to it' {
+        Set-Content -Path $accountsFile -Value '{ "Accounts": { "work": { "Server": "imap.example.com", "User": "me@example.com" } } }'
+        $ownerOnly = [IO.UnixFileMode]'UserRead, UserWrite'
+        [IO.File]::SetUnixFileMode($accountsFile, $ownerOnly)
+        $env:IMAP_PASS_WORK = 'not-a-password'
+        # The mode of the new file when its settings are written to it
+        $seen = @{}
+        Mock -ModuleName ElektoImapPosh Set-Content {
+            $seen.Mode = if (Test-Path -LiteralPath $LiteralPath) { [IO.File]::GetUnixFileMode($LiteralPath) } else { 'not created yet' }
+            [IO.File]::WriteAllText($LiteralPath, "$Value")
+        }
+        try {
+            Set-ImapAccount -Name work -Port 143
+        } finally {
+            $env:IMAP_PASS_WORK = $null
+        }
+
+        $seen.Mode | Should -Be $ownerOnly
+        [IO.File]::GetUnixFileMode($accountsFile) | Should -Be $ownerOnly
+        (Get-ImapAccount work).Port | Should -Be 143
     }
 }
 
