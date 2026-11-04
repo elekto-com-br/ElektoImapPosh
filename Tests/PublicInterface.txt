@@ -19,7 +19,7 @@ Remove-ImapAccount
 Set-ImapAccount
   __AllParameterSets
     -Name String, position 0, mandatory, ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
-    -AllowWrite SwitchParameter
+    -AllowWrite String[], ValidateSet('Flags', 'Move', 'Labels', 'All', 'None')
     -Confirm SwitchParameter, alias cf, ConfirmImpact Medium
     -Default SwitchParameter
     -NoTls SwitchParameter

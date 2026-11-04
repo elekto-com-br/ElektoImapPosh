@@ -91,11 +91,10 @@ Describe 'Settings without accounts' {
         { Resolve-Configuration } | Should -Throw -ExpectedMessage '*IMAP_USER and IMAP_PASS*'
     }
 
-    # AllowWrite allows changes to the mailbox; NoTls and SkipCertificateCheck, a connection less safe
+    # NoTls and SkipCertificateCheck make a connection less safe
     It 'have <Setting> off unless <Variable> says so' -TestCases @(
         @{ Setting = 'NoTls'; Variable = 'IMAP_NO_TLS' }
         @{ Setting = 'SkipCertificateCheck'; Variable = 'IMAP_SKIP_CERTIFICATE_CHECK' }
-        @{ Setting = 'AllowWrite'; Variable = 'IMAP_ALLOW_WRITE' }
     ) {
         $env:IMAP_USER = 'me@example.com'
         $env:IMAP_PASS = 'not-a-password'
@@ -114,13 +113,40 @@ Describe 'Settings without accounts' {
     It 'refuse a value of <Variable> other than true or false' -TestCases @(
         @{ Setting = 'NoTls'; Variable = 'IMAP_NO_TLS' }
         @{ Setting = 'SkipCertificateCheck'; Variable = 'IMAP_SKIP_CERTIFICATE_CHECK' }
-        @{ Setting = 'AllowWrite'; Variable = 'IMAP_ALLOW_WRITE' }
     ) {
         $env:IMAP_USER = 'me@example.com'
         $env:IMAP_PASS = 'not-a-password'
         [Environment]::SetEnvironmentVariable($Variable, 'yes')
 
         { Resolve-Configuration } | Should -Throw -ExpectedMessage "*$Variable must be true or false*"
+    }
+
+    It 'allow the changes of the kinds IMAP_ALLOW_WRITE names, all with <Value>' -TestCases @(
+        @{ Value = 'true' }, @{ Value = 'TRUE' }, @{ Value = '1' }, @{ Value = 'all' }
+    ) {
+        $env:IMAP_USER = 'me@example.com'
+        $env:IMAP_PASS = 'not-a-password'
+
+        (Resolve-Configuration).AllowWrite | Should -BeNullOrEmpty
+        $env:IMAP_ALLOW_WRITE = $Value
+        (Resolve-Configuration).AllowWrite | Should -Be 'All'
+        foreach ($value in 'false', '0', 'None') {
+            $env:IMAP_ALLOW_WRITE = $value
+            (Resolve-Configuration).AllowWrite | Should -BeNullOrEmpty -Because "IMAP_ALLOW_WRITE is '$value'"
+        }
+        # Spelled and ordered as the module does
+        $env:IMAP_ALLOW_WRITE = 'move, flags'
+        (Resolve-Configuration).AllowWrite | Should -Be 'Flags', 'Move'
+    }
+
+    It "refuse an IMAP_ALLOW_WRITE of '<Value>'" -TestCases @(
+        @{ Value = 'yes' }, @{ Value = 'Flags,Delete' }, @{ Value = 'Flags,' }, @{ Value = 'All,Move' }, @{ Value = 'None,Flags' }
+    ) {
+        $env:IMAP_USER = 'me@example.com'
+        $env:IMAP_PASS = 'not-a-password'
+        $env:IMAP_ALLOW_WRITE = $Value
+
+        { Resolve-Configuration } | Should -Throw -ExpectedMessage '*IMAP_ALLOW_WRITE must be true, false or a list of Flags, Move, Labels, or All or None alone*'
     }
 
     It 'need both IMAP_USER and IMAP_PASS' {
@@ -167,12 +193,18 @@ Describe 'Settings of an account' {
     It 'have <Setting> off unless the account has it, whatever <Variable> says' -TestCases @(
         @{ Setting = 'NoTls'; Variable = 'IMAP_NO_TLS' }
         @{ Setting = 'SkipCertificateCheck'; Variable = 'IMAP_SKIP_CERTIFICATE_CHECK' }
-        @{ Setting = 'AllowWrite'; Variable = 'IMAP_ALLOW_WRITE' }
     ) {
         $env:IMAP_PASS_WORK = 'not-a-password'
         [Environment]::SetEnvironmentVariable($Variable, 'true')
 
         (Resolve-Configuration work).$Setting | Should -BeFalse
+    }
+
+    It 'allow no changes to the mailbox unless the account does, whatever IMAP_ALLOW_WRITE says' {
+        $env:IMAP_PASS_WORK = 'not-a-password'
+        $env:IMAP_ALLOW_WRITE = 'true'
+
+        (Resolve-Configuration work).AllowWrite | Should -BeNullOrEmpty
     }
 
     It 'are refused for an account without a password' {
@@ -251,9 +283,8 @@ Describe 'The account commands' {
     }
 
     It 'turn <Setting> on for an account given -<Setting>, and off with -<Setting>:$false' -TestCases @(
-        @{ Setting = 'NoTls'; Variable = 'IMAP_NO_TLS' }
-        @{ Setting = 'SkipCertificateCheck'; Variable = 'IMAP_SKIP_CERTIFICATE_CHECK' }
-        @{ Setting = 'AllowWrite'; Variable = 'IMAP_ALLOW_WRITE' }
+        @{ Setting = 'NoTls' }
+        @{ Setting = 'SkipCertificateCheck' }
     ) {
         Set-Content -Path $accountsFile -Value '{ "Accounts": { "work": { "Server": "imap.example.com", "User": "me@example.com" } } }'
         $env:IMAP_PASS_WORK = 'not-a-password'
@@ -271,6 +302,40 @@ Describe 'The account commands' {
 
         (Get-Content -Path $accountsFile -Raw | ConvertFrom-Json -AsHashtable).Accounts.work.Keys | Should -Not -Contain $Setting
         (Resolve-Configuration work).$Setting | Should -BeFalse
+    }
+
+    It 'allow the changes of the kinds given to -AllowWrite, and none with -AllowWrite None' {
+        Set-Content -Path $accountsFile -Value '{ "Accounts": { "work": { "Server": "imap.example.com", "User": "me@example.com" } } }'
+        $env:IMAP_PASS_WORK = 'not-a-password'
+        (Get-ImapAccount work).AllowWrite | Should -Be 'None'
+
+        Set-ImapAccount -Name work -AllowWrite move, Flags
+
+        (Get-Content -Path $accountsFile -Raw | ConvertFrom-Json -AsHashtable).Accounts.work.AllowWrite | Should -Be 'Flags', 'Move'
+        (Get-ImapAccount work).AllowWrite | Should -Be 'Flags', 'Move'
+        (Resolve-Configuration work).AllowWrite | Should -Be 'Flags', 'Move'
+
+        # A list in the file even of one, as All is
+        Set-ImapAccount -Name work -AllowWrite All
+        (Get-Content -Path $accountsFile -Raw) | Should -Match '"AllowWrite": \[\s*"All"\s*\]'
+        (Get-ImapAccount work).AllowWrite | Should -Be 'All'
+        (Resolve-Configuration work).AllowWrite | Should -Be 'All'
+
+        Set-ImapAccount -Name work -AllowWrite None
+
+        (Get-Content -Path $accountsFile -Raw | ConvertFrom-Json -AsHashtable).Accounts.work.Keys | Should -Not -Contain 'AllowWrite'
+        (Get-ImapAccount work).AllowWrite | Should -Be 'None'
+        (Resolve-Configuration work).AllowWrite | Should -BeNullOrEmpty
+    }
+
+    It 'refuse <AllowWrite> with other kinds, and change nothing' -TestCases @(
+        @{ AllowWrite = 'All' }, @{ AllowWrite = 'None' }
+    ) {
+        Set-Content -Path $accountsFile -Value '{ "Accounts": { "work": { "Server": "imap.example.com", "User": "me@example.com", "AllowWrite": ["Flags"] } } }'
+        $before = Get-Content -Path $accountsFile -Raw
+
+        { Set-ImapAccount -Name work -AllowWrite $AllowWrite, Move } | Should -Throw -ExpectedMessage '*-AllowWrite takes a list of Flags, Move, Labels, or All or None alone*'
+        Get-Content -Path $accountsFile -Raw | Should -Be $before
     }
 
     It 'remove accounts piped from Get-ImapAccount, with their stored passwords' {
@@ -417,7 +482,7 @@ Describe 'The accounts file, read ignoring case' {
     }
 
     It 'reads the settings in any case' {
-        Set-Content -Path $accountsFile -Value '{ "Accounts": { "work": { "server": "imap.example.com", "USER": "me@example.com", "port": 143, "notls": true, "SKIPCERTIFICATECHECK": true, "allowwrite": true } } }'
+        Set-Content -Path $accountsFile -Value '{ "Accounts": { "work": { "server": "imap.example.com", "USER": "me@example.com", "port": 143, "notls": true, "SKIPCERTIFICATECHECK": true, "allowwrite": ["labels", "FLAGS"] } } }'
 
         $account = Get-ImapAccount work
         $account.Server | Should -Be 'imap.example.com'
@@ -425,18 +490,36 @@ Describe 'The accounts file, read ignoring case' {
         $account.Port | Should -Be 143
         $account.NoTls | Should -BeTrue
         $account.SkipCertificateCheck | Should -BeTrue
-        $account.AllowWrite | Should -BeTrue
+        $account.AllowWrite | Should -Be 'Flags', 'Labels'
     }
 
     # A string such as "false" would be true for PowerShell
     It 'refuses a <Setting> that is not true or false' -TestCases @(
-        @{ Setting = 'NoTls'; Variable = 'IMAP_NO_TLS' }
-        @{ Setting = 'SkipCertificateCheck'; Variable = 'IMAP_SKIP_CERTIFICATE_CHECK' }
-        @{ Setting = 'AllowWrite'; Variable = 'IMAP_ALLOW_WRITE' }
+        @{ Setting = 'NoTls' }
+        @{ Setting = 'SkipCertificateCheck' }
     ) {
         Set-Content -Path $accountsFile -Value "{ ""Accounts"": { ""work"": { ""Server"": ""imap.example.com"", ""User"": ""me@example.com"", ""$Setting"": ""false"" } } }"
 
         { Get-ImapAccount } | Should -Throw -ExpectedMessage "*$Setting of account 'work'*must be true or false*"
+    }
+
+    It 'reads an AllowWrite of <Value> as <Expected>' -TestCases @(
+        @{ Value = 'true'; Expected = 'All' }
+        @{ Value = 'false'; Expected = 'None' }
+        @{ Value = '[]'; Expected = 'None' }
+        @{ Value = '"move"'; Expected = 'Move' }
+    ) {
+        Set-Content -Path $accountsFile -Value "{ ""Accounts"": { ""work"": { ""Server"": ""imap.example.com"", ""User"": ""me@example.com"", ""AllowWrite"": $Value } } }"
+
+        (Get-ImapAccount work).AllowWrite | Should -Be $Expected
+    }
+
+    It 'refuses an AllowWrite of <Value>' -TestCases @(
+        @{ Value = '"false"' }, @{ Value = '["Flags", "Delete"]' }, @{ Value = '["All", "Move"]' }, @{ Value = '1' }, @{ Value = '[true]' }, @{ Value = 'null' }
+    ) {
+        Set-Content -Path $accountsFile -Value "{ ""Accounts"": { ""work"": { ""Server"": ""imap.example.com"", ""User"": ""me@example.com"", ""AllowWrite"": $Value } } }"
+
+        { Get-ImapAccount } | Should -Throw -ExpectedMessage "*AllowWrite of account 'work'*must be true, false or a list of Flags, Move, Labels, or All or None alone*"
     }
 
     It 'finds an account by its name in any case' {

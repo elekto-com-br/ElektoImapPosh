@@ -19,8 +19,8 @@ Passwords are never written there:
 - On any platform, the environment variable IMAP_PASS_<NAME> (the name in upper case, with any
   character other than letters and digits as "_") takes precedence over the stored password.
 
-Only the settings given are changed. An empty value removes a setting, and a switch given as
-$false (-NoTls:$false) turns it off.
+Only the settings given are changed. An empty value removes a setting, a switch given as $false
+(-NoTls:$false) turns it off, and -AllowWrite None takes back the permission to change the mailbox.
 
 .PARAMETER Name
 The name of the account: letters, digits, '.', '-' and '_', starting with a letter or digit.
@@ -56,11 +56,16 @@ Gmail never needs it. Be responsible.
 Makes this the default account. -Default:$false stops it from being the default.
 
 .PARAMETER AllowWrite
-Allows the commands that change the mailbox (to come: marking as read, moving, labels) to do so
-in this account. Without it, which is the default, ElektoImapPosh only reads: a command that would
-change the mailbox stops with an error, and folders are opened read-only, so that the server itself
-refuses changes to their messages and nothing is marked as read. -AllowWrite:$false takes the
-permission back.
+The kinds of change that the commands that change the mailbox (not in this version yet) may make
+in this account:
+- Flags: marking messages as read or unread, starring them.
+- Move: moving messages to another folder, the trash included. Nothing is ever deleted.
+- Labels: adding and removing labels, on Gmail.
+- All: every kind, those that later versions add too.
+- None: no change, which is the default.
+Without the permission, ElektoImapPosh only reads: a command that would make a change of a kind
+not allowed stops with an error, and folders are opened read-only, so that the server itself
+refuses changes to their messages and nothing is marked as read.
 
 .EXAMPLE
 Set-ImapAccount -Name work -Server imap.gmail.com -User me@example.com -Password (Read-Host -AsSecureString 'Password') -Default
@@ -73,9 +78,15 @@ Set-ImapAccount -Name work -Password (Read-Host -AsSecureString 'Password')
 Replaces the stored password of the account "work".
 
 .EXAMPLE
-Set-ImapAccount -Name work -AllowWrite
+Set-ImapAccount -Name work -AllowWrite Flags, Move
 
-Allows the commands that change the mailbox to do so in the account "work".
+Allows the commands that change the mailbox to mark messages and to move them in the account
+"work", but not to change labels.
+
+.EXAMPLE
+Set-ImapAccount -Name work -AllowWrite None
+
+Takes back the permission to change the mailbox of the account "work".
 
 .EXAMPLE
 Set-ImapAccount -Name office -SkipCertificateCheck
@@ -98,8 +109,15 @@ Function Set-ImapAccount {
         [switch]$NoTls,
         [switch]$SkipCertificateCheck,
         [switch]$Default,
-        [switch]$AllowWrite
+        [ValidateSet('Flags', 'Move', 'Labels', 'All', 'None')]
+        [string[]]$AllowWrite
     )
+
+    # $writeKinds, since $allowWrite would be the parameter itself (variable names ignore case)
+    $writeKinds = if ($PSBoundParameters.ContainsKey('AllowWrite')) { ConvertTo-WriteKindList $AllowWrite }
+    if ($PSBoundParameters.ContainsKey('AllowWrite') -and $null -eq $writeKinds) {
+        throw "-AllowWrite takes $($script:WriteKindsHint), not $($AllowWrite -join ', ')."
+    }
 
     $file = Read-AccountFile
     $accounts = if ($file) { $file.Accounts } else { [ordered]@{} }
@@ -119,8 +137,8 @@ Function Set-ImapAccount {
 
     foreach ($key in $script:AccountSettingNames) {
         if (-not $PSBoundParameters.ContainsKey($key)) { continue }
-        $value = $PSBoundParameters[$key]
-        # A switch kept only when on: -AllowWrite:$false removes it, as an empty value removes a setting
+        $value = if ($key -eq 'AllowWrite') { , $writeKinds } else { $PSBoundParameters[$key] }
+        # A switch kept only when on: -NoTls:$false removes it, as an empty value (or -AllowWrite None) removes a setting
         if ($value -is [switch]) { $value = if ($value) { $true } else { '' } }
         if ("$value" -eq '') { $settings.Remove($key) } else { $settings[$key] = $value }
     }

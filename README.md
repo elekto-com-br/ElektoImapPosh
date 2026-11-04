@@ -42,7 +42,7 @@ Set-ImapAccount -Name personal -Server imap.gmail.com -User me@gmail.com -Passwo
 | `User` | Yes | - | IMAP user name, usually the email address |
 | `NoTls` | No | `false` | Connects in plain text, for test servers: see [Server Notes](#server-notes) |
 | `SkipCertificateCheck` | No | `false` | Accepts any certificate from the server: see [Server Notes](#server-notes) |
-| `AllowWrite` | No | `false` | Allows changes to the mailbox: see [Reading Without Changing Anything](#reading-without-changing-anything) |
+| `AllowWrite` | No | `None` | The kinds of change allowed in the mailbox: see [Reading Without Changing Anything](#reading-without-changing-anything) |
 
 The settings are kept in `accounts.json`, in the folder `ElektoImapPosh` of your configuration folder (`%APPDATA%` on Windows, `~/.config` on Linux and macOS, or `$XDG_CONFIG_HOME` when set), or in the folder named by `IMAP_CONFIG_DIR`. It holds no passwords, so it can be read and edited by hand:
 
@@ -84,16 +84,24 @@ Without accounts, set the IMAP settings via environment variables. This keeps se
 | `IMAP_PORT` | No | `993` | IMAP server port |
 | `IMAP_NO_TLS` | No | `false` | `true` (or `1`) connects in plain text, for test servers: see [Server Notes](#server-notes) |
 | `IMAP_SKIP_CERTIFICATE_CHECK` | No | `false` | `true` (or `1`) accepts any certificate from the server: see [Server Notes](#server-notes) |
-| `IMAP_ALLOW_WRITE` | No | `false` | `true` (or `1`) allows changes to the mailbox: see [Reading Without Changing Anything](#reading-without-changing-anything) |
+| `IMAP_ALLOW_WRITE` | No | `false` | The kinds of change allowed in the mailbox, such as `Flags,Move`; `true` (or `1`) allows all: see [Reading Without Changing Anything](#reading-without-changing-anything) |
 
 ### Reading Without Changing Anything
 
 Gmail has no read-only IMAP password, so ElektoImapPosh guards the mailbox itself: unless an account allows changes, it only reads.
 
-- Commands that change the mailbox (marking as read, moving, labels, creating folders: not in this version yet) need the account's permission, `Set-ImapAccount work -AllowWrite`, or `IMAP_ALLOW_WRITE=true` without accounts. Without it they stop with a `WriteNotAllowed` error, before they change anything. `-AllowWrite:$false` takes the permission back.
+- Commands that change the mailbox (not in this version yet) need the account's permission for each kind of change:
+
+  | Kind | Changes |
+  |------|---------|
+  | `Flags` | Marking messages as read or unread, starring them |
+  | `Move` | Moving messages to another folder, the trash included; nothing is ever deleted |
+  | `Labels` | Adding and removing labels, on Gmail |
+
+  `Set-ImapAccount work -AllowWrite Flags, Move` allows those two kinds, `-AllowWrite All` every kind (those that later versions add too), and `-AllowWrite None` takes the permission back. Without accounts, `IMAP_ALLOW_WRITE=Flags,Move`, or `true` for all. A command that would make a change of a kind not allowed stops with a `WriteNotAllowed` error, before it changes anything. In `accounts.json` the setting is a list, `"AllowWrite": ["Flags", "Move"]`, and `true` and `false` are read as all and none.
 - Besides, folders are opened read-only (the IMAP command EXAMINE), so the server itself refuses changes to their messages, flags included, and MailKit refuses to send one. Reading a message never marks it as read. EXAMINE covers the folder opened, not the connection: that is why the permission above is checked for every change.
 
-`Get-ImapAccount` shows which accounts allow changes.
+`Get-ImapAccount` shows which kinds of change each account allows.
 
 ### Server Notes
 

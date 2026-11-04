@@ -128,17 +128,21 @@ Describe 'Special uses' {
 
 # What every command that changes the mailbox asks first, whatever it changes: EXAMINE covers only the folder opened
 Describe 'The permission to change the mailbox' {
-    It 'is <Expected> for <Case>' -TestCases @(
-        @{ Case = 'an account that does not allow changes'; Settings = @{ Account = 'work'; User = 'me@example.com'; AllowWrite = $false }; Expected = $false; Hint = 'Set-ImapAccount work -AllowWrite' }
-        @{ Case = 'the IMAP_* variables without IMAP_ALLOW_WRITE'; Settings = @{ Account = $null; User = 'me@example.com'; AllowWrite = $false }; Expected = $false; Hint = 'IMAP_ALLOW_WRITE=true' }
-        @{ Case = 'an account that allows changes'; Settings = @{ Account = 'work'; User = 'me@example.com'; AllowWrite = $true }; Expected = $true; Hint = $null }
+    It 'is <Expected> for <Kind> in <Case>' -TestCases @(
+        @{ Case = 'an account that allows no changes'; Kind = 'Flags'; Account = 'work'; AllowWrite = @(); Expected = $false; Hint = "Changes of the kind Flags are not allowed in the mailbox of me@example.com, so*Set-ImapAccount work -AllowWrite Flags." }
+        @{ Case = 'the IMAP_* variables without IMAP_ALLOW_WRITE'; Kind = 'Move'; Account = $null; AllowWrite = @(); Expected = $false; Hint = 'IMAP_ALLOW_WRITE=Move.' }
+        @{ Case = 'an account that allows other kinds'; Kind = 'Move'; Account = 'work'; AllowWrite = @('Flags', 'Labels'); Expected = $false; Hint = '(it allows Flags, Labels)*Set-ImapAccount work -AllowWrite Flags, Move, Labels.' }
+        @{ Case = 'the IMAP_* variables with other kinds'; Kind = 'Labels'; Account = $null; AllowWrite = @('Move'); Expected = $false; Hint = 'IMAP_ALLOW_WRITE=Move,Labels.' }
+        @{ Case = 'an account that allows that kind'; Kind = 'Move'; Account = 'work'; AllowWrite = @('Flags', 'Move'); Expected = $true; Hint = $null }
+        @{ Case = 'an account that allows all'; Kind = 'Labels'; Account = 'work'; AllowWrite = @('All'); Expected = $true; Hint = $null }
     ) {
         $cmdlet = [pscustomobject]@{ Errors = [System.Collections.Generic.List[object]]::new() }
         $cmdlet | Add-Member -MemberType ScriptMethod -Name WriteError -Value { param($record) $this.Errors.Add($record) }
+        $settings = @{ Account = $Account; User = 'me@example.com'; AllowWrite = $AllowWrite }
 
-        $allowed = InModuleScope ElektoImapPosh -Parameters @{ Cmdlet = $cmdlet; Session = @{ Settings = $Settings } } {
-            param($Cmdlet, $Session)
-            Test-ImapWriteAllowed $Cmdlet $Session 'Clients/2026'
+        $allowed = InModuleScope ElektoImapPosh -Parameters @{ Cmdlet = $cmdlet; Session = @{ Settings = $settings }; Kind = $Kind } {
+            param($Cmdlet, $Session, $Kind)
+            Test-ImapWriteAllowed $Cmdlet $Session $Kind 'Clients/2026'
         }
 
         $allowed | Should -Be $Expected
@@ -147,7 +151,8 @@ Describe 'The permission to change the mailbox' {
         } else {
             $cmdlet.Errors.Count | Should -Be 1
             $cmdlet.Errors[0].FullyQualifiedErrorId | Should -Be 'WriteNotAllowed'
-            "$($cmdlet.Errors[0])" | Should -BeLike "*'Clients/2026' was left as it is*$Hint*"
+            "$($cmdlet.Errors[0])" | Should -BeLike "*'Clients/2026' was left as it is*"
+            "$($cmdlet.Errors[0])" | Should -BeLike "*$Hint"
         }
     }
 }
@@ -264,7 +269,7 @@ Describe 'Folders against smtp4dev' -Skip:(-not $smtp4devInstalled) {
             Accounts = @{
                 local  = @{ Server = '127.0.0.1'; Port = $server.ImapPort; User = 'tester'; NoTls = $true }
                 closed = @{ Server = '127.0.0.1'; Port = (Get-FreeTcpPort); User = 'tester'; NoTls = $true }
-                writer = @{ Server = '127.0.0.1'; Port = $server.ImapPort; User = 'tester'; NoTls = $true; AllowWrite = $true }
+                writer = @{ Server = '127.0.0.1'; Port = $server.ImapPort; User = 'tester'; NoTls = $true; AllowWrite = @('Flags') }
             }
         }
         Set-Content -Path (Join-Path $env:IMAP_CONFIG_DIR 'accounts.json') -Value ($accounts | ConvertTo-Json -Depth 5)
@@ -356,20 +361,32 @@ Describe 'Folders against smtp4dev' -Skip:(-not $smtp4devInstalled) {
     It 'refuses to open a folder for writing in an account that does not allow changes' {
         $run = Invoke-InSession local {
             param($Cmdlet, $Session)
-            @{ Opened = Open-ImapFolder $Cmdlet $Session $Session.Client.Inbox -ForWrite; IsOpen = $Session.Client.Inbox.IsOpen }
+            @{ Opened = Open-ImapFolder $Cmdlet $Session $Session.Client.Inbox -ForWrite Flags; IsOpen = $Session.Client.Inbox.IsOpen }
         }
 
         $run.Result.Opened | Should -BeFalse
         $run.Result.IsOpen | Should -BeFalse
         $run.Errors.Count | Should -Be 1
         $run.Errors[0].FullyQualifiedErrorId | Should -Be 'WriteNotAllowed'
-        "$($run.Errors[0])" | Should -BeLike '*Set-ImapAccount local -AllowWrite*'
+        "$($run.Errors[0])" | Should -BeLike '*Set-ImapAccount local -AllowWrite Flags.'
     }
 
-    It 'opens a folder for writing in an account that allows changes' {
+    It 'refuses to open a folder for a change of a kind the account does not allow' {
         $run = Invoke-InSession writer {
             param($Cmdlet, $Session)
-            @{ Opened = Open-ImapFolder $Cmdlet $Session $Session.Client.Inbox -ForWrite; Access = "$($Session.Client.Inbox.Access)" }
+            @{ Opened = Open-ImapFolder $Cmdlet $Session $Session.Client.Inbox -ForWrite Move; IsOpen = $Session.Client.Inbox.IsOpen }
+        }
+
+        $run.Result.Opened | Should -BeFalse
+        $run.Result.IsOpen | Should -BeFalse
+        $run.Errors[0].FullyQualifiedErrorId | Should -Be 'WriteNotAllowed'
+        "$($run.Errors[0])" | Should -BeLike '*(it allows Flags)*Set-ImapAccount writer -AllowWrite Flags, Move.'
+    }
+
+    It 'opens a folder for writing in an account that allows that kind of change' {
+        $run = Invoke-InSession writer {
+            param($Cmdlet, $Session)
+            @{ Opened = Open-ImapFolder $Cmdlet $Session $Session.Client.Inbox -ForWrite Flags; Access = "$($Session.Client.Inbox.Access)" }
         }
 
         $run.Result.Opened | Should -BeTrue
@@ -434,7 +451,7 @@ Describe 'Marking as read against smtp4dev' -Skip:(-not $smtp4devInstalled) {
         $run = Invoke-InSession writer {
             param($Cmdlet, $Session)
             $inbox = $Session.Client.Inbox
-            $null = Open-ImapFolder $Cmdlet $Session $inbox -ForWrite
+            $null = Open-ImapFolder $Cmdlet $Session $inbox -ForWrite Flags
             $seen = [MailKit.StoreFlagsRequest]::new([MailKit.StoreAction]::Add, [MailKit.MessageFlags]::Seen)
             Wait-ImapTask ($inbox.StoreAsync([int]0, [MailKit.IStoreFlagsRequest]$seen, [System.Threading.CancellationToken]::None))
         }

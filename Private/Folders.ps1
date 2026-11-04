@@ -68,28 +68,31 @@ function Get-ImapFolderList($Cmdlet, $Session, [MailKit.StatusItems]$StatusItems
     return , $Session.Folders
 }
 
-# Whether the account allows changes to its mailbox (AllowWrite, or IMAP_ALLOW_WRITE); if not, reports so,
-# naming what would have changed. Every command that changes the mailbox asks this first, whatever it
-# changes: the read-only opening of Open-ImapFolder covers only the messages of the folder opened, while
-# copying them to another folder, creating, renaming or deleting folders and adding messages are still
-# possible on the connection.
-function Test-ImapWriteAllowed($Cmdlet, $Session, [string]$Target) {
+# Whether the account allows changes of a kind (one of WriteKinds) to its mailbox (AllowWrite, or
+# IMAP_ALLOW_WRITE); if not, reports so, naming what would have changed and how to allow it. Every command
+# that changes the mailbox asks this first, whatever it changes: the read-only opening of Open-ImapFolder
+# covers only the messages of the folder opened, while copying them to another folder, creating, renaming or
+# deleting folders and adding messages are still possible on the connection.
+function Test-ImapWriteAllowed($Cmdlet, $Session, [string]$Kind, [string]$Target) {
     $settings = $Session.Settings
-    if ($settings.AllowWrite) { return $true }
-    $how = if ($settings.Account) { "Set-ImapAccount $($settings.Account) -AllowWrite" } else { 'the environment variable IMAP_ALLOW_WRITE=true' }
-    Write-ImapError $Cmdlet "Changes are not allowed in the mailbox of $($settings.User), so '$Target' was left as it is. To allow them: $how." 'WriteNotAllowed' PermissionDenied $Target
+    $allowed = @($settings.AllowWrite)
+    if ($allowed -contains 'All' -or $allowed -contains $Kind) { return $true }
+    $others = if ($allowed) { " (it allows $($allowed -join ', '))" } else { '' }
+    $wanted = @($script:WriteKinds | Where-Object { $allowed -contains $_ -or $_ -eq $Kind }) -join ', '
+    $how = if ($settings.Account) { "Set-ImapAccount $($settings.Account) -AllowWrite $wanted" } else { "the environment variable IMAP_ALLOW_WRITE=$($wanted -replace ' ')" }
+    Write-ImapError $Cmdlet "Changes of the kind $Kind are not allowed in the mailbox of $($settings.User)$others, so '$Target' was left as it is. To allow them: $how." 'WriteNotAllowed' PermissionDenied $Target
     return $false
 }
 
 # Opens a folder to read its messages: read-only, by EXAMINE, so the server itself refuses any change to the
 # messages of that folder, flags included, whatever a command asks of it (RFC 3501; MailKit also refuses to
 # send one), and a message read is not marked as read. EXAMINE covers that folder only, not the connection:
-# see Test-ImapWriteAllowed. Only a command that writes opens a folder with -ForWrite (SELECT), and only on an
-# account that allows changes. Returns $true, or $false after reporting why not. A connection has one folder
-# open at a time: opening another closes the one before.
-function Open-ImapFolder($Cmdlet, $Session, $Folder, [switch]$ForWrite) {
+# see Test-ImapWriteAllowed. Only a command that writes opens a folder with -ForWrite and the kind of change
+# it makes (SELECT), and only on an account that allows that kind. Returns $true, or $false after reporting
+# why not. A connection has one folder open at a time: opening another closes the one before.
+function Open-ImapFolder($Cmdlet, $Session, $Folder, [string]$ForWrite) {
     $settings = $Session.Settings
-    if ($ForWrite -and -not (Test-ImapWriteAllowed $Cmdlet $Session $Folder.FullName)) { return $false }
+    if ($ForWrite -and -not (Test-ImapWriteAllowed $Cmdlet $Session $ForWrite $Folder.FullName)) { return $false }
     $access = if ($ForWrite) { [MailKit.FolderAccess]::ReadWrite } else { [MailKit.FolderAccess]::ReadOnly }
     if ($Folder.IsOpen -and $Folder.Access -eq $access) { return $true }
     $failure = Wait-ImapTask ($Folder.OpenAsync($access, [System.Threading.CancellationToken]::None))
