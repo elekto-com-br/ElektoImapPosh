@@ -3,16 +3,10 @@
 # sent the message, so it is never taken as a path, and the policy checks the name the file gets, not the one the
 # message gives (Get-AttachmentWithheldReason, in Policies.ps1).
 
-# Text in the composed form of Unicode (NFC), so that a name written decomposed (NFD), as macOS writes names, is the
-# same name. A lone surrogate, which Normalize refuses and each file system writes its own way, becomes "_".
-function ConvertTo-ComposedText([string]$Text) {
-    return ($Text -replace '[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]', '_').Normalize([Text.NormalizationForm]::FormC)
-}
-
 # A name from a message as the messages of the module show it: its control characters, which can drive a terminal (an
 # escape sequence), and those that reverse the direction of text, as "?"
 function Format-ShownName([string]$Name) {
-    return $Name -replace '[\p{Cc}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]', '?'
+    return $Name -creplace '[\p{Cc}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]', '?'
 }
 
 # The name an attachment is saved under. Only the last part of the name the message gives, so that it cannot be
@@ -28,8 +22,8 @@ function Format-ShownName([string]$Name) {
 # left. The same on every platform, so that a file saved on Linux keeps its name on Windows. The sender writes the
 # name, of any length: it is cut in a few steps, not one for each character.
 function Get-AttachmentFileName([string]$Name, [string]$ContentType) {
-    $leaf = ConvertTo-ComposedText ($Name -split '[\\/]')[-1]
-    $leaf = ($leaf -replace '[<>:"|?*\p{Cc}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]', '_').Trim().TrimEnd('.', ' ')
+    $leaf = ConvertTo-ComposedText ($Name -csplit '[\\/]')[-1]
+    $leaf = ($leaf -creplace '[<>:"|?*\p{Cc}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]', '_').Trim().TrimEnd('.', ' ')
     if ([Text.Encoding]::UTF8.GetByteCount($leaf) -gt 200) {
         $extension = [IO.Path]::GetExtension($leaf)
         if ([Text.Encoding]::UTF8.GetByteCount($extension) -gt 20) { $extension = '' }
@@ -44,7 +38,7 @@ function Get-AttachmentFileName([string]$Name, [string]$ContentType) {
         # The cut may leave dots or spaces at the end ("x.exe.zzz" cut after "x.exe."), which Windows would drop
         $leaf = ($base + $extension).TrimEnd('.', ' ')
     }
-    if ($leaf -match '^(?=[^.]{1,8}(\.[^.]{0,3})?$)[^.]*~\d+(\.|$)') { $leaf = $leaf.Replace('~', '_') }
+    if ($leaf -cmatch '^(?=[^.]{1,8}(\.[^.]{0,3})?$)[^.]*~\d+(\.|$)') { $leaf = $leaf.Replace('~', '_') }
     # Ignoring case as Windows does, whatever the culture of the session: in Turkish, "i" is not the small "I"
     if ([regex]::IsMatch($leaf, '^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[\d\xB9\xB2\xB3]|LPT[\d\xB9\xB2\xB3]) *(\.|$)', 'IgnoreCase, CultureInvariant')) { $leaf = "_$leaf" }
     if (-not $leaf) {

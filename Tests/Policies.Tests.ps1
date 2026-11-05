@@ -193,6 +193,27 @@ Describe 'The policy commands' {
         { Remove-ImapPolicy other -ErrorAction Stop } | Should -Throw -ExpectedMessage "There is no policy 'other'."
         Get-ImapPolicy o* -ErrorAction Stop | Should -BeNullOrEmpty
     }
+
+    # In Turkish, "I" is not the capital of "i": -like missed "billing" for "BILL*", and for "BILLING"
+    It 'find, complete and remove policies by name or pattern alike in the Turkish culture' {
+        Set-ImapPolicy billing -MaxMessages 10
+        Set-ImapPolicy agent -MaxMessages 5
+        $culture = [Threading.Thread]::CurrentThread.CurrentCulture
+        try {
+            [Threading.Thread]::CurrentThread.CurrentCulture = 'tr-TR'
+            $found = (Get-ImapPolicy 'BILL*').Name
+            $named = (Get-ImapPolicy 'BILLING' -ErrorAction SilentlyContinue).Name
+            $completed = (TabExpansion2 -inputScript 'Set-ImapAccount work -Policy BIL' -cursorColumn 32).CompletionMatches.CompletionText
+            Remove-ImapPolicy 'BILL*'
+        } finally {
+            [Threading.Thread]::CurrentThread.CurrentCulture = $culture
+        }
+
+        $found | Should -Be 'billing'
+        $named | Should -Be 'billing'
+        $completed | Should -Be 'billing'
+        @((Read-Json).Policies.Keys) | Should -Be 'agent'
+    }
 }
 
 Describe 'The policy a command reads with' {

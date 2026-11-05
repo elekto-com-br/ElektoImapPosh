@@ -16,9 +16,10 @@
 # - TrustAuthenticationResults: the receiving server whose Authentication-Results headers tell an authenticated
 #   sender. The allow lists of senders match only authenticated senders; the deny lists match the From as written,
 #   since a forged From there only withholds more.
-# An allow list, when present, denies what it does not name; a deny list wins. Senders and attachments are wildcard
-# patterns, ignoring case: senders such as *@example.com, attachments a MIME type when they have a "/" (image/*) and
-# a file name otherwise (*.pdf). Sizes are in bytes.
+# An allow list, when present, denies what it does not name; a deny list wins. Folders, senders and attachments are
+# wildcard patterns, matched by Test-Wildcard (ignoring case alike in every culture, and a name written composed or
+# decomposed alike): senders such as *@example.com, attachments a MIME type when they have a "/" (image/*) and a file
+# name otherwise (*.pdf). Sizes are in bytes.
 # Every command that reads messages makes one check, Get-WithheldReason, on the metadata of each message, before its
 # body or an attachment is fetched: a message withheld is still listed, saying why. Saving an attachment also needs
 # Get-AttachmentWithheldReason, on the attachment and the name its file gets. On Gmail a message is in every
@@ -41,7 +42,7 @@ $script:PolicySettings = [ordered]@{
 }
 
 # Why a value cannot be the setting of a policy, to follow its name in a message; $null when it can. A list may be
-# a single string. A pattern that -like cannot read ("report[12") is refused here, rather than fail when applied.
+# a single string. A pattern that is not valid ("report[12") is refused here, rather than fail when applied.
 # So are a sender without "@" and a bare extension as a file name (".pdf", "pdf"), patterns that would match
 # nothing or a file of that very name only: in a deny list, they would let through what was meant to be withheld.
 # "*.pdf" matches a file named ".pdf" too, so nothing is lost.
@@ -52,7 +53,7 @@ function Get-PolicyValueError([string]$Setting, $Value) {
         return 'must be a whole number above 0'
     }
     if ($kind -eq 'Server') {
-        if ($Value -is [string] -and $Value -match '^[^\s@/]+$') { return $null }
+        if ($Value -is [string] -and $Value -cmatch '^[^\s@/]+$') { return $null }
         return 'must be the name of the receiving server that adds the Authentication-Results headers, such as mx.google.com'
     }
     $items = @($Value)
@@ -61,14 +62,14 @@ function Get-PolicyValueError([string]$Setting, $Value) {
         $what = @{ Folders = 'folder names or patterns'; Senders = 'addresses or patterns, such as *@example.com'; Attachments = 'MIME types or file names, such as application/pdf, image/* or *.pdf' }[$kind]
         return "must be a non-empty list of $what, with no empty entries"
     }
-    $wrong = @($items | Where-Object { try { $null = '' -like $_; $false } catch { $true } })
+    $wrong = @($items | Where-Object { try { Assert-WildcardPattern $_; $false } catch { $true } })
     if ($wrong.Count) { return "has '$($wrong[0])', which is not a valid wildcard pattern" }
     if ($kind -eq 'Senders') {
-        $wrong = @($items | Where-Object { $_ -notlike '*@*' })
+        $wrong = @($items | Where-Object { -not $_.Contains('@') })
         if ($wrong.Count) { return "must be a list of addresses or patterns, such as jp@example.com or *@example.com, and '$($wrong[0])' has no @" }
     }
     if ($kind -eq 'Attachments') {
-        $wrong = @($items | Where-Object { $_ -notlike '*/*' -and $_ -match '^\.?[^.]+$' -and -not [WildcardPattern]::ContainsWildcardCharacters($_) })
+        $wrong = @($items | Where-Object { -not $_.Contains('/') -and $_ -cmatch '^\.?[^.]+$' -and -not [WildcardPattern]::ContainsWildcardCharacters($_) })
         if ($wrong.Count) { return "must be a list of MIME types or file names, such as application/pdf, image/* or *.pdf, and '$($wrong[0])' would match only a file of that very name: for the extension, write *.$($wrong[0].TrimStart('.'))" }
     }
     return $null
@@ -91,7 +92,7 @@ function Read-PolicyList($Policies, [string]$Path) {
     if ($Policies -isnot [System.Collections.IDictionary]) { throw "'Policies' in '$Path' must be a JSON object." }
     foreach ($entry in $Policies.GetEnumerator()) {
         $name = $entry.Key
-        if ($name -notmatch $script:AccountNamePattern) {
+        if ($name -cnotmatch $script:AccountNamePattern) {
             throw "Invalid policy name '$name' in '$Path': use letters, digits, '.', '-' and '_', starting with a letter or digit."
         }
         $sameName = @($list.psbase.Keys | Where-Object { $_ -eq $name })
@@ -217,7 +218,7 @@ function Get-SenderOutsideReason($Policy, [string]$Setting, $Summary, [bool]$Own
     }
     $senders = @($Summary.Envelope.From.Mailboxes | ForEach-Object { $_.Address })
     if ($senders.Count -eq 0) { return "It has no sender, and $Setting $of passes only the senders it names." }
-    $outside = @($senders | Where-Object { $address = $_; -not @($Policy[$Setting] | Where-Object { $address -like $_ }).Count })
+    $outside = @($senders | Where-Object { $address = $_; -not @($Policy[$Setting] | Where-Object { Test-Wildcard $address $_ }).Count })
     if ($outside.Count) { return "The sender $($outside[0]) is not in $Setting $of." }
     return $null
 }
@@ -250,7 +251,7 @@ function Get-WithheldReason($Session, $Folder, $Summary) {
 
     $senders = @($Summary.Envelope.From.Mailboxes | ForEach-Object { $_.Address })
     foreach ($pattern in $policy.DenyReadFrom) {
-        $match = @($senders | Where-Object { $_ -like $pattern })
+        $match = @($senders | Where-Object { Test-Wildcard $_ $pattern })
         if ($match.Count) { return "The sender $($match[0]) matches '$pattern' in DenyReadFrom $of." }
     }
     if ($policy.AllowReadFrom) { return Get-SenderOutsideReason $policy 'AllowReadFrom' $Summary (Test-OwnMessage $Session $Folder $Summary) }
@@ -262,12 +263,6 @@ function Get-WithheldReason($Session, $Folder, $Summary) {
 function Test-AttachmentPattern([string]$Pattern, [string]$Type, [string]$FileName) {
     $text = if ($Pattern.Contains('/')) { $Type } else { $FileName }
     return Test-Wildcard $text $Pattern
-}
-
-# Whether a text matches a wildcard pattern, ignoring case alike in every culture: -like ignores it as the culture of
-# the session does, and in Turkish "I" is not the capital of "i", so "*.zip" would miss "INVOICE.ZIP" (measured)
-function Test-Wildcard([string]$Text, [string]$Pattern) {
-    return [WildcardPattern]::new($Pattern, [System.Management.Automation.WildcardOptions]'IgnoreCase, CultureInvariant').IsMatch($Text)
 }
 
 # Why the policy of a session withholds an attachment of a message whose body it lets be read (Get-WithheldReason), in
@@ -312,10 +307,5 @@ function Add-ImapPolicy($Cmdlet, $File, $Settings, [string]$Name) {
     }
     $Settings.Policy = [ordered]@{ Name = $policyName }
     foreach ($key in $File.Policies[$policyName].Keys) { $Settings.Policy[$key] = $File.Policies[$policyName][$key] }
-    # Composed, as the names of the files they match are (Get-AttachmentFileName): a pattern written decomposed would
-    # miss them
-    foreach ($key in 'DenyAttachmentTypes', 'AllowAttachmentTypes') {
-        if ($Settings.Policy.Contains($key)) { $Settings.Policy[$key] = [string[]]@($Settings.Policy[$key] | ForEach-Object { ConvertTo-ComposedText $_ }) }
-    }
     return $Settings
 }

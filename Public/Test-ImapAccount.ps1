@@ -67,7 +67,7 @@ Function Test-ImapAccount {
                     Security                 = "$(Get-SecureSocketOption $settings.Port -NoTls:$settings.NoTls)"
                     SslProtocol              = if ($client.IsSecure) { "$($client.SslProtocol)" } else { 'None' }
                     AuthenticationMechanisms = $mechanisms
-                    Capabilities             = @("$($client.Capabilities)" -split ', ')
+                    Capabilities             = @("$($client.Capabilities)" -csplit ', ')
                     Elapsed                  = $stopwatch.Elapsed
                 }
             }

@@ -130,6 +130,29 @@ Describe 'What a policy withholds' {
         Get-Reason @{ DenyReadFrom = @('*@bank.example') } -Summary (New-Summary 'client@client.example, alerts@bank.example') | Should -BeLike '*alerts@bank.example matches*'
     }
 
+    # In Turkish, "I" is not the capital of "i": -like let X@CLIENT.EXAMPLE through '*@client.example' in DenyReadFrom
+    It 'matches the senders of DenyReadFrom and AllowReadFrom alike in the Turkish culture' {
+        $shouting = New-Summary 'Client <X@CLIENT.EXAMPLE>' -AuthenticationResults $pass
+        $culture = [Threading.Thread]::CurrentThread.CurrentCulture
+        try {
+            [Threading.Thread]::CurrentThread.CurrentCulture = 'tr-TR'
+            $denied = Get-Reason @{ DenyReadFrom = @('*@client.example') } -Summary $shouting
+            $allowed = Get-Reason $trusted -Summary $shouting
+        } finally {
+            [Threading.Thread]::CurrentThread.CurrentCulture = $culture
+        }
+
+        $denied | Should -Be "The sender X@CLIENT.EXAMPLE matches '*@client.example' in DenyReadFrom of the policy 'agent'."
+        $allowed | Should -BeNullOrEmpty
+    }
+
+    # macOS writes names decomposed (NFD), an address too
+    It 'matches a sender written decomposed by a pattern written composed' {
+        $summary = New-Summary "Jo`u{E3}o <joa`u{303}o@client.example>" -AuthenticationResults $pass
+
+        Get-Reason @{ DenyReadFrom = @("jo`u{E3}o@*") } -Summary $summary | Should -BeLike '*in DenyReadFrom*'
+    }
+
     It 'lets an authenticated sender of AllowReadFrom through' {
         Get-Reason $trusted | Should -BeNullOrEmpty
     }

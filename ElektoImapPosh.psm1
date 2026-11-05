@@ -39,7 +39,7 @@ $accountCompleter = {
     # Of the arguments a completer gets (command, parameter, word, ...), only the word matters here
     $wordToComplete = $args[2]
     $file = try { Read-AccountFile } catch { $null }
-    if ($file) { $file.Accounts.psbase.Keys | Where-Object { $_ -like "$wordToComplete*" } }
+    if ($file) { $file.Accounts.psbase.Keys | Where-Object { Test-Wildcard $_ "$wordToComplete*" } }
 }
 Register-ArgumentCompleter -CommandName Test-ImapAccount, Get-ImapFolder, Get-ImapMessage, Read-ImapMessage, Save-ImapAttachment -ParameterName Account -ScriptBlock $accountCompleter
 Register-ArgumentCompleter -CommandName Get-ImapAccount, Set-ImapAccount, Remove-ImapAccount -ParameterName Name -ScriptBlock $accountCompleter
@@ -48,7 +48,7 @@ Register-ArgumentCompleter -CommandName Get-ImapAccount, Set-ImapAccount, Remove
 $policyCompleter = {
     $wordToComplete = $args[2]
     $file = try { Read-AccountFile } catch { $null }
-    if ($file) { $file.Policies.psbase.Keys | Where-Object { $_ -like "$wordToComplete*" } }
+    if ($file) { $file.Policies.psbase.Keys | Where-Object { Test-Wildcard $_ "$wordToComplete*" } }
 }
 Register-ArgumentCompleter -CommandName Get-ImapPolicy, Set-ImapPolicy, Remove-ImapPolicy -ParameterName Name -ScriptBlock $policyCompleter
 Register-ArgumentCompleter -CommandName Set-ImapAccount -ParameterName Policy -ScriptBlock $policyCompleter
@@ -56,5 +56,5 @@ Register-ArgumentCompleter -CommandName Set-ImapAccount -ParameterName Policy -S
 # Tab completion of the special uses, the names of folders that work on any server and in any language
 Register-ArgumentCompleter -CommandName Get-ImapFolder, Get-ImapMessage, Read-ImapMessage, Save-ImapAttachment -ParameterName Folder -ScriptBlock {
     $wordToComplete = $args[2]
-    $script:SpecialUseNames | Where-Object { $_ -like "$wordToComplete*" }
+    $script:SpecialUseNames | Where-Object { Test-Wildcard $_ "$wordToComplete*" }
 }

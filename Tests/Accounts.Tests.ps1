@@ -348,6 +348,26 @@ Describe 'The account commands' {
         $json.Default | Should -BeNullOrEmpty
         Should -Invoke -ModuleName ElektoImapPosh Clear-StoredPassword -Times 2 -Exactly
     }
+
+    # In Turkish, "I" is not the capital of "i": -like missed "billing" for "BILL*", and for "BILLING"
+    It 'find, complete and remove accounts by name or pattern alike in the Turkish culture' {
+        Set-Content -Path $accountsFile -Value '{ "Accounts": { "billing": { "Server": "imap.example.com", "User": "b@example.com" }, "work": { "Server": "imap.example.com", "User": "me@example.com" } } }'
+        $culture = [Threading.Thread]::CurrentThread.CurrentCulture
+        try {
+            [Threading.Thread]::CurrentThread.CurrentCulture = 'tr-TR'
+            $found = (Get-ImapAccount 'BILL*').Name
+            $named = (Get-ImapAccount 'BILLING' -ErrorAction SilentlyContinue).Name
+            $completed = (TabExpansion2 -inputScript 'Get-ImapMessage -Account BIL' -cursorColumn 28).CompletionMatches.CompletionText
+            Remove-ImapAccount 'BILL*'
+        } finally {
+            [Threading.Thread]::CurrentThread.CurrentCulture = $culture
+        }
+
+        $found | Should -Be 'billing'
+        $named | Should -Be 'billing'
+        $completed | Should -Be 'billing'
+        @((Get-Content -Path $accountsFile -Raw | ConvertFrom-Json -AsHashtable).Accounts.Keys) | Should -Be 'work'
+    }
 }
 
 Describe 'The configuration folder' {

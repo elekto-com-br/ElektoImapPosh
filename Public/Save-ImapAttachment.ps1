@@ -136,13 +136,13 @@ Function Save-ImapAttachment {
         [Parameter(Mandatory = $true)]
         [string]$Path,
 
-        # A pattern -like cannot read is refused here, rather than stop the command at the first attachment
+        # A pattern that is not valid is refused here, rather than stop the command at the first attachment
         [SupportsWildcards()]
-        [ValidateScript({ $null = '' -like $_; $true })]
+        [ValidateScript({ Assert-WildcardPattern $_; $true })]
         [string[]]$Name,
 
         [SupportsWildcards()]
-        [ValidateScript({ $null = '' -like $_; $true })]
+        [ValidateScript({ Assert-WildcardPattern $_; $true })]
         [string[]]$ContentType,
 
         [switch]$Inline,
@@ -162,8 +162,6 @@ Function Save-ImapAttachment {
         $directory = $PSCmdlet.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path, [ref]$provider, [ref]$drive)
         # The path of another provider (HKCU:\Software) would be read by .NET as relative to the directory of the process
         if ($provider.Name -ne 'FileSystem') { throw "'$Path' is not a directory of the file system, so no attachment can be saved in it." }
-        # Composed, as the names of the files are (Get-AttachmentFileName), so that a pattern written decomposed finds them
-        $Name = @($Name | ForEach-Object { ConvertTo-ComposedText $_ })
     }
 
     process {
@@ -210,12 +208,7 @@ Function Save-ImapAttachment {
 
             $parts = @(foreach ($candidate in (Get-ImapPartList $session $item $summary)) {
                     if ($candidate.Inline -and -not $Inline) { continue }
-                    if ($Name) {
-                        # The name the message gives composed too, as the patterns and the names of the files are, since a
-                        # pattern with wildcards is matched character by character (Copilot on #13)
-                        $given = ConvertTo-ComposedText $candidate.Name
-                        if (-not @($Name | Where-Object { (Test-Wildcard $given $_) -or (Test-Wildcard $candidate.FileName $_) }).Count) { continue }
-                    }
+                    if ($Name -and -not @($Name | Where-Object { (Test-Wildcard $candidate.Name $_) -or (Test-Wildcard $candidate.FileName $_) }).Count) { continue }
                     if ($ContentType -and -not @($ContentType | Where-Object { Test-Wildcard $candidate.ContentType $_ }).Count) { continue }
                     $candidate
                 })
