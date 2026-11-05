@@ -208,7 +208,12 @@ Function Save-ImapAttachment {
 
             $parts = @(foreach ($candidate in (Get-ImapPartList $session $item $summary)) {
                     if ($candidate.Inline -and -not $Inline) { continue }
-                    if ($Name -and -not @($Name | Where-Object { (Test-Wildcard $candidate.Name $_) -or (Test-Wildcard $candidate.FileName $_) }).Count) { continue }
+                    if ($Name) {
+                        # The name the message gives composed too, as the patterns and the names of the files are, since a
+                        # pattern with wildcards is matched character by character (Copilot on #13)
+                        $given = ConvertTo-ComposedText $candidate.Name
+                        if (-not @($Name | Where-Object { (Test-Wildcard $given $_) -or (Test-Wildcard $candidate.FileName $_) }).Count) { continue }
+                    }
                     if ($ContentType -and -not @($ContentType | Where-Object { Test-Wildcard $candidate.ContentType $_ }).Count) { continue }
                     $candidate
                 })

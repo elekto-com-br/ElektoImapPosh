@@ -690,6 +690,17 @@ Describe 'Save-ImapAttachment on Gmail' {
         $files.Count | Should -Be 2
     }
 
+    # The second "relatorio.pdf" is saved as "relatorio (2).pdf", which the pattern does not name: only the name the
+    # message gives finds it, so that name is composed too, as the pattern is. A pattern without wildcards, or with
+    # only a star at its end, would find it even so: WildcardPattern then compares the whole text by culture, which
+    # takes the two forms for one, and any other pattern character by character (Copilot on #13)
+    It 'finds by -Name the name a message gives decomposed, also when its file is numbered' {
+        $files = Save-ImapAttachment open -Folder All -Uid 24 -Path (New-TestDirectory 'accents-given') -Name "*relat`u{F3}rio.pdf"
+
+        $files.Count | Should -Be 2
+        [IO.File]::ReadAllText($files[1].FullName) | Should -BeExactly '%PDF decomposed'
+    }
+
     It 'shows a name that carries an escape sequence without it, in its messages' {
         $files = Save-ImapAttachment strict -Folder All -Uid 29 -Path (New-TestDirectory 'escape') -ErrorVariable errors -ErrorAction SilentlyContinue
 
