@@ -190,8 +190,11 @@ function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [strin
     # byte: MimeKit, parsing it, would write its lines with the line ends of the platform, and what is not a message as
     # nothing. Unless it comes encoded (base64, quoted-printable), which MimeKit gives as a file, decoded as any other.
     $asKept = $Part.ContentType.MediaType -eq 'message' -and $Part.ContentTransferEncoding -notin 'base64', 'quoted-printable'
+    # A part that is the whole body of the message has no number: its section is TEXT, since BODY[] would carry the
+    # headers of the message around it too (Copilot on #13)
+    $section = if ($Part.PartSpecifier) { [string]$Part.PartSpecifier } else { 'TEXT' }
     $none = [System.Threading.CancellationToken]::None
-    $task = if ($asKept) { $Folder.GetStreamAsync($Summary.UniqueId, [string]$Part.PartSpecifier, $none, $null) } else { $Folder.GetBodyPartAsync($Summary.UniqueId, $Part, $none, $null) }
+    $task = if ($asKept) { $Folder.GetStreamAsync($Summary.UniqueId, $section, $none, $null) } else { $Folder.GetBodyPartAsync($Summary.UniqueId, $Part, $none, $null) }
     $failure = Wait-ImapTask $task
     if ($failure) {
         Write-ImapError $Cmdlet "Could not fetch the part '$Shown' of ${where}: $failure" 'AttachmentFetchFailed' ReadError $Shown

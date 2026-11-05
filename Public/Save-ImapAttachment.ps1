@@ -153,8 +153,6 @@ Function Save-ImapAttachment {
         # The files this command saved, which it never replaces: UIDs are per folder, so messages of other folders can
         # give the same name, -UniqueName or not
         $written = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        # The messages handled, so that one given twice (-Uid 12, 12) is saved once
-        $handled = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         # Here, before any input, only what was typed is bound: see Get-ImapFolder
         $folderFromPipeline = -not $PSBoundParameters.ContainsKey('Folder')
         if (-not (Test-Path -LiteralPath $Path -PathType Container)) { throw "There is no directory '$Path' to save the attachments in: create it first." }
@@ -188,7 +186,10 @@ Function Save-ImapAttachment {
                 Write-ImapError $PSCmdlet "There is no message with the UID $id in the folder '$($item.FullName)' of $($settings.User)." 'MessageNotFound' ObjectNotFound $id
                 continue
             }
-            if (-not $handled.Add("$($settings.User)`n$($item.FullName)`n$($item.UidValidity)`n$id")) {
+            # A message given twice (-Uid 12, 12) is saved once. Kept for each session: two accounts may give the same
+            # user, folder, UIDVALIDITY and UID on two servers (Copilot on #13)
+            if (-not $session.ContainsKey('MessagesSeen')) { $session.MessagesSeen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal) }
+            if (-not $session.MessagesSeen.Add("$($item.FullName)`n$($item.UidValidity)`n$id")) {
                 Write-Verbose "$where was given more than once: its attachments are saved once."
                 continue
             }

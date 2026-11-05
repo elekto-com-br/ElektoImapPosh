@@ -177,7 +177,7 @@ Describe 'Save-ImapAttachment on Gmail' {
     BeforeAll {
         $now = [DateTimeOffset]::Now
         $client = 'mx.google.com; dmarc=pass header.from=client.example'
-        $server = Start-FakeGmail @(
+        $messages = @(
             @{ Uid = 10; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Report'; Date = $now.AddHours(-6); Size = 5000; AuthenticationResults = $client
                 Attachments = @(@{ Name = 'report.pdf'; Type = 'application/pdf'; Data = '%PDF-1.4 report' }, @{ Name = 'photo.jpg'; Type = 'image/jpeg'; Data = 'JPEG photo' })
             }
@@ -277,8 +277,15 @@ Describe 'Save-ImapAttachment on Gmail' {
             @{ Uid = 29; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Escape'; Date = $now.AddSeconds(-30); Size = 9000; AuthenticationResults = $client
                 Attachments = @(@{ Name = "report`e[2J.exe"; Type = 'application/octet-stream'; Data = 'MZ program' })
             }
+            # A message whose whole body is the message it forwards, attached: its part is the root, with no number
+            @{ Uid = 30; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Only a message'; Date = $now.AddSeconds(-20); Size = 9000; AuthenticationResults = $client
+                Whole = @{ Name = 'forwarded.eml'; Type = 'message/rfc822'; Encoding = '7bit'; Data = "From: Someone <someone@client.example>`r`nSubject: Inside`r`n`r`nThe text inside.`r`n" }
+            }
         )
-        $passwords = Set-TestAccount 'gmail-attachments' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; strict = @{ Policy = 'strict' }; one = @{ Policy = 'one' }; pdf = @{ Policy = 'pdf' }; prefixed = @{ Policy = 'prefixed' }; exact = @{ Policy = 'exact' }; named = @{ Policy = 'named' }; accents = @{ Policy = 'accents' }; small = @{ Policy = 'small' }; zip = @{ Policy = 'zip' } } -Policies @{
+        $server = Start-FakeGmail $messages
+        # Another server, where the account "elsewhere" finds the same user, folder, UIDVALIDITY and UID 10
+        $elsewhere = Start-FakeGmail @($messages | Where-Object { $_.Uid -eq 10 })
+        $passwords = Set-TestAccount 'gmail-attachments' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; strict = @{ Policy = 'strict' }; one = @{ Policy = 'one' }; pdf = @{ Policy = 'pdf' }; prefixed = @{ Policy = 'prefixed' }; exact = @{ Policy = 'exact' }; named = @{ Policy = 'named' }; accents = @{ Policy = 'accents' }; small = @{ Policy = 'small' }; zip = @{ Policy = 'zip' }; elsewhere = @{ Port = $elsewhere.Port; Policy = 'pdf' } } -Policies @{
             strict = @{
                 DenyFolders                = @('Finance/*')
                 AllowAttachmentsFrom       = @('*@client.example', 'me@gmail.com')
@@ -305,6 +312,7 @@ Describe 'Save-ImapAttachment on Gmail' {
 
     AfterAll {
         Stop-FakeGmail $server
+        Stop-FakeGmail $elsewhere
         foreach ($name in $passwords) { [Environment]::SetEnvironmentVariable($name, $null) }
         $env:IMAP_CONFIG_DIR = $null
     }
@@ -729,6 +737,15 @@ Describe 'Save-ImapAttachment on Gmail' {
         [Convert]::ToHexString([IO.File]::ReadAllBytes($files[1].FullName)) | Should -Be ([Convert]::ToHexString([Text.Encoding]::UTF8.GetBytes("%PDF-1.4`r`n%%EOF")))
     }
 
+    # BODY[] would carry the headers of the message around it too (Copilot on #13)
+    It 'saves a message attached as the whole body of another as the server keeps it, without the headers around it' {
+        $files = Save-ImapAttachment open -Folder All -Uid 30 -Path (New-TestDirectory 'whole-eml')
+
+        $files.Name | Should -Be 'forwarded.eml'
+        $inside = [Text.Encoding]::UTF8.GetBytes("From: Someone <someone@client.example>`r`nSubject: Inside`r`n`r`nThe text inside.`r`n")
+        [Convert]::ToHexString([IO.File]::ReadAllBytes($files[0].FullName)) | Should -Be ([Convert]::ToHexString($inside))
+    }
+
     It 'never replaces a read-only file, -Force or not, and says so before fetching the attachment' -Skip:$isRoot {
         $directory = New-TestDirectory 'read-only'
         $existing = Join-Path $directory 'report.pdf'
@@ -779,6 +796,17 @@ Describe 'Save-ImapAttachment on Gmail' {
 
         $errors | Should -BeNullOrEmpty
         $files.Name | Should -Be 'report.pdf', 'photo.jpg'
+    }
+
+    # Two servers may give the same user, folder, UIDVALIDITY and UID: the message of the second account is not taken
+    # for a message given twice (Copilot on #13)
+    It 'does not take the messages of two accounts with the same UID for one' {
+        $two = [PSCustomObject]@{ Account = 'open'; Folder = '[Gmail]/All Mail'; Uid = 10 }, [PSCustomObject]@{ Account = 'elsewhere'; Folder = '[Gmail]/All Mail'; Uid = 10 }
+        $files = $two | Save-ImapAttachment -Path (New-TestDirectory 'two-accounts') -Name photo.jpg -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $files.Account | Should -Be 'open'
+        $errors.Count | Should -Be 1
+        "$($errors[0])" | Should -BeLike "*'photo.jpg'*AllowAttachmentTypes of the policy 'pdf'."
     }
 
     # A program that watches the directory may take a file away as soon as it comes

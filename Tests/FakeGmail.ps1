@@ -13,7 +13,8 @@
 # the first of a multipart/mixed when it has attachments), Attachments (each a hashtable: Name, Type, Data, its content
 # as text, sent in base64, or as it is with Encoding 7bit, as a message attached comes, Octets, a size to declare in
 # place of the real one, Disposition, attachment by default, or inline, or none, and ContentId) or Attachment (the name
-# of a PDF), Raw (the X-GM-RAW
+# of a PDF), or Whole (one such hashtable, the whole body of the message, as a message that forwards another as all it
+# carries), Raw (the X-GM-RAW
 # searches it matches; any other search matches every message of the folder), and ChangedElsewhere: as if another
 # client had changed its flags, a FETCH of them comes, unasked, with every UID FETCH that does not ask for it.
 
@@ -85,13 +86,19 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                 return ($lines -join "`r`n") + "`r`n`r`n"
             }
             # A section of a message, as BODY[section] gives it: the whole message (""), a part ("1", the text, "2" and on, the
-            # attachments), or the headers of a part ("1.MIME")
+            # attachments), or the headers of a part ("1.MIME"); of a message whose whole body is one part (Whole), its
+            # body ("TEXT", or "1")
             function Get-Section($Message, [string]$Section) {
+                $top = "From: $($Message.From)`r`nTo: Me <me@gmail.com>`r`nSubject: $($Message.Subject)`r`nMessage-ID: <$($Message.Uid)@fake.example>`r`nMIME-Version: 1.0`r`n"
+                if ($Message.Whole) {
+                    if ($Section -eq '') { return $top + (Get-AttachmentHeader $Message.Whole) + (Get-PartBody $Message.Whole) }
+                    if ($Section -in 'TEXT', '1') { return Get-PartBody $Message.Whole }
+                    return ''
+                }
                 $text = if ($Message.Text) { $Message.Text } else { "The body of $($Message.Subject)." }
                 $textHeaders = "Content-Type: text/plain; charset=utf-8`r`nContent-Transfer-Encoding: 8bit`r`n`r`n"
                 $attachments = Get-Attachment $Message
                 if ($Section -eq '') {
-                    $top = "From: $($Message.From)`r`nTo: Me <me@gmail.com>`r`nSubject: $($Message.Subject)`r`nMessage-ID: <$($Message.Uid)@fake.example>`r`nMIME-Version: 1.0`r`n"
                     if (-not $attachments.Count) { return $top + $textHeaders + $text }
                     $parts = @("--b1`r`n$textHeaders$text`r`n") + @(foreach ($attachment in $attachments) { "--b1`r`n$(Get-AttachmentHeader $attachment)$(Get-PartBody $attachment)`r`n" })
                     return $top + "Content-Type: multipart/mixed; boundary=b1`r`n`r`n" + ($parts -join '') + "--b1--`r`n"
@@ -106,6 +113,26 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                     return "$(Get-PartBody $attachment)`r`n"
                 }
                 return ''
+            }
+
+            # The structure of a part that is no text of the message, as BODYSTRUCTURE gives it
+            function Format-PartStructure($Attachment) {
+                $type, $subtype = $Attachment.Type -split '/'
+                # Without a name, no parameters at all, as a server gives them
+                $name = Format-Quoted $Attachment.Name
+                $parameters = if ($Attachment.Name) { "(`"NAME`" $name)" } else { 'NIL' }
+                $kind = (Get-Disposition $Attachment).ToUpperInvariant()
+                $disposition = if ($kind -eq 'NONE') { 'NIL' } elseif ($Attachment.Name) { "(`"$kind`" (`"FILENAME`" $name))" } else { "(`"$kind`" NIL)" }
+                $id = if ($Attachment.ContentId) { Format-Quoted "<$($Attachment.ContentId)>" } else { 'NIL' }
+                $seven = $Attachment.Encoding -eq '7bit'
+                $octets = if ($Attachment.Octets) { $Attachment.Octets } elseif ($seven) { [Text.Encoding]::UTF8.GetByteCount($Attachment.Data) } else { (Get-PartBody $Attachment).Length + 2 }
+                # A part of type TEXT also gives its number of lines, after its size; one of type MESSAGE/RFC822 the
+                # envelope and the structure of the message it carries, and then its number of lines
+                $size = if ($type -eq 'text') { "$octets 1" }
+                elseif ($Attachment.Type -eq 'message/rfc822') { "$octets (NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL) (`"TEXT`" `"PLAIN`" NIL NIL NIL `"7BIT`" 0 0 NIL NIL NIL NIL) 1" }
+                else { "$octets" }
+                $encoding = if ($seven) { '7BIT' } else { 'BASE64' }
+                return "(`"$($type.ToUpperInvariant())`" `"$($subtype.ToUpperInvariant())`" $parameters $id NIL `"$encoding`" $size NIL $disposition NIL NIL)"
             }
 
             # The items asked for, and only those, as Gmail answers; literals counted in the bytes of UTF-8
@@ -124,25 +151,10 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                     ) -join ' ') + ')'
                 $text = '("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 20 1 NIL NIL NIL NIL)'
                 $attachments = Get-Attachment $Message
-                $structure = if (-not $attachments.Count) { $text } else {
-                    $parts = foreach ($attachment in $attachments) {
-                        $type, $subtype = $attachment.Type -split '/'
-                        # Without a name, no parameters at all, as a server gives them
-                        $name = Format-Quoted $attachment.Name
-                        $parameters = if ($attachment.Name) { "(`"NAME`" $name)" } else { 'NIL' }
-                        $kind = (Get-Disposition $attachment).ToUpperInvariant()
-                        $disposition = if ($kind -eq 'NONE') { 'NIL' } elseif ($attachment.Name) { "(`"$kind`" (`"FILENAME`" $name))" } else { "(`"$kind`" NIL)" }
-                        $id = if ($attachment.ContentId) { Format-Quoted "<$($attachment.ContentId)>" } else { 'NIL' }
-                        $seven = $attachment.Encoding -eq '7bit'
-                        $octets = if ($attachment.Octets) { $attachment.Octets } elseif ($seven) { [Text.Encoding]::UTF8.GetByteCount($attachment.Data) } else { (Get-PartBody $attachment).Length + 2 }
-                        # A part of type TEXT also gives its number of lines, after its size; one of type MESSAGE/RFC822 the
-                        # envelope and the structure of the message it carries, and then its number of lines
-                        $size = if ($type -eq 'text') { "$octets 1" }
-                        elseif ($attachment.Type -eq 'message/rfc822') { "$octets (NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL) (`"TEXT`" `"PLAIN`" NIL NIL NIL `"7BIT`" 0 0 NIL NIL NIL NIL) 1" }
-                        else { "$octets" }
-                        $encoding = if ($seven) { '7BIT' } else { 'BASE64' }
-                        "(`"$($type.ToUpperInvariant())`" `"$($subtype.ToUpperInvariant())`" $parameters $id NIL `"$encoding`" $size NIL $disposition NIL NIL)"
-                    }
+                $structure = if ($Message.Whole) { Format-PartStructure $Message.Whole }
+                elseif (-not $attachments.Count) { $text }
+                else {
+                    $parts = foreach ($attachment in $attachments) { Format-PartStructure $attachment }
                     "($text$($parts -join '') `"MIXED`" (`"BOUNDARY`" `"b1`") NIL NIL NIL)"
                 }
                 $labels = @($Message.Labels | ForEach-Object { Format-Quoted $_ }) -join ' '
