@@ -52,10 +52,10 @@ Save-ImapAttachment
     -Folder String, position 1, from the pipeline by property name
     -Uid UInt32[], position 2, mandatory, from the pipeline by property name
     -Confirm SwitchParameter, alias cf, ConfirmImpact Medium
-    -ContentType String[], SupportsWildcards
+    -ContentType String[], SupportsWildcards, ValidateScript({ $null = '' -like $_; $true })
     -Force SwitchParameter
     -Inline SwitchParameter
-    -Name String[], SupportsWildcards
+    -Name String[], SupportsWildcards, ValidateScript({ $null = '' -like $_; $true })
     -Path String, mandatory
     -UidValidity UInt32, from the pipeline by property name
     -UniqueName SwitchParameter

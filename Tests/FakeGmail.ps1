@@ -11,8 +11,9 @@
 # Each message is a hashtable: Uid, Folders (the full names of those it is in), Labels, ThreadId, From, Subject, Date,
 # Size, Seen, AuthenticationResults (the value of the topmost header), Text (of its text/plain part, the only one, or
 # the first of a multipart/mixed when it has attachments), Attachments (each a hashtable: Name, Type, Data, its content
-# as text, sent in base64, Octets, a size to declare in place of the real one, Disposition, attachment by default, or
-# inline, or none, and ContentId) or Attachment (the name of a PDF), Raw (the X-GM-RAW
+# as text, sent in base64, or as it is with Encoding 7bit, as a message attached comes, Octets, a size to declare in
+# place of the real one, Disposition, attachment by default, or inline, or none, and ContentId) or Attachment (the name
+# of a PDF), Raw (the X-GM-RAW
 # searches it matches; any other search matches every message of the folder), and ChangedElsewhere: as if another
 # client had changed its flags, a FETCH of them comes, unasked, with every UID FETCH that does not ask for it.
 
@@ -65,7 +66,11 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                 if ($Message.Attachment) { return , @(@{ Name = $Message.Attachment; Type = 'application/pdf'; Data = "%PDF-1.4`n" }) }
                 return , @()
             }
-            function Get-Base64($Attachment) { return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Attachment.Data)) }
+            # The content of an attachment as the message carries it: in base64, or as it is with Encoding 7bit
+            function Get-PartBody($Attachment) {
+                if ($Attachment.Encoding -eq '7bit') { return $Attachment.Data }
+                return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Attachment.Data))
+            }
             # The disposition of an attachment: attachment, unless it says inline, or none (no Content-Disposition)
             function Get-Disposition($Attachment) { if ($Attachment.Disposition) { return $Attachment.Disposition }; return 'attachment' }
             function Get-AttachmentHeader($Attachment) {
@@ -75,7 +80,7 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                     if ($Attachment.Name) { "Content-Type: $($Attachment.Type); name=`"$name`"" } else { "Content-Type: $($Attachment.Type)" }
                     if ($disposition -ne 'none') { if ($Attachment.Name) { "Content-Disposition: $disposition; filename=`"$name`"" } else { "Content-Disposition: $disposition" } }
                     if ($Attachment.ContentId) { "Content-ID: <$($Attachment.ContentId)>" }
-                    'Content-Transfer-Encoding: base64'
+                    if ($Attachment.Encoding -eq '7bit') { 'Content-Transfer-Encoding: 7bit' } else { 'Content-Transfer-Encoding: base64' }
                 )
                 return ($lines -join "`r`n") + "`r`n`r`n"
             }
@@ -88,7 +93,7 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                 if ($Section -eq '') {
                     $top = "From: $($Message.From)`r`nTo: Me <me@gmail.com>`r`nSubject: $($Message.Subject)`r`nMessage-ID: <$($Message.Uid)@fake.example>`r`nMIME-Version: 1.0`r`n"
                     if (-not $attachments.Count) { return $top + $textHeaders + $text }
-                    $parts = @("--b1`r`n$textHeaders$text`r`n") + @(foreach ($attachment in $attachments) { "--b1`r`n$(Get-AttachmentHeader $attachment)$(Get-Base64 $attachment)`r`n" })
+                    $parts = @("--b1`r`n$textHeaders$text`r`n") + @(foreach ($attachment in $attachments) { "--b1`r`n$(Get-AttachmentHeader $attachment)$(Get-PartBody $attachment)`r`n" })
                     return $top + "Content-Type: multipart/mixed; boundary=b1`r`n`r`n" + ($parts -join '') + "--b1--`r`n"
                 }
                 if ($Section -eq '1') { return $text }
@@ -96,7 +101,9 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                 if ($Section -match '^(\d+)(\.MIME)?$' -and [int]$Matches[1] -ge 2 -and [int]$Matches[1] -le $attachments.Count + 1) {
                     $attachment = $attachments[[int]$Matches[1] - 2]
                     if ($Matches[2]) { return Get-AttachmentHeader $attachment }
-                    return "$(Get-Base64 $attachment)`r`n"
+                    # The CRLF before the boundary is not part of the content, which base64 does not mind
+                    if ($attachment.Encoding -eq '7bit') { return $attachment.Data }
+                    return "$(Get-PartBody $attachment)`r`n"
                 }
                 return ''
             }
@@ -126,10 +133,15 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                         $kind = (Get-Disposition $attachment).ToUpperInvariant()
                         $disposition = if ($kind -eq 'NONE') { 'NIL' } elseif ($attachment.Name) { "(`"$kind`" (`"FILENAME`" $name))" } else { "(`"$kind`" NIL)" }
                         $id = if ($attachment.ContentId) { Format-Quoted "<$($attachment.ContentId)>" } else { 'NIL' }
-                        $octets = if ($attachment.Octets) { $attachment.Octets } else { (Get-Base64 $attachment).Length + 2 }
-                        # A part of type TEXT also gives its number of lines, after its size
-                        $size = if ($type -eq 'text') { "$octets 1" } else { "$octets" }
-                        "(`"$($type.ToUpperInvariant())`" `"$($subtype.ToUpperInvariant())`" $parameters $id NIL `"BASE64`" $size NIL $disposition NIL NIL)"
+                        $seven = $attachment.Encoding -eq '7bit'
+                        $octets = if ($attachment.Octets) { $attachment.Octets } elseif ($seven) { [Text.Encoding]::UTF8.GetByteCount($attachment.Data) } else { (Get-PartBody $attachment).Length + 2 }
+                        # A part of type TEXT also gives its number of lines, after its size; one of type MESSAGE/RFC822 the
+                        # envelope and the structure of the message it carries, and then its number of lines
+                        $size = if ($type -eq 'text') { "$octets 1" }
+                        elseif ($attachment.Type -eq 'message/rfc822') { "$octets (NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL) (`"TEXT`" `"PLAIN`" NIL NIL NIL `"7BIT`" 0 0 NIL NIL NIL NIL) 1" }
+                        else { "$octets" }
+                        $encoding = if ($seven) { '7BIT' } else { 'BASE64' }
+                        "(`"$($type.ToUpperInvariant())`" `"$($subtype.ToUpperInvariant())`" $parameters $id NIL `"$encoding`" $size NIL $disposition NIL NIL)"
                     }
                     "($text$($parts -join '') `"MIXED`" (`"BOUNDARY`" `"b1`") NIL NIL NIL)"
                 }

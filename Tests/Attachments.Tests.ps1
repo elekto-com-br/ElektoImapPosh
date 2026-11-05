@@ -52,15 +52,81 @@ Describe 'The file of an attachment' {
         @{ Case = 'a name that ends in a slash'; Name = 'folder/'; Expected = 'attachment' }
         @{ Case = 'a device name with a superscript digit'; Name = "COM`u{B9}.txt"; Expected = "_COM`u{B9}.txt" }
         @{ Case = 'another device name with a superscript digit'; Name = "lpt`u{B2}"; Expected = "_lpt`u{B2}" }
+        @{ Case = 'a device name followed by spaces, which Windows 10 reads as the device'; Name = 'NUL .txt'; Expected = '_NUL .txt' }
+        @{ Case = 'the console of Windows'; Name = 'conin$'; Expected = '_conin$' }
+        @{ Case = 'the console of Windows, with an extension'; Name = 'CONOUT$.log'; Expected = '_CONOUT$.log' }
+        @{ Case = 'a device name with a digit of another script'; Name = "COM`u{663}.txt"; Expected = "_COM`u{663}.txt" }
+        @{ Case = 'a name written decomposed, as macOS writes names'; Name = "relato`u{301}rio.pdf"; Expected = "relat`u{F3}rio.pdf" }
+        @{ Case = 'a lone surrogate'; Name = 'x' + [char]0xD800 + 'y.pdf'; Expected = 'x_y.pdf' }
+        @{ Case = 'a control character of the C1 set (CSI)'; Name = "a`u{9B}b.txt"; Expected = 'a_b.txt' }
+        @{ Case = 'the Arabic letter mark, which also turns the text'; Name = "a`u{61C}b.txt"; Expected = 'a_b.txt' }
+        @{ Case = 'the short name Windows gives a long one'; Name = 'REPORT~1.PDF'; Expected = 'REPORT_1.PDF' }
+        @{ Case = 'another short name, without an extension'; Name = 'progr~12'; Expected = 'progr_12' }
+        @{ Case = 'a tilde in a name no short name has'; Name = 'report~1.docx'; Expected = 'report~1.docx' }
+        @{ Case = 'the lock file of an Office document'; Name = '~$budget.xlsx'; Expected = '~$budget.xlsx' }
     ) {
-        Get-FileName $Name $ContentType | Should -BeExactly $Expected
+        $fileName = Get-FileName $Name $ContentType
+        # -ceq takes a name and its decomposed form for equal: compared character for character
+        [string]::Equals($fileName, $Expected, [StringComparison]::Ordinal) | Should -BeTrue -Because "'$fileName' should be '$Expected'"
+    }
+
+    # In Turkish, "I" is not the capital of "i": a device name in small letters is a device name all the same
+    It 'tells a device name alike in the Turkish culture' {
+        $culture = [Threading.Thread]::CurrentThread.CurrentCulture
+        try {
+            [Threading.Thread]::CurrentThread.CurrentCulture = 'tr-TR'
+            $fileName = Get-FileName 'conin$'
+        } finally {
+            [Threading.Thread]::CurrentThread.CurrentCulture = $culture
+        }
+
+        $fileName | Should -BeExactly '_conin$'
     }
 
     It 'numbers a name that comes again in the same message, keeping its extension' {
         InModuleScope ElektoImapPosh {
-            $used = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-            foreach ($name in 'image.png', 'IMAGE.png', 'image.png', 'notes', 'notes', 'image (2).png') { Get-UniqueFileName $name $used }
-        } | Should -Be 'image.png', 'IMAGE (2).png', 'image (3).png', 'notes', 'notes (2)', 'image (2) (2).png'
+            $used = [System.Collections.Generic.Dictionary[string, int]]::new([StringComparer]::OrdinalIgnoreCase)
+            foreach ($name in 'image.png', 'IMAGE.png', 'image.png', 'notes', 'notes', 'image (2).png', '.env', '.env') { Get-UniqueFileName $name $used }
+        } | Should -Be 'image.png', 'IMAGE (2).png', 'image (3).png', 'notes', 'notes (2)', 'image (2) (2).png', '.env', '.env (2)'
+    }
+
+    # macOS writes names decomposed (NFD), and takes a name and its decomposed form for one file: with -Force, the
+    # second would replace the first
+    It 'numbers a name written decomposed as the same name written composed' {
+        $names = InModuleScope ElektoImapPosh {
+            $used = [System.Collections.Generic.Dictionary[string, int]]::new([StringComparer]::OrdinalIgnoreCase)
+            foreach ($name in "relat`u{F3}rio.pdf", "relato`u{301}rio.pdf") { Get-UniqueFileName (Get-AttachmentFileName $name 'application/pdf') $used }
+        }
+
+        [string]::Equals($names[1], "relat`u{F3}rio (2).pdf", [StringComparison]::Ordinal) | Should -BeTrue -Because "'$($names[1])' should be numbered"
+    }
+
+    # A sender writes the names: repeated thousands of times, or thousands of characters long, they must not take the
+    # square of that. Compared with itself on the same work in smaller pieces, so that a slow machine does not fail it.
+    It 'numbers a name repeated many times in a time that grows with the number of copies only' {
+        $milliseconds = InModuleScope ElektoImapPosh {
+            foreach ($run in @{ Copies = 100; Times = 20 }, @{ Copies = 2000; Times = 1 }) {
+                (Measure-Command {
+                        foreach ($time in 1..$run.Times) {
+                            $used = [System.Collections.Generic.Dictionary[string, int]]::new([StringComparer]::OrdinalIgnoreCase)
+                            foreach ($copy in 1..$run.Copies) { $null = Get-UniqueFileName 'image.png' $used }
+                        }
+                    }).TotalMilliseconds
+            }
+        }
+
+        $milliseconds[1] | Should -BeLessThan ($milliseconds[0] * 5) -Because "2000 copies once ($($milliseconds[1]) ms) should take about as long as 100 copies 20 times ($($milliseconds[0]) ms)"
+    }
+
+    It 'cuts a long name in a time that grows with its length only' {
+        $milliseconds = InModuleScope ElektoImapPosh {
+            foreach ($run in @{ Length = 1000; Times = 50 }, @{ Length = 50000; Times = 1 }) {
+                $name = ('x' * $run.Length) + '.pdf'
+                (Measure-Command { foreach ($time in 1..$run.Times) { $null = Get-AttachmentFileName $name 'application/pdf' } }).TotalMilliseconds
+            }
+        }
+
+        $milliseconds[1] | Should -BeLessThan ($milliseconds[0] * 5) -Because "a name of 50000 characters once ($($milliseconds[1]) ms) should take about as long as one of 1000 characters 50 times ($($milliseconds[0]) ms)"
     }
 
     It 'cuts a long name to 200 bytes of UTF-8, keeping its extension, and not in the middle of a character' {
@@ -184,8 +250,35 @@ Describe 'Save-ImapAttachment on Gmail' {
                     @{ Name = 'image.png'; Type = 'image/png'; Data = 'PNG print'; Disposition = 'inline'; ContentId = 'print' }
                 )
             }
+            # The same name written composed and decomposed (NFD, as macOS writes names), two files
+            @{ Uid = 24; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Accents'; Date = $now.AddMinutes(-3); Size = 9000; AuthenticationResults = $client
+                Attachments = @(@{ Name = "relat`u{F3}rio.pdf"; Type = 'application/pdf'; Data = '%PDF composed' }, @{ Name = "relato`u{301}rio.pdf"; Type = 'application/pdf'; Data = '%PDF decomposed' })
+            }
+            # A message attached as mail carries it, in 7bit with its CRLF, and a part of that type that is no message
+            @{ Uid = 25; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Forwarded as an attachment'; Date = $now.AddMinutes(-2); Size = 9000; AuthenticationResults = $client
+                Attachments = @(
+                    @{ Name = 'original.eml'; Type = 'message/rfc822'; Encoding = '7bit'; Data = "From: Someone <someone@client.example>`r`nSubject: Original`r`n`r`nThe original text.`r`n" }
+                    @{ Name = 'mislabeled.eml'; Type = 'message/rfc822'; Encoding = '7bit'; Data = "%PDF-1.4`r`n%%EOF" }
+                )
+            }
+            # Names Windows reads its own way: a short name (8.3), which may stand for another file
+            @{ Uid = 26; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Short name'; Date = $now.AddMinutes(-1); Size = 9000; AuthenticationResults = $client
+                Attachments = @(@{ Name = 'REPORT~1.PDF'; Type = 'application/pdf'; Data = '%PDF short' })
+            }
+            # An attachment the structure of the message tells smaller than it is
+            @{ Uid = 27; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Understated'; Date = $now.AddSeconds(-50); Size = 9000; AuthenticationResults = $client
+                Attachments = @(@{ Name = 'small.pdf'; Type = 'application/pdf'; Data = '%PDF ' + ('x' * 2000); Octets = 100 })
+            }
+            # A name in capitals, for patterns in small letters under the Turkish culture
+            @{ Uid = 28; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Invoice'; Date = $now.AddSeconds(-40); Size = 9000; AuthenticationResults = $client
+                Attachments = @(@{ Name = 'INVOICE.ZIP'; Type = 'application/zip'; Data = 'PK invoice' })
+            }
+            # A name with an escape sequence, which clears the screen of a terminal that shows it
+            @{ Uid = 29; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Escape'; Date = $now.AddSeconds(-30); Size = 9000; AuthenticationResults = $client
+                Attachments = @(@{ Name = "report`e[2J.exe"; Type = 'application/octet-stream'; Data = 'MZ program' })
+            }
         )
-        $passwords = Set-TestAccount 'gmail-attachments' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; strict = @{ Policy = 'strict' }; one = @{ Policy = 'one' }; pdf = @{ Policy = 'pdf' }; prefixed = @{ Policy = 'prefixed' }; exact = @{ Policy = 'exact' }; named = @{ Policy = 'named' } } -Policies @{
+        $passwords = Set-TestAccount 'gmail-attachments' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; strict = @{ Policy = 'strict' }; one = @{ Policy = 'one' }; pdf = @{ Policy = 'pdf' }; prefixed = @{ Policy = 'prefixed' }; exact = @{ Policy = 'exact' }; named = @{ Policy = 'named' }; accents = @{ Policy = 'accents' }; small = @{ Policy = 'small' }; zip = @{ Policy = 'zip' } } -Policies @{
             strict = @{
                 DenyFolders                = @('Finance/*')
                 AllowAttachmentsFrom       = @('*@client.example', 'me@gmail.com')
@@ -199,6 +292,10 @@ Describe 'Save-ImapAttachment on Gmail' {
             prefixed = @{ DenyAttachmentTypes = @('16-image*', 'spec.pdf') }
             exact    = @{ DenyAttachmentTypes = @('report.pdf') }
             named    = @{ AllowAttachmentTypes = @('report.pdf') }
+            # A pattern written decomposed, with a wildcard before it: -like would not match the composed name
+            accents  = @{ DenyAttachmentTypes = @("*relato`u{301}rio*") }
+            small    = @{ MaxAttachmentSize = 1000 }
+            zip      = @{ DenyAttachmentTypes = @('*.zip') }
         }
 
         # A new directory of the test drive for each test, and the commands the server got since the test began
@@ -443,15 +540,17 @@ Describe 'Save-ImapAttachment on Gmail' {
     It 'saves once a file that a message both shows and attaches, as Gmail forwards carry it, also when run again' {
         $directory = New-TestDirectory 'forwarded'
         $output = Save-ImapAttachment open -Folder All -Uid 19 -Path $directory -Inline -ContentType image/* -Verbose 4>&1
-        $again = Save-ImapAttachment open -Folder All -Uid 19 -Path $directory -Inline -ContentType image/* -ErrorVariable errors -ErrorAction SilentlyContinue
+        $again = Save-ImapAttachment open -Folder All -Uid 19 -Path $directory -Inline -ContentType image/* -ErrorVariable errors -ErrorAction SilentlyContinue -WarningVariable warnings -WarningAction SilentlyContinue
         $read = Read-ImapMessage open -Folder All -Uid 19
 
         $files = @($output | Where-Object { $_ -is [IO.FileInfo] })
         $files.Name | Should -Be 'snapshot0.jpg'
         $files.Inline | Should -BeFalse
-        @($output | Where-Object { $_ -is [System.Management.Automation.VerboseRecord] -and $_.Message -like "*is the same file as one saved before*" }).Count | Should -Be 1
+        @($output | Where-Object { $_ -is [System.Management.Automation.VerboseRecord] -and $_.Message -like "*is the same file as '*snapshot0.jpg', saved from it, and was not saved again." }).Count | Should -Be 1
         $again | Should -BeNullOrEmpty
         $errors.FullyQualifiedErrorId | Should -BeLike 'AttachmentFileExists,*'
+        # Running again, the file there may have come from another message: said aloud
+        "$warnings" | Should -BeLike "The part 'snapshot0.jpg' of the message 19 * was not saved: it is the same file as '*snapshot0.jpg', which was already in the directory."
         @(Get-ChildItem -LiteralPath $directory).Name | Should -Be 'snapshot0.jpg'
         # Listed both, since only their content tells them apart
         $read.Attachments.FileName | Should -Be 'snapshot0.jpg'
@@ -565,5 +664,143 @@ Describe 'Save-ImapAttachment on Gmail' {
         $camera = (Read-ImapMessage open -Folder All -Uid 17).InlineParts
         $camera.FileName | Should -Be 'attachment.jpg'
         $camera.ContentType | Should -BeExactly 'image/jpeg'
+    }
+
+    It 'saves a name written composed and decomposed as two files of one name, the second numbered' {
+        $files = Save-ImapAttachment open -Folder All -Uid 24 -Path (New-TestDirectory 'accents')
+
+        $files.Count | Should -Be 2
+        [string]::Equals($files[0].Name, "relat`u{F3}rio.pdf", [StringComparison]::Ordinal) | Should -BeTrue -Because "'$($files[0].Name)' should be composed"
+        [string]::Equals($files[1].Name, "relat`u{F3}rio (2).pdf", [StringComparison]::Ordinal) | Should -BeTrue -Because "'$($files[1].Name)' should be composed, and numbered"
+        [IO.File]::ReadAllText($files[1].FullName) | Should -BeExactly '%PDF decomposed'
+    }
+
+    # A pattern with a wildcard before the accents: -like matches a decomposed text to it only when it is decomposed too
+    It 'finds by -Name the files of a name, either written composed or decomposed' {
+        $files = Save-ImapAttachment open -Folder All -Uid 24 -Path (New-TestDirectory 'accents-named') -Name "*relato`u{301}rio*"
+
+        $files.Count | Should -Be 2
+    }
+
+    It 'shows a name that carries an escape sequence without it, in its messages' {
+        $files = Save-ImapAttachment strict -Folder All -Uid 29 -Path (New-TestDirectory 'escape') -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $files | Should -BeNullOrEmpty
+        $errors.Count | Should -Be 1
+        $errors[0].ToString().Contains([char]27) | Should -BeFalse -Because 'an escape sequence would drive the terminal'
+        $errors[0].ToString().Contains("The attachment 'report?[2J.exe' of the message 29") | Should -BeTrue -Because "the message is: $($errors[0])"
+    }
+
+    It 'holds names to the patterns of the policy, either written composed or decomposed' {
+        $files = Save-ImapAttachment accents -Folder All -Uid 24 -Path (New-TestDirectory 'accents-denied') -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $files | Should -BeNullOrEmpty
+        $errors.Count | Should -Be 2
+        foreach ($record in $errors) { $record.FullyQualifiedErrorId | Should -BeLike 'AttachmentWithheld,*' }
+        @((Read-ImapMessage accents -Folder All -Uid 24).Attachments | Where-Object Withheld).Count | Should -Be 2
+    }
+
+    # -like ignores case as the culture of the session does: in Turkish, "I" is not the capital of "i"
+    It 'matches the patterns of the policy, of -Name and of -ContentType alike in the Turkish culture' {
+        $culture = [Threading.Thread]::CurrentThread.CurrentCulture
+        try {
+            [Threading.Thread]::CurrentThread.CurrentCulture = 'tr-TR'
+            $denied = Save-ImapAttachment zip -Folder All -Uid 28 -Path (New-TestDirectory 'turkish-denied') -ErrorVariable errors -ErrorAction SilentlyContinue
+            $named = Save-ImapAttachment open -Folder All -Uid 28 -Path (New-TestDirectory 'turkish-named') -Name '*.zip'
+            $typed = Save-ImapAttachment open -Folder All -Uid 28 -Path (New-TestDirectory 'turkish-typed') -ContentType 'APPLICATION/*'
+        } finally {
+            [Threading.Thread]::CurrentThread.CurrentCulture = $culture
+        }
+
+        $denied | Should -BeNullOrEmpty
+        $errors.FullyQualifiedErrorId | Should -BeLike 'AttachmentWithheld,*'
+        $named.Name | Should -Be 'INVOICE.ZIP'
+        $typed.Name | Should -Be 'INVOICE.ZIP'
+    }
+
+    # MimeKit, parsing the message, would write its lines with the line ends of the platform, and what is no message
+    # as nothing
+    It 'saves a message attached as the server keeps it, byte for byte' {
+        $files = Save-ImapAttachment open -Folder All -Uid 25 -Path (New-TestDirectory 'eml')
+
+        $files.Name | Should -Be 'original.eml', 'mislabeled.eml'
+        $original = [Text.Encoding]::UTF8.GetBytes("From: Someone <someone@client.example>`r`nSubject: Original`r`n`r`nThe original text.`r`n")
+        [Convert]::ToHexString([IO.File]::ReadAllBytes($files[0].FullName)) | Should -Be ([Convert]::ToHexString($original))
+        [Convert]::ToHexString([IO.File]::ReadAllBytes($files[1].FullName)) | Should -Be ([Convert]::ToHexString([Text.Encoding]::UTF8.GetBytes("%PDF-1.4`r`n%%EOF")))
+    }
+
+    It 'never replaces a read-only file, -Force or not, and says so before fetching the attachment' -Skip:$isRoot {
+        $directory = New-TestDirectory 'read-only'
+        $existing = Join-Path $directory 'report.pdf'
+        Set-Content -LiteralPath $existing -Value 'kept' -NoNewline
+        if ($IsWindows) { [IO.File]::SetAttributes($existing, 'ReadOnly') } else { [IO.File]::SetUnixFileMode($existing, 'UserRead') }
+        $before = $server.State.Commands.Count
+        try {
+            $files = Save-ImapAttachment open -Folder All -Uid 10 -Path $directory -Name report.pdf -Force -ErrorVariable errors -ErrorAction SilentlyContinue
+        } finally {
+            if ($IsWindows) { [IO.File]::SetAttributes($existing, 'Normal') } else { [IO.File]::SetUnixFileMode($existing, 'UserRead, UserWrite') }
+        }
+
+        $files | Should -BeNullOrEmpty
+        $errors.Count | Should -Be 1
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'AttachmentFileExists,*'
+        "$($errors[0])" | Should -BeLike "'*report.pdf' already exists, so the part 'report.pdf' of the message 10 * was not saved: it is read-only, and not even -Force replaces such a file."
+        Get-CommandSince $before | Where-Object { $_ -like '*BODY.PEEK`[2*' } | Should -BeNullOrEmpty
+        Get-Content -LiteralPath $existing -Raw | Should -BeExactly 'kept'
+    }
+
+    # Where the volume keeps short names (NTFS when they are on, as on the drive of Windows, and FAT32 always),
+    # REPORT~1.PDF stands for the first long name of the directory that starts so
+    It 'replaces no other file through its short name, -Force or not' -Skip:(-not $IsWindows) {
+        $directory = New-TestDirectory 'short-name'
+        $long = Join-Path $directory 'report-final-version.pdf'
+        Set-Content -LiteralPath $long -Value 'kept' -NoNewline
+        if (-not [IO.File]::Exists((Join-Path $directory 'REPORT~1.PDF'))) {
+            Set-ItResult -Skipped -Because 'the volume of the test drive keeps no short names'
+            return
+        }
+        $files = Save-ImapAttachment open -Folder All -Uid 26 -Path $directory -Force
+
+        $files.Name | Should -Be 'REPORT_1.PDF'
+        Get-Content -LiteralPath $long -Raw | Should -BeExactly 'kept'
+    }
+
+    It 'refuses, once fetched, an attachment larger than the structure of the message told and than MaxAttachmentSize' {
+        $files = Save-ImapAttachment small -Folder All -Uid 27 -Path (New-TestDirectory 'understated') -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $files | Should -BeNullOrEmpty
+        $errors.Count | Should -Be 1
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'AttachmentWithheld,*'
+        "$($errors[0])" | Should -BeLike "The part 'small.pdf' of the message 27 * was not saved: it has 2005 bytes, more than MaxAttachmentSize of the policy 'small' (1000), though the server told of fewer."
+    }
+
+    It 'saves a message given twice once, with no error' {
+        $files = Save-ImapAttachment open -Folder All -Uid 10, 10 -Path (New-TestDirectory 'given-twice') -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $errors | Should -BeNullOrEmpty
+        $files.Name | Should -Be 'report.pdf', 'photo.jpg'
+    }
+
+    # A program that watches the directory may take a file away as soon as it comes
+    It 'returns a file it saved that is gone at once, with no second error' {
+        Mock -ModuleName ElektoImapPosh Get-Item { }
+        $directory = New-TestDirectory 'taken-away'
+        $files = Save-ImapAttachment open -Folder All -Uid 10 -Path $directory -Name report.pdf -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $errors | Should -BeNullOrEmpty
+        $files.FullName | Should -Be (Join-Path $directory 'report.pdf')
+        $files.Uid | Should -Be 10
+    }
+
+    It 'refuses a -Path that is not of the file system' {
+        { Save-ImapAttachment open -Folder All -Uid 10 -Path Env:\ } | Should -Throw "'Env:\' is not a directory of the file system, so no attachment can be saved in it."
+    }
+
+    It 'refuses a pattern that is not valid in -Name or -ContentType, before anything' {
+        $before = $server.State.Commands.Count
+
+        { Save-ImapAttachment open -Folder All -Uid 10 -Path (New-TestDirectory 'bad-pattern') -Name 'image[0' } | Should -Throw "Cannot validate argument on parameter 'Name'. The specified wildcard character pattern is not valid: image``[0"
+        { Save-ImapAttachment open -Folder All -Uid 10 -Path (New-TestDirectory 'bad-type') -ContentType 'image/[' } | Should -Throw "Cannot validate argument on parameter 'ContentType'. The specified wildcard character pattern is not valid: image/``["
+        $server.State.Commands.Count | Should -Be $before
     }
 }

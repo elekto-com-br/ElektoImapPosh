@@ -3,21 +3,39 @@
 # sent the message, so it is never taken as a path, and the policy checks the name the file gets, not the one the
 # message gives (Get-AttachmentWithheldReason, in Policies.ps1).
 
+# Text in the composed form of Unicode (NFC), so that a name written decomposed (NFD), as macOS writes names, is the
+# same name. A lone surrogate, which Normalize refuses and each file system writes its own way, becomes "_".
+function ConvertTo-ComposedText([string]$Text) {
+    return ($Text -replace '[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]', '_').Normalize([Text.NormalizationForm]::FormC)
+}
+
+# A name from a message as the messages of the module show it: its control characters, which can drive a terminal (an
+# escape sequence), and those that reverse the direction of text, as "?"
+function Format-ShownName([string]$Name) {
+    return $Name -replace '[\p{Cc}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]', '?'
+}
+
 # The name an attachment is saved under. Only the last part of the name the message gives, so that it cannot be
-# written elsewhere ("../../x", "C:\x"); without the characters Windows refuses in a file name, control characters,
-# and those that reverse the direction of text (they can show "exe.pdf" for "fdp.exe"); without the spaces and dots
-# Windows drops at the end ("x.exe." would be saved as "x.exe"); at most 200 bytes of UTF-8, keeping the extension
-# (Linux takes 255 bytes in a name, and the number, the UID and the temporary suffix need some); "_" before a name
-# Windows keeps for a device (CON, NUL, COM1, COM with a superscript digit...); and "attachment", with the extension of
-# its MIME type (attachment.png), when nothing is left. The same on every platform, so that a file saved on Linux
-# keeps its name on Windows.
+# written elsewhere ("../../x", "C:\x"); composed (ConvertTo-ComposedText), since macOS takes a name and its decomposed
+# form for one file, where Windows and Linux see two; without the characters Windows refuses in a file name, control
+# characters, and those that reverse the direction of text (they can show "exe.pdf" for "fdp.exe"); without the spaces
+# and dots Windows drops at the end ("x.exe." would be saved as "x.exe"); at most 200 bytes of UTF-8, keeping the
+# extension (Linux takes 255 bytes in a name, and the number, the UID and the temporary suffix need some); "_" for the
+# "~" of a name shaped as the short name (8.3) Windows gives a long one, since "REPORT~1.PDF" can stand for the
+# "report-final.pdf" of the directory, which -Force would replace; "_" before a name Windows keeps for a device (CON,
+# NUL, COM1, COM with a superscript digit, CONIN$...), also followed by spaces or an extension ("NUL .txt", which
+# Windows 10 reads as NUL); and "attachment", with the extension of its MIME type (attachment.png), when nothing is
+# left. The same on every platform, so that a file saved on Linux keeps its name on Windows. The sender writes the
+# name, of any length: it is cut in a few steps, not one for each character.
 function Get-AttachmentFileName([string]$Name, [string]$ContentType) {
-    $leaf = ($Name -split '[\\/]')[-1]
-    $leaf = ($leaf -replace '[<>:"|?*\x00-\x1F\x7F\u200E\u200F\u202A-\u202E\u2066-\u2069]', '_').Trim().TrimEnd('.', ' ')
+    $leaf = ConvertTo-ComposedText ($Name -split '[\\/]')[-1]
+    $leaf = ($leaf -replace '[<>:"|?*\p{Cc}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]', '_').Trim().TrimEnd('.', ' ')
     if ([Text.Encoding]::UTF8.GetByteCount($leaf) -gt 200) {
         $extension = [IO.Path]::GetExtension($leaf)
         if ([Text.Encoding]::UTF8.GetByteCount($extension) -gt 20) { $extension = '' }
-        $base = $leaf.Substring(0, $leaf.Length - $extension.Length)
+        # A character takes a byte at least, so no more of them than there are bytes of room
+        $base = $leaf.Substring(0, [Math]::Min($leaf.Length - $extension.Length, 200 - $extension.Length))
+        if ($base -and [char]::IsHighSurrogate($base[-1])) { $base = $base.Substring(0, $base.Length - 1) }
         while ($base -and [Text.Encoding]::UTF8.GetByteCount($base + $extension) -gt 200) {
             $base = $base.Substring(0, $base.Length - 1)
             # Not between the two halves of a character outside the BMP
@@ -26,7 +44,9 @@ function Get-AttachmentFileName([string]$Name, [string]$ContentType) {
         # The cut may leave dots or spaces at the end ("x.exe.zzz" cut after "x.exe."), which Windows would drop
         $leaf = ($base + $extension).TrimEnd('.', ' ')
     }
-    if ($leaf -match '^(CON|PRN|AUX|NUL|COM[0-9\xB9\xB2\xB3]|LPT[0-9\xB9\xB2\xB3])(\.|$)') { $leaf = "_$leaf" }
+    if ($leaf -match '^(?=[^.]{1,8}(\.[^.]{0,3})?$)[^.]*~\d+(\.|$)') { $leaf = $leaf.Replace('~', '_') }
+    # Ignoring case as Windows does, whatever the culture of the session: in Turkish, "i" is not the small "I"
+    if ([regex]::IsMatch($leaf, '^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[\d\xB9\xB2\xB3]|LPT[\d\xB9\xB2\xB3]) *(\.|$)', 'IgnoreCase, CultureInvariant')) { $leaf = "_$leaf" }
     if (-not $leaf) {
         $extension = $null
         if ($ContentType -and [MimeKit.MimeTypes]::TryGetExtension($ContentType, [ref]$extension)) { return "attachment$extension" }
@@ -37,11 +57,20 @@ function Get-AttachmentFileName([string]$Name, [string]$ContentType) {
 
 # A file name that $Used does not have yet, which it then gets: the name itself, or, for a name already given to
 # another file of the same message, "name (2).ext", "name (3).ext"... Prints pasted in Gmail are all "image.png".
-function Get-UniqueFileName([string]$FileName, [System.Collections.Generic.HashSet[string]]$Used) {
-    $candidate = $FileName
+# $Used keeps, with each name, the number its next copy tries first: a sender can repeat a name thousands of times,
+# and trying every number again for each copy would take the square of that (24 s for 2,000 copies, measured).
+function Get-UniqueFileName([string]$FileName, [System.Collections.Generic.Dictionary[string, int]]$Used) {
+    if ($Used.TryAdd($FileName, 2)) { return $FileName }
     $base = [IO.Path]::GetFileNameWithoutExtension($FileName)
     $extension = [IO.Path]::GetExtension($FileName)
-    for ($number = 2; -not $Used.Add($candidate); $number++) { $candidate = "$base ($number)$extension" }
+    # A name that only starts with a dot: ".env (2)", not " (2).env"
+    if (-not $base) { $base, $extension = $FileName, '' }
+    $number = $Used[$FileName]
+    do {
+        $candidate = "$base ($number)$extension"
+        $number++
+    } while (-not $Used.TryAdd($candidate, 2))
+    $Used[$FileName] = $number
     return $candidate
 }
 
@@ -58,7 +87,7 @@ function Get-UniqueFileName([string]$FileName, [System.Collections.Generic.HashS
 function Get-ImapPartList($Session, $Folder, $Summary) {
     $attachments = @($Summary.BodyParts | Where-Object { $_.IsAttachment })
     $inline = @($Summary.BodyParts | Where-Object { -not $_.IsAttachment -and $_.ContentType.MediaType -notin 'text', 'message' })
-    $used = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $used = [System.Collections.Generic.Dictionary[string, int]]::new([StringComparer]::OrdinalIgnoreCase)
     return , [object[]]@(foreach ($part in $attachments + $inline) {
             # In lower case: a part without parameters keeps the case of the server, upper case on Gmail
             $type = $part.ContentType.MimeType.ToLowerInvariant()
@@ -87,7 +116,8 @@ function Get-AttachmentSize($Part) {
 }
 
 # Writes the content of an attachment, as MimeKit fetched it, to a stream: a file decoded (base64, quoted-printable),
-# or a message attached (message/rfc822) as it is, which makes an .eml
+# or a message attached that MimeKit parsed, as MimeKit writes it. Save-AttachmentFile fetches a message attached as
+# the server keeps it instead, unless it comes encoded, which MimeKit gives as a file.
 function Write-AttachmentContent($Entity, [IO.Stream]$Stream) {
     if ($Entity -is [MimeKit.MessagePart]) { $Entity.Message.WriteTo($Stream) }
     else { $Entity.Content.DecodeTo($Stream) }
@@ -127,52 +157,77 @@ $script:SaveFileTask = & {
 }
 
 # Saves an attachment of a message in a directory, under $FileName, and returns the file; or $null after reporting why
-# not. Fetches that part alone (BODY.PEEK), and writes it under a temporary name in the same directory, which it then
-# renames ($script:SaveFileTask): whoever watches the directory never sees half a file. An existing file is replaced
-# only with -Force, and a directory never, told before the part is fetched. When the file cannot be written, the one
-# that was there is not returned as if it were the attachment.
-# A part that is the same file as one saved before from the same message, by the SHA-256 of its content in $Saved, is
-# not written again: a message forwarded by Gmail carries an image both shown and attached (JP's NVR, 2026-11-05), and
-# Outlook repeats the logos of a signature. A file that exists counts as saved, so that running again gives the same;
+# not, naming the part $Shown (Format-ShownName). Fetches that part alone (BODY.PEEK), and writes it under a temporary
+# name in the same directory, which it then renames ($script:SaveFileTask): whoever watches the directory never sees
+# half a file under its name. An existing file is replaced only with -Force, and never one the user may not write
+# (read-only: Windows would refuse to replace it, and Linux and macOS replace it all the same), nor a directory, told
+# before the part is fetched. When the file cannot be written, the one that was there is not returned as if it were
+# the attachment.
+# A part that is the same file as one saved before from the same message, by the SHA-256 of its content, is not
+# written again: a message forwarded by Gmail carries an image both shown and attached (JP's NVR, 2026-11-05), and
+# Outlook repeats the logos of a signature. $Saved keeps, for each content, the file that has it. A file that exists
+# counts as saved, so that running again gives the same, with a warning, since it may have come from another message;
 # one that could not be written does not (Copilot on #13), nor one that exists but cannot be read, of unknown content.
-function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [string]$Directory, [string]$FileName, [System.Collections.Generic.HashSet[string]]$Saved, [switch]$Force) {
+function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [string]$Directory, [string]$FileName, [string]$Shown, [System.Collections.Generic.Dictionary[string, object]]$Saved, [switch]$Force) {
     $where = "the message $($Summary.UniqueId.Id) in the folder '$($Folder.FullName)' of $($Session.Settings.User)"
-    $shown = if ($Part.FileName) { $Part.FileName } else { $FileName }
     $path = [IO.Path]::Combine($Directory, $FileName)
     if ([IO.Directory]::Exists($path)) {
-        Write-ImapError $Cmdlet "'$path' is a directory, so the part '$shown' of $where was not saved." 'AttachmentFileExists' ResourceExists $path
+        Write-ImapError $Cmdlet "'$path' is a directory, so the part '$Shown' of $where was not saved." 'AttachmentFileExists' ResourceExists $path
         return $null
     }
-    if (-not $Force -and [IO.File]::Exists($path)) {
+    # One look at the file, so that one taken away meanwhile raises no exception
+    $existing = [IO.FileInfo]::new($path)
+    if ($existing.Exists -and ($existing.IsReadOnly -or -not $Force)) {
         # A file that cannot be read, such as one another program keeps open with no sharing, counts for no part, and
         # Get-FileHash adds no error of its own to the one refusal
-        $existing = Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Ignore
-        if ($existing) { $null = $Saved.Add($existing.Hash) }
-        Write-ImapError $Cmdlet "'$path' already exists, so the part '$shown' of $where was not saved: give -Force to replace the file." 'AttachmentFileExists' ResourceExists $path
+        $hash = Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Ignore
+        if ($hash -and -not $Saved.ContainsKey($hash.Hash)) { $Saved[$hash.Hash] = @{ Path = $path; Before = $true } }
+        $how = if ($existing.IsReadOnly) { 'it is read-only, and not even -Force replaces such a file' } else { 'give -Force to replace the file' }
+        Write-ImapError $Cmdlet "'$path' already exists, so the part '$Shown' of $where was not saved: $how." 'AttachmentFileExists' ResourceExists $path
         return $null
     }
-    $task = $Folder.GetBodyPartAsync($Summary.UniqueId, $Part, [System.Threading.CancellationToken]::None, $null)
+    # A message attached (message/rfc822, or another message/*) is fetched as the server keeps it, an .eml byte for
+    # byte: MimeKit, parsing it, would write its lines with the line ends of the platform, and what is not a message as
+    # nothing. Unless it comes encoded (base64, quoted-printable), which MimeKit gives as a file, decoded as any other.
+    $asKept = $Part.ContentType.MediaType -eq 'message' -and $Part.ContentTransferEncoding -notin 'base64', 'quoted-printable'
+    $none = [System.Threading.CancellationToken]::None
+    $task = if ($asKept) { $Folder.GetStreamAsync($Summary.UniqueId, [string]$Part.PartSpecifier, $none, $null) } else { $Folder.GetBodyPartAsync($Summary.UniqueId, $Part, $none, $null) }
     $failure = Wait-ImapTask $task
     if ($failure) {
-        Write-ImapError $Cmdlet "Could not fetch the part '$shown' of ${where}: $failure" 'AttachmentFetchFailed' ReadError $shown
+        Write-ImapError $Cmdlet "Could not fetch the part '$Shown' of ${where}: $failure" 'AttachmentFetchFailed' ReadError $Shown
         return $null
     }
-    # Decoded in memory, where MimeKit already holds the part, to tell a file saved before by its content
+    # In memory, where MimeKit already holds the part, to tell a file saved before by its content
     $content = [IO.MemoryStream]::new()
-    Write-AttachmentContent $task.Result $content
+    if ($asKept) {
+        $task.Result.CopyTo($content)
+        $task.Result.Dispose()
+    } else { Write-AttachmentContent $task.Result $content }
+    # MaxAttachmentSize was held to the size the server told before the fetch; this is the size of the file itself
+    $policy = $Session.Settings.Policy
+    if ($policy -and $policy.MaxAttachmentSize -and $content.Length -gt $policy.MaxAttachmentSize) {
+        Write-ImapError $Cmdlet "The part '$Shown' of $where was not saved: it has $($content.Length) bytes, more than MaxAttachmentSize of the policy '$($policy.Name)' ($($policy.MaxAttachmentSize)), though the server told of fewer." 'AttachmentWithheld' PermissionDenied $Shown
+        return $null
+    }
     $content.Position = 0
     $hash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([IO.Stream]$content))
-    if ($Saved.Contains($hash)) {
-        Write-Verbose "The part '$shown' of $where is the same file as one saved before from it, and was not saved again."
+    $same = $null
+    if ($Saved.TryGetValue($hash, [ref]$same)) {
+        if ($same.Before) { Write-Warning "The part '$Shown' of $where was not saved: it is the same file as '$($same.Path)', which was already in the directory." }
+        else { Write-Verbose "The part '$Shown' of $where is the same file as '$($same.Path)', saved from it, and was not saved again." }
         return $null
     }
     $temporary = "$path.$([guid]::NewGuid().ToString('N').Substring(0, 8)).part"
     $failure = Wait-ImapTask ($script:SaveFileTask.Invoke($content, $temporary, $path, [bool]$Force))
     if ($failure) {
-        Write-ImapError $Cmdlet "Could not write '$path', so the part '$shown' of $where was not saved: $failure" 'AttachmentWriteFailed' WriteError $path
+        Write-ImapError $Cmdlet "Could not write '$path', so the part '$Shown' of $where was not saved: $failure" 'AttachmentWriteFailed' WriteError $path
         return $null
     }
-    $null = $Saved.Add($hash)
-    # -Force, or a file whose name starts with a dot, hidden on Linux, is not found
-    return Get-Item -LiteralPath $path -Force
+    $Saved[$hash] = @{ Path = $path; Before = $false }
+    # As PowerShell gives a file, with the PSPath the commands it goes to read; -Force for a name that starts with a dot,
+    # hidden on Linux. A program that takes the file away at once, as one that watches the directory may, leaves the
+    # FileInfo alone, rather than a second error
+    $file = Get-Item -LiteralPath $path -Force -ErrorAction Ignore
+    if (-not $file) { $file = [IO.FileInfo]::new($path) }
+    return $file
 }

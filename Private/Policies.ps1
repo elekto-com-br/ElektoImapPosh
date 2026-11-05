@@ -260,8 +260,14 @@ function Get-WithheldReason($Session, $Folder, $Summary) {
 # Whether a pattern of AllowAttachmentTypes or DenyAttachmentTypes takes an attachment: its MIME type, when the pattern
 # has a "/" (image/*), and otherwise the name its file gets (*.pdf)
 function Test-AttachmentPattern([string]$Pattern, [string]$Type, [string]$FileName) {
-    if ($Pattern.Contains('/')) { return $Type -like $Pattern }
-    return $FileName -like $Pattern
+    $text = if ($Pattern.Contains('/')) { $Type } else { $FileName }
+    return Test-Wildcard $text $Pattern
+}
+
+# Whether a text matches a wildcard pattern, ignoring case alike in every culture: -like ignores it as the culture of
+# the session does, and in Turkish "I" is not the capital of "i", so "*.zip" would miss "INVOICE.ZIP" (measured)
+function Test-Wildcard([string]$Text, [string]$Pattern) {
+    return [WildcardPattern]::new($Pattern, [System.Management.Automation.WildcardOptions]'IgnoreCase, CultureInvariant').IsMatch($Text)
 }
 
 # Why the policy of a session withholds an attachment of a message whose body it lets be read (Get-WithheldReason), in
@@ -306,5 +312,10 @@ function Add-ImapPolicy($Cmdlet, $File, $Settings, [string]$Name) {
     }
     $Settings.Policy = [ordered]@{ Name = $policyName }
     foreach ($key in $File.Policies[$policyName].Keys) { $Settings.Policy[$key] = $File.Policies[$policyName][$key] }
+    # Composed, as the names of the files they match are (Get-AttachmentFileName): a pattern written decomposed would
+    # miss them
+    foreach ($key in 'DenyAttachmentTypes', 'AllowAttachmentTypes') {
+        if ($Settings.Policy.Contains($key)) { $Settings.Policy[$key] = [string[]]@($Settings.Policy[$key] | ForEach-Object { ConvertTo-ComposedText $_ }) }
+    }
     return $Settings
 }

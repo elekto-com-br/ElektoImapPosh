@@ -79,9 +79,8 @@ function Format-ImapAddress($List) {
 # each one is reported, and none is read.
 function Get-ImapMessageByUid($Cmdlet, $Session, [string]$FolderName, [switch]$Literal, [uint32[]]$Uid, [uint32]$UidValidity) {
     $user = $Session.Settings.User
-    $folders = Get-ImapFolderList $Cmdlet $Session
-    if ($null -eq $folders) { return $null }
-    $chosen = Select-ImapFolderList $Cmdlet $Session $folders $FolderName -Literal:$Literal
+    $chosen = Find-ImapFolder $Cmdlet $Session $FolderName -Literal:$Literal
+    if ($null -eq $chosen) { return $null }
     if ($chosen.Count -gt 1) {
         Write-ImapError $Cmdlet "'$FolderName' names $($chosen.Count) folders of $user ($($chosen.FullName -join ', ')), and a UID is of one: give its full name." 'FolderAmbiguous' InvalidArgument $FolderName
         return $null
