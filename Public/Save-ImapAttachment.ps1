@@ -18,9 +18,10 @@ the characters Windows refuses, nor the dots and spaces it drops at the end ("x.
 nor characters that reverse the direction of text, and with "_" before a name Windows keeps for a device
 ("_CON.txt"). A part without a name is "attachment", with the extension of its type ("attachment.png"). A
 name that comes more than once in a message is numbered, attachments first, then inline parts: Gmail names
-every print pasted in a message "image.png", saved as "image.png", "image (2).png"... An inline part that is
-the same file as an attachment (same name and size), as a message forwarded by Gmail carries an image both
-shown and attached, is saved once, as the attachment. Read-ImapMessage shows that name,
+every print pasted in a message "image.png", saved as "image.png", "image (2).png"... A part whose content
+is the same as one saved before from the same message, as a message forwarded by Gmail carries an image
+both shown and attached, or as Outlook repeats the logos of a signature, is not saved again: -Verbose says
+so. Read-ImapMessage shows that name,
 as the FileName of each attachment and inline part. -UniqueName puts the UID of the message before it
 ("12045-image.png"), so that the files of several messages do not take each other's names.
 
@@ -183,17 +184,22 @@ Function Save-ImapAttachment {
                 Write-Verbose "$where has no attachment$(if ($Inline) { ' nor inline part' })$(if ($Name -or $ContentType) { ' of those asked for' })."
                 continue
             }
+            # The files saved from this message, by their content, so that the same file is saved once
+            $saved = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
             foreach ($attachment in $parts) {
                 $what = if ($attachment.Inline) { 'inline part' } else { 'attachment' }
                 $shown = if ($attachment.Name) { $attachment.Name } else { $attachment.FileName }
-                if ($attachment.Withheld) {
-                    Write-ImapError $PSCmdlet "The $what '$shown' of $where was not saved: $($attachment.Withheld)" 'AttachmentWithheld' PermissionDenied $shown
+                $fileName = if ($UniqueName) { "$id-$($attachment.FileName)" } else { $attachment.FileName }
+                # The policy takes the name of the file, and with -UniqueName both names: the file's own, and the one written
+                $why = $attachment.Withheld
+                if (-not $why -and $UniqueName) { $why = Get-AttachmentWithheldReason $session $item $summary $attachment.Part $fileName }
+                if ($why) {
+                    Write-ImapError $PSCmdlet "The $what '$shown' of $where was not saved: $why" 'AttachmentWithheld' PermissionDenied $shown
                     continue
                 }
-                $fileName = if ($UniqueName) { "$id-$($attachment.FileName)" } else { $attachment.FileName }
                 $target = [IO.Path]::Combine($directory, $fileName)
                 if (-not $PSCmdlet.ShouldProcess($target, "Save the $what '$shown' of $where")) { continue }
-                $file = Save-AttachmentFile $PSCmdlet $session $item $summary $attachment.Part $directory $fileName -Force:$Force
+                $file = Save-AttachmentFile $PSCmdlet $session $item $summary $attachment.Part $directory $fileName $saved -Force:$Force
                 if (-not $file) { continue }
                 $file | Add-Member -NotePropertyMembers ([ordered]@{
                         Account    = $settings.Account

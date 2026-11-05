@@ -6,22 +6,27 @@
 # The name an attachment is saved under. Only the last part of the name the message gives, so that it cannot be
 # written elsewhere ("../../x", "C:\x"); without the characters Windows refuses in a file name, control characters,
 # and those that reverse the direction of text (they can show "exe.pdf" for "fdp.exe"); without the spaces and dots
-# Windows drops at the end ("x.exe." would be saved as "x.exe"); "_" before a name Windows keeps for a device (CON,
-# NUL, COM1...); at most 200 characters, keeping the extension; and "attachment", with the extension of its MIME type
-# (attachment.png), when nothing is left. The same on every platform, so that a file saved on Linux keeps its name on
-# Windows.
+# Windows drops at the end ("x.exe." would be saved as "x.exe"); at most 200 bytes of UTF-8, keeping the extension
+# (Linux takes 255 bytes in a name, and the number, the UID and the temporary suffix need some); "_" before a name
+# Windows keeps for a device (CON, NUL, COM1, COM with a superscript digit...); and "attachment", with the extension of
+# its MIME type (attachment.png), when nothing is left. The same on every platform, so that a file saved on Linux
+# keeps its name on Windows.
 function Get-AttachmentFileName([string]$Name, [string]$ContentType) {
     $leaf = ($Name -split '[\\/]')[-1]
     $leaf = ($leaf -replace '[<>:"|?*\x00-\x1F\x7F\u200E\u200F\u202A-\u202E\u2066-\u2069]', '_').Trim().TrimEnd('.', ' ')
-    if ($leaf -match '^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(\.|$)') { $leaf = "_$leaf" }
-    if ($leaf.Length -gt 200) {
+    if ([Text.Encoding]::UTF8.GetByteCount($leaf) -gt 200) {
         $extension = [IO.Path]::GetExtension($leaf)
-        if ($extension.Length -gt 20) { $extension = '' }
-        $length = 200 - $extension.Length
-        # Not between the two halves of a character outside the BMP
-        if ([char]::IsHighSurrogate($leaf[$length - 1])) { $length-- }
-        $leaf = $leaf.Substring(0, $length) + $extension
+        if ([Text.Encoding]::UTF8.GetByteCount($extension) -gt 20) { $extension = '' }
+        $base = $leaf.Substring(0, $leaf.Length - $extension.Length)
+        while ($base -and [Text.Encoding]::UTF8.GetByteCount($base + $extension) -gt 200) {
+            $base = $base.Substring(0, $base.Length - 1)
+            # Not between the two halves of a character outside the BMP
+            if ($base -and [char]::IsHighSurrogate($base[-1])) { $base = $base.Substring(0, $base.Length - 1) }
+        }
+        # The cut may leave dots or spaces at the end ("x.exe.zzz" cut after "x.exe."), which Windows would drop
+        $leaf = ($base + $extension).TrimEnd('.', ' ')
     }
+    if ($leaf -match '^(CON|PRN|AUX|NUL|COM[0-9\xB9\xB2\xB3]|LPT[0-9\xB9\xB2\xB3])(\.|$)') { $leaf = "_$leaf" }
     if (-not $leaf) {
         $extension = $null
         if ($ContentType -and [MimeKit.MimeTypes]::TryGetExtension($ContentType, [ref]$extension)) { return "attachment$extension" }
@@ -46,16 +51,11 @@ function Get-UniqueFileName([string]$FileName, [System.Collections.Generic.HashS
 # message gives, the name its file gets (Get-AttachmentFileName; a name repeated in the message numbered by
 # Get-UniqueFileName, attachments first, so that each file of a message has a name of its own, the same every time,
 # and an attachment keeps its own), the MIME type, the most the file takes (Get-AttachmentSize), why the policy keeps
-# it from being saved, if it does, and Part, the part of MailKit, to fetch it.
-# An inline part of the name and size of an attachment is that file again, as a message forwarded by Gmail carries an
-# image both attached and shown (JP's NVR, 2026-11-05): it is left out, and the attachment saved once.
+# it from being saved, if it does, and Part, the part of MailKit, to fetch it. A part that is the same file as another
+# is listed all the same: only its content tells (Save-AttachmentFile).
 function Get-ImapPartList($Session, $Folder, $Summary) {
     $attachments = @($Summary.BodyParts | Where-Object { $_.IsAttachment })
-    $attached = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    foreach ($part in $attachments) { if ($part.FileName) { $null = $attached.Add("$($part.FileName)|$($part.Octets)") } }
-    $inline = @($Summary.BodyParts | Where-Object {
-            -not $_.IsAttachment -and $_.ContentType.MediaType -notin 'text', 'message' -and -not ($_.FileName -and $attached.Contains("$($_.FileName)|$($_.Octets)"))
-        })
+    $inline = @($Summary.BodyParts | Where-Object { -not $_.IsAttachment -and $_.ContentType.MediaType -notin 'text', 'message' })
     $used = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     return , [object[]]@(foreach ($part in $attachments + $inline) {
             # In lower case: a part without parameters keeps the case of the server, upper case on Gmail
@@ -91,11 +91,15 @@ function Write-AttachmentContent($Entity, [IO.Stream]$Stream) {
 # Saves an attachment of a message in a directory, under $FileName, and returns the file; or $null after reporting why
 # not. Fetches that part alone (BODY.PEEK), and writes it under a temporary name in the same directory, which it then
 # renames: whoever watches the directory never sees half a file. An existing file is replaced only with -Force.
-function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [string]$Directory, [string]$FileName, [switch]$Force) {
+# A part that is the same file as one saved before from the same message, by the SHA-256 of its content in $Saved, is
+# not written again: a message forwarded by Gmail carries an image both shown and attached (JP's NVR, 2026-11-05), and
+# Outlook repeats the logos of a signature. A file that exists counts as saved, so that running again gives the same.
+function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [string]$Directory, [string]$FileName, [System.Collections.Generic.HashSet[string]]$Saved, [switch]$Force) {
     $where = "the message $($Summary.UniqueId.Id) in the folder '$($Folder.FullName)' of $($Session.Settings.User)"
     $shown = if ($Part.FileName) { $Part.FileName } else { $FileName }
     $path = [IO.Path]::Combine($Directory, $FileName)
     if (-not $Force -and ([IO.File]::Exists($path) -or [IO.Directory]::Exists($path))) {
+        if ([IO.File]::Exists($path)) { $null = $Saved.Add((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash) }
         Write-ImapError $Cmdlet "'$path' already exists, so the part '$shown' of $where was not saved: give -Force to replace the file." 'AttachmentFileExists' ResourceExists $path
         return $null
     }
@@ -105,10 +109,17 @@ function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [strin
         Write-ImapError $Cmdlet "Could not fetch the part '$shown' of ${where}: $failure" 'AttachmentFetchFailed' ReadError $shown
         return $null
     }
+    # Decoded in memory, where MimeKit already holds the part, to tell a file saved before by its content
+    $content = [IO.MemoryStream]::new()
+    Write-AttachmentContent $task.Result $content
+    if (-not $Saved.Add([Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($content.ToArray())))) {
+        Write-Verbose "The part '$shown' of $where is the same file as one saved before from it, and was not saved again."
+        return $null
+    }
     $temporary = "$path.$([guid]::NewGuid().ToString('N').Substring(0, 8)).part"
     try {
         $stream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-        try { Write-AttachmentContent $task.Result $stream } finally { $stream.Dispose() }
+        try { $content.Position = 0; $content.CopyTo($stream) } finally { $stream.Dispose() }
         [IO.File]::Move($temporary, $path, [bool]$Force)
     } finally {
         if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }

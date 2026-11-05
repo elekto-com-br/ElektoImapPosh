@@ -45,6 +45,8 @@ Describe 'The file of an attachment' {
         @{ Case = 'no name, and no type'; Name = ''; Expected = 'attachment' }
         @{ Case = 'a name that is only dots'; Name = '..'; Expected = 'attachment' }
         @{ Case = 'a name that ends in a slash'; Name = 'folder/'; Expected = 'attachment' }
+        @{ Case = 'a device name with a superscript digit'; Name = "COM`u{B9}.txt"; Expected = "_COM`u{B9}.txt" }
+        @{ Case = 'another device name with a superscript digit'; Name = "lpt`u{B2}"; Expected = "_lpt`u{B2}" }
     ) {
         Get-FileName $Name $ContentType | Should -BeExactly $Expected
     }
@@ -56,10 +58,17 @@ Describe 'The file of an attachment' {
         } | Should -Be 'image.png', 'IMAGE (2).png', 'image (3).png', 'notes', 'notes (2)', 'image (2) (2).png'
     }
 
-    It 'cuts a long name to 200 characters, keeping its extension, and not in the middle of a character' {
+    It 'cuts a long name to 200 bytes of UTF-8, keeping its extension, and not in the middle of a character' {
         Get-FileName (('x' * 300) + '.pdf') | Should -BeExactly (('x' * 196) + '.pdf')
-        # The 196th character is the first half of an emoji, which goes whole or not at all
+        # Two bytes each, so 98 of them and the extension make 200 bytes
+        Get-FileName (("`u{E9}" * 196) + '.pdf') | Should -BeExactly (("`u{E9}" * 98) + '.pdf')
+        # The emoji after the 195th character would take four bytes more than room is left: it goes whole
         Get-FileName (('x' * 195) + "`u{1F600}" + ('y' * 100) + '.pdf') | Should -BeExactly (('x' * 195) + '.pdf')
+    }
+
+    # Cut after ".exe.", the name would end in a dot that Windows drops: "*.exe" must see the name Windows writes
+    It 'trims the dots and spaces that a cut leaves at the end' {
+        Get-FileName (('x' * 195) + '.exe.' + ('z' * 30)) | Should -BeExactly (('x' * 195) + '.exe')
     }
 
     It 'takes base64 as 3 bytes for 4 characters, and other encodings as they are, before the fetch' {
@@ -151,8 +160,23 @@ Describe 'Save-ImapAttachment on Gmail' {
                     @{ Name = 'image.png'; Type = 'image/png'; Data = 'PNG attached' }
                 )
             }
+            # Another file of the same name and size, the case a match by name and size would take for a copy
+            @{ Uid = 21; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Same size'; Date = $now.AddMinutes(-8); Size = 9000; AuthenticationResults = $client
+                Attachments = @(
+                    @{ Name = 'image.png'; Type = 'image/png'; Data = 'PNG one'; Disposition = 'inline'; ContentId = 'ii_3' }
+                    @{ Name = 'image.png'; Type = 'image/png'; Data = 'PNG two' }
+                )
+            }
+            # The logo of a signature, twice, as Outlook repeats it in a thread
+            @{ Uid = 22; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Logos'; Date = $now.AddMinutes(-6); Size = 9000; AuthenticationResults = $client
+                Attachments = @(
+                    @{ Name = 'image.png'; Type = 'image/png'; Data = 'PNG logo'; Disposition = 'inline'; ContentId = 'logo-1' }
+                    @{ Name = 'image.png'; Type = 'image/png'; Data = 'PNG logo'; Disposition = 'inline'; ContentId = 'logo-2' }
+                    @{ Name = 'image.png'; Type = 'image/png'; Data = 'PNG print'; Disposition = 'inline'; ContentId = 'print' }
+                )
+            }
         )
-        $passwords = Set-TestAccount 'gmail-attachments' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; strict = @{ Policy = 'strict' }; one = @{ Policy = 'one' }; pdf = @{ Policy = 'pdf' } } -Policies @{
+        $passwords = Set-TestAccount 'gmail-attachments' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; strict = @{ Policy = 'strict' }; one = @{ Policy = 'one' }; pdf = @{ Policy = 'pdf' }; prefixed = @{ Policy = 'prefixed' } } -Policies @{
             strict = @{
                 DenyFolders                = @('Finance/*')
                 AllowAttachmentsFrom       = @('*@client.example', 'me@gmail.com')
@@ -163,6 +187,7 @@ Describe 'Save-ImapAttachment on Gmail' {
             }
             one    = @{ MaxMessages = 1 }
             pdf    = @{ AllowAttachmentTypes = @('*.pdf') }
+            prefixed = @{ DenyAttachmentTypes = @('16-image*', 'spec.pdf') }
         }
 
         # A new directory of the test drive for each test, and the commands the server got since the test began
@@ -319,14 +344,44 @@ Describe 'Save-ImapAttachment on Gmail' {
         $files[2].Attachment | Should -Be 'image.png'
     }
 
-    It 'saves once a file that a message both shows and attaches, as Gmail forwards carry it' {
-        $files = Save-ImapAttachment open -Folder All -Uid 19 -Path (New-TestDirectory 'forwarded') -Inline -ContentType image/*
+    It 'saves once a file that a message both shows and attaches, as Gmail forwards carry it, also when run again' {
+        $directory = New-TestDirectory 'forwarded'
+        $output = Save-ImapAttachment open -Folder All -Uid 19 -Path $directory -Inline -ContentType image/* -Verbose 4>&1
+        $again = Save-ImapAttachment open -Folder All -Uid 19 -Path $directory -Inline -ContentType image/* -ErrorVariable errors -ErrorAction SilentlyContinue
         $read = Read-ImapMessage open -Folder All -Uid 19
 
+        $files = @($output | Where-Object { $_ -is [IO.FileInfo] })
         $files.Name | Should -Be 'snapshot0.jpg'
         $files.Inline | Should -BeFalse
+        @($output | Where-Object { $_ -is [System.Management.Automation.VerboseRecord] -and $_.Message -like "*is the same file as one saved before*" }).Count | Should -Be 1
+        $again | Should -BeNullOrEmpty
+        $errors.FullyQualifiedErrorId | Should -BeLike 'AttachmentFileExists,*'
+        @(Get-ChildItem -LiteralPath $directory).Name | Should -Be 'snapshot0.jpg'
+        # Listed both, since only their content tells them apart
         $read.Attachments.FileName | Should -Be 'snapshot0.jpg'
-        $read.InlineParts | Should -BeNullOrEmpty
+        $read.InlineParts.FileName | Should -Be 'snapshot0 (2).jpg'
+    }
+
+    It 'saves two files of the same name and size, and a logo repeated once' {
+        $sameSize = Save-ImapAttachment open -Folder All -Uid 21 -Path (New-TestDirectory 'same-size') -Inline
+        $logos = Save-ImapAttachment open -Folder All -Uid 22 -Path (New-TestDirectory 'logos') -Inline
+
+        $sameSize.Name | Should -Be 'image.png', 'image (2).png'
+        [IO.File]::ReadAllText($sameSize[0].FullName) | Should -BeExactly 'PNG two'
+        [IO.File]::ReadAllText($sameSize[1].FullName) | Should -BeExactly 'PNG one'
+        $logos.Name | Should -Be 'image.png', 'image (3).png'
+        [IO.File]::ReadAllText($logos[1].FullName) | Should -BeExactly 'PNG print'
+    }
+
+    It 'holds the name written by -UniqueName, and the file''s own, to the policy' {
+        $plain = Save-ImapAttachment prefixed -Folder All -Uid 16 -Path (New-TestDirectory 'prefixed-plain') -Inline -ErrorVariable plainErrors -ErrorAction SilentlyContinue
+        $unique = Save-ImapAttachment prefixed -Folder All -Uid 16 -Path (New-TestDirectory 'prefixed-unique') -Inline -UniqueName -ErrorVariable uniqueErrors -ErrorAction SilentlyContinue
+
+        $plain.Name | Should -Be 'image.png', 'image (2).png'
+        "$($plainErrors[0])" | Should -BeLike "*'spec.pdf'*matches 'spec.pdf' in DenyAttachmentTypes*"
+        $unique | Should -BeNullOrEmpty
+        $uniqueErrors.Count | Should -Be 3
+        "$($uniqueErrors[1])" | Should -BeLike "*The attachment 16-image.png (image/png) matches '16-image``*' in DenyAttachmentTypes*"
     }
 
     It 'gives an attachment its own name, and numbers an inline part of the same name that is another file' {
