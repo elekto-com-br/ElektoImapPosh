@@ -30,7 +30,7 @@ function Test-SelectableFolder($Folder) {
 # The folders a name given to -Folder stands for, in an array: those the server marks with that special use,
 # when it is one and the server marks any; or else the folder of that full name, ignoring case; or else, when
 # the name has wildcards, those whose full names match it. The exact name comes first because Gmail's names
-# have brackets, which -like reads as a wildcard.
+# have brackets, which a pattern reads as a wildcard.
 # With -Literal, only the folder of that exact full name: for a name that came from the pipeline, which is the
 # full name of a folder the server listed, and may be a label "Sent" on Gmail, which is not its sent folder.
 function Select-ImapFolder($Folders, [string]$Name, [switch]$Literal) {
@@ -41,7 +41,7 @@ function Select-ImapFolder($Folders, [string]$Name, [switch]$Literal) {
     }
     $exact = @($Folders | Where-Object { $_.FullName -eq $Name })
     if ($exact -or -not [WildcardPattern]::ContainsWildcardCharacters($Name)) { return , $exact }
-    return , @($Folders | Where-Object { $_.FullName -like $Name })
+    return , @($Folders | Where-Object { Test-Wildcard $_.FullName $Name })
 }
 
 # The folders that the names given to -Folder stand for (see Select-ImapFolder), each once, in an array. A name that
@@ -111,7 +111,7 @@ function Test-ImapWriteAllowed($Cmdlet, $Session, [string]$Kind, [string]$Target
     if ($allowed -contains 'All' -or $allowed -contains $Kind) { return $true }
     $others = if ($allowed) { " (it allows $($allowed -join ', '))" } else { '' }
     $wanted = @($script:WriteKinds | Where-Object { $allowed -contains $_ -or $_ -eq $Kind }) -join ', '
-    $how = if ($settings.Account) { "Set-ImapAccount $($settings.Account) -AllowWrite $wanted" } else { "the environment variable IMAP_ALLOW_WRITE=$($wanted -replace ' ')" }
+    $how = if ($settings.Account) { "Set-ImapAccount $($settings.Account) -AllowWrite $wanted" } else { "the environment variable IMAP_ALLOW_WRITE=$($wanted -creplace ' ')" }
     Write-ImapError $Cmdlet "Changes of the kind $Kind are not allowed in the mailbox of $($settings.User)$others, so '$Target' was left as it is. To allow them: $how." 'WriteNotAllowed' PermissionDenied $Target
     return $false
 }

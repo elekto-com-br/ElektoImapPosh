@@ -9,7 +9,7 @@
 $script:CredentialTargetPrefix = 'ElektoImapPosh:'
 
 function Get-PasswordVariableName([string]$Account) {
-    return 'IMAP_PASS_' + ($Account.ToUpperInvariant() -replace '[^A-Z0-9]', '_')
+    return 'IMAP_PASS_' + ($Account.ToUpperInvariant() -creplace '[^A-Z0-9]', '_')
 }
 
 function Get-PasswordFilePath([string]$Account) {

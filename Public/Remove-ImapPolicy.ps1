@@ -31,7 +31,7 @@ Function Remove-ImapPolicy {
         foreach ($pattern in $Name) {
             $file = Read-AccountFile
             # Policy names hold no wildcard characters, so a plain name matches only itself
-            $names = @(if ($file) { $file.Policies.psbase.Keys | Where-Object { $_ -like $pattern } })
+            $names = @(if ($file) { $file.Policies.psbase.Keys | Where-Object { Test-Wildcard $_ $pattern } })
             if ($names.Count -eq 0 -and -not [WildcardPattern]::ContainsWildcardCharacters($pattern)) {
                 Write-Error "There is no policy '$pattern'."
                 continue

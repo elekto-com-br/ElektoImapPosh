@@ -110,6 +110,44 @@ Describe 'Special uses' {
         Select-Folder 'Nothing*' | Should -BeNullOrEmpty
     }
 
+    # In Turkish, "I" is not the capital of "i": -like missed "INBOX" for "inbox*" (measured)
+    It 'finds the folders that match a pattern alike in the Turkish culture' {
+        $culture = [Threading.Thread]::CurrentThread.CurrentCulture
+        try {
+            [Threading.Thread]::CurrentThread.CurrentCulture = 'tr-TR'
+            $inbox = Select-Folder 'inbox*'
+            $clients = Select-Folder '*/CLIENTS'
+        } finally {
+            [Threading.Thread]::CurrentThread.CurrentCulture = $culture
+        }
+
+        $inbox | Should -Be 'INBOX'
+        $clients | Should -Be 'Work/Clients'
+    }
+
+    # macOS writes names decomposed (NFD): a pattern with a wildcard before an accented letter missed such a folder
+    It 'finds a folder whose name comes decomposed by a pattern written composed, and the other way round' {
+        $reports = @(New-Folder "Relato`u{301}rios/2026"; New-Folder "Relat`u{F3}rios/2025"; New-Folder 'Relatorios')
+
+        @(Select-Folder "*Relat`u{F3}rios/*" $reports).Count | Should -Be 2
+        @(Select-Folder "*Relato`u{301}rios/*" $reports).Count | Should -Be 2
+        $found = @(Select-Folder "*Relat`u{F3}rios/2026" $reports)
+        $found.Count | Should -Be 1
+        [string]::Equals($found[0], "Relato`u{301}rios/2026", [StringComparison]::Ordinal) | Should -BeTrue -Because 'the folder keeps the name the server gives it'
+    }
+
+    It 'completes the special uses alike in the Turkish culture' {
+        $culture = [Threading.Thread]::CurrentThread.CurrentCulture
+        try {
+            [Threading.Thread]::CurrentThread.CurrentCulture = 'tr-TR'
+            $completed = (TabExpansion2 -inputScript 'Get-ImapFolder -Folder i' -cursorColumn 24).CompletionMatches.CompletionText
+        } finally {
+            [Threading.Thread]::CurrentThread.CurrentCulture = $culture
+        }
+
+        $completed | Should -Be 'Inbox', 'Important'
+    }
+
     # As a name from the pipeline is taken: the full name of a folder the server listed
     It 'takes a name as the exact full name of a folder with -Literal, neither a special use nor a pattern' {
         Select-Folder 'Sent' -Literal | Should -Be 'Sent'
@@ -208,7 +246,7 @@ Describe 'The accounts a command reads from' {
     BeforeAll {
         $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'names'
         New-Item -ItemType Directory -Path $env:IMAP_CONFIG_DIR -Force | Out-Null
-        $accounts = @{ Accounts = [ordered]@{ work = @{ Server = 's'; User = 'u' }; personal = @{ Server = 's'; User = 'u' }; test1 = @{ Server = 's'; User = 'u' } } }
+        $accounts = @{ Accounts = [ordered]@{ work = @{ Server = 's'; User = 'u' }; personal = @{ Server = 's'; User = 'u' }; test1 = @{ Server = 's'; User = 'u' }; billing = @{ Server = 's'; User = 'u' } } }
         Set-Content -Path (Join-Path $env:IMAP_CONFIG_DIR 'accounts.json') -Value ($accounts | ConvertTo-Json -Depth 5)
 
         function Resolve-Name([string[]]$Account) {
@@ -222,7 +260,20 @@ Describe 'The accounts a command reads from' {
 
     It 'expands wildcards, once each account, ignoring case' {
         Resolve-Name 'w*', 'personal', 'WORK' | Should -Be 'work', 'personal'
-        Resolve-Name '*' | Should -Be 'work', 'personal', 'test1'
+        Resolve-Name '*' | Should -Be 'work', 'personal', 'test1', 'billing'
+    }
+
+    # In Turkish, "I" is not the capital of "i": -like missed "billing" for "BILL*"
+    It 'expands wildcards alike in the Turkish culture' {
+        $culture = [Threading.Thread]::CurrentThread.CurrentCulture
+        try {
+            [Threading.Thread]::CurrentThread.CurrentCulture = 'tr-TR'
+            $names = Resolve-Name 'BILL*'
+        } finally {
+            [Threading.Thread]::CurrentThread.CurrentCulture = $culture
+        }
+
+        $names | Should -Be 'billing'
     }
 
     It 'gives names without wildcards as they are, even when there is no such account' {

@@ -52,10 +52,10 @@ Save-ImapAttachment
     -Folder String, position 1, from the pipeline by property name
     -Uid UInt32[], position 2, mandatory, from the pipeline by property name
     -Confirm SwitchParameter, alias cf, ConfirmImpact Medium
-    -ContentType String[], SupportsWildcards, ValidateScript({ $null = '' -like $_; $true })
+    -ContentType String[], SupportsWildcards, ValidateScript({ Assert-WildcardPattern $_; $true })
     -Force SwitchParameter
     -Inline SwitchParameter
-    -Name String[], SupportsWildcards, ValidateScript({ $null = '' -like $_; $true })
+    -Name String[], SupportsWildcards, ValidateScript({ Assert-WildcardPattern $_; $true })
     -Path String, mandatory
     -UidValidity UInt32, from the pipeline by property name
     -UniqueName SwitchParameter
@@ -63,7 +63,7 @@ Save-ImapAttachment
 
 Set-ImapAccount
   __AllParameterSets
-    -Name String, position 0, mandatory, ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+    -Name String, position 0, mandatory, ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$', Options = 'None')
     -AllowWrite String[], ValidateSet('Flags', 'Move', 'Labels', 'All', 'None')
     -Confirm SwitchParameter, alias cf, ConfirmImpact Medium
     -Default SwitchParameter
@@ -78,7 +78,7 @@ Set-ImapAccount
 
 Set-ImapPolicy
   __AllParameterSets
-    -Name String, position 0, mandatory, ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+    -Name String, position 0, mandatory, ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$', Options = 'None')
     -AllowAttachmentsFrom String[]
     -AllowAttachmentTypes String[]
     -AllowReadFrom String[]

@@ -39,7 +39,7 @@ Function Remove-ImapAccount {
         foreach ($pattern in $Name) {
             $file = Read-AccountFile
             # Account names hold no wildcard characters, so a plain name matches only itself
-            $names = @(if ($file) { $file.Accounts.psbase.Keys | Where-Object { $_ -like $pattern } })
+            $names = @(if ($file) { $file.Accounts.psbase.Keys | Where-Object { Test-Wildcard $_ $pattern } })
             if ($names.Count -eq 0 -and -not [WildcardPattern]::ContainsWildcardCharacters($pattern)) {
                 Write-Error "There is no account '$pattern'."
                 continue

@@ -108,7 +108,9 @@ Function Set-ImapAccount {
     [CmdletBinding(SupportsShouldProcess)]
     param (
         [Parameter(Mandatory = $true, Position = 0)]
-        [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')]
+        # Options None tells case apart, as the pattern names both: by default it ignores case as the culture does,
+        # and took a dotless i in Turkish
+        [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$', Options = 'None')]
         [string]$Name,
 
         [string]$Server,

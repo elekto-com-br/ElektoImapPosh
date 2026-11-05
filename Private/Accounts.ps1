@@ -17,6 +17,8 @@ $script:AccountSwitches = [ordered]@{ NoTls = 'IMAP_NO_TLS'; SkipCertificateChec
 # The kinds of change AllowWrite can allow, besides All and None
 $script:WriteKinds = @('Flags', 'Move', 'Labels')
 $script:WriteKindsHint = "a list of $($script:WriteKinds -join ', '), or All or None alone"
+# Matched telling case apart (-cnotmatch, and Options None in ValidatePattern), as it names both: ignoring case as the
+# culture does, it took a dotless i in Turkish (measured)
 $script:AccountNamePattern = '^[A-Za-z0-9][A-Za-z0-9_.-]*$'
 $script:DefaultServer = 'imap.gmail.com'
 $script:DefaultPort = 993
@@ -85,7 +87,7 @@ function Get-EnvironmentConfiguration {
     $value = $env:IMAP_ALLOW_WRITE
     $settings.AllowWrite = if ($value -in 'true', '1') { , @('All') }
     elseif (-not $value -or $value -in 'false', '0') { , @() }
-    else { ConvertTo-WriteKindList ($value -split ',' | ForEach-Object Trim) }
+    else { ConvertTo-WriteKindList ($value -csplit ',' | ForEach-Object Trim) }
     if ($null -eq $settings.AllowWrite) {
         throw "The environment variable IMAP_ALLOW_WRITE must be true, false or $($script:WriteKindsHint) (such as Flags,Move), not '$value'."
     }
@@ -130,7 +132,7 @@ function Read-AccountFile {
         if ($data.Accounts -isnot [System.Collections.IDictionary]) { throw "'Accounts' in '$path' must be a JSON object." }
         foreach ($entry in $data.Accounts.GetEnumerator()) {
             $name = $entry.Key
-            if ($name -notmatch $script:AccountNamePattern) {
+            if ($name -cnotmatch $script:AccountNamePattern) {
                 throw "Invalid account name '$name' in '$path': use letters, digits, '.', '-' and '_', starting with a letter or digit."
             }
             $sameName = @($accounts.psbase.Keys | Where-Object { $_ -eq $name })
@@ -250,7 +252,7 @@ function Resolve-ImapAccountName([string[]]$Account) {
         $found = if (-not [WildcardPattern]::ContainsWildcardCharacters($pattern)) { $pattern }
         else {
             if (-not $file) { $file = Read-AccountFile }
-            $matching = @(if ($file) { $file.Accounts.psbase.Keys | Where-Object { $_ -like $pattern } })
+            $matching = @(if ($file) { $file.Accounts.psbase.Keys | Where-Object { Test-Wildcard $_ $pattern } })
             if (-not $matching) { Write-Verbose "No account matches '$pattern'." }
             $matching
         }
