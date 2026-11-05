@@ -11,6 +11,7 @@ BeforeDiscovery {
 BeforeAll {
     . (Join-Path $PSScriptRoot 'Smtp4dev.ps1')
     . (Join-Path $PSScriptRoot 'FakeGmail.ps1')
+    . (Join-Path $PSScriptRoot 'TestAccounts.ps1')
     Import-Module (Join-Path (Split-Path $PSScriptRoot) 'ElektoImapPosh.psd1') -Force
 
     $variableNames = 'IMAP_CONFIG_DIR', 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_NO_TLS', 'IMAP_POLICY'
@@ -18,26 +19,6 @@ BeforeAll {
     foreach ($name in $variableNames) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
         [Environment]::SetEnvironmentVariable($name, $null)
-    }
-
-    # Writes an accounts file in a folder of its own, every account on the port given, with its password in the
-    # environment; returns the names of the password variables, for AfterAll to remove. The values they had before
-    # are kept with the others, which the AfterAll of the file restores.
-    function Set-TestAccount([string]$Folder, [int]$Port, [hashtable]$Accounts, [hashtable]$Policies = @{}, [string]$Default) {
-        $env:IMAP_CONFIG_DIR = Join-Path $TestDrive $Folder
-        New-Item -ItemType Directory -Path $env:IMAP_CONFIG_DIR -Force | Out-Null
-        $file = @{ Accounts = @{}; Policies = $Policies }
-        if ($Default) { $file.Default = $Default }
-        foreach ($entry in $Accounts.GetEnumerator()) {
-            $account = @{ Server = '127.0.0.1'; Port = $Port; User = 'tester'; NoTls = $true }
-            foreach ($setting in $entry.Value.GetEnumerator()) { $account[$setting.Key] = $setting.Value }
-            $file.Accounts[$entry.Key] = $account
-            $variable = "IMAP_PASS_$($entry.Key.ToUpperInvariant())"
-            if (-not $savedEnvironment.ContainsKey($variable)) { $savedEnvironment[$variable] = [Environment]::GetEnvironmentVariable($variable) }
-            [Environment]::SetEnvironmentVariable($variable, 'not-a-password')
-        }
-        Set-Content -Path (Join-Path $env:IMAP_CONFIG_DIR 'accounts.json') -Value ($file | ConvertTo-Json -Depth 5)
-        return @($Accounts.Keys | ForEach-Object { "IMAP_PASS_$($_.ToUpperInvariant())" })
     }
 }
 
@@ -272,7 +253,7 @@ Describe 'Get-ImapMessage against smtp4dev' -Skip:(-not $smtp4devInstalled) {
             inbox     = @{ DenyFolders = @('Inbox') }
             few       = @{ MaxMessages = 3; MaxAgeDays = 30 }
         }
-        $passwords = Set-TestAccount 'config' $server.ImapPort -Policies $policies -Default few -Accounts @{
+        $passwords = Set-TestAccount 'config' $server.ImapPort -SavedEnvironment $savedEnvironment -Policies $policies -Default few -Accounts @{
             local     = @{}
             closed    = @{ Port = (Get-FreeTcpPort) }
             agent     = @{ Policy = 'agent' }
@@ -483,12 +464,12 @@ Describe 'Get-ImapMessage on Gmail' {
     BeforeAll {
         $now = [DateTimeOffset]::Now
         $server = Start-FakeGmail @(
-            @{ Uid = 1; ChangedElsewhere = $true; Text = 'Your statement is attached: total R$ 1.234,56.'; Folders = 'INBOX', '[Gmail]/All Mail', 'Finance/Bank'; Labels = '\Inbox', 'Finance/Bank'; ThreadId = 111; From = 'Bank <alerts@bank.example>'; Subject = 'Statement'; Date = $now.AddHours(-4); Size = 5000; Attachment = 'statement.pdf'; AuthenticationResults = 'mx.google.com; dmarc=pass header.from=bank.example'; Raw = 'has:attachment', 'from:bank.example' }
+            @{ Uid = 1; ChangedElsewhere = $true; Text = 'Your statement is attached: total R$ 1.234,56.'; Folders = 'INBOX', '[Gmail]/All Mail', 'Finance/Bank'; Labels = '\Inbox', 'Finance/Bank'; ThreadId = 111; From = 'Bank <alerts@bank.example>'; Subject = 'Statement'; Date = $now.AddHours(-4); Size = 5000; Attachments = @(@{ Name = 'statement.pdf'; Type = 'application/pdf'; Data = "%PDF-1.4`n"; Octets = 1000 }); AuthenticationResults = 'mx.google.com; dmarc=pass header.from=bank.example'; Raw = 'has:attachment', 'from:bank.example' }
             @{ Uid = 2; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = '\Inbox', '\Important'; ThreadId = 222; From = 'Client <client@client.example>'; Subject = 'Proposal'; Date = $now.AddHours(-3); Size = 3000; Seen = $true; AuthenticationResults = 'mx.google.com; dmarc=pass header.from=client.example' }
             @{ Uid = 3; Folders = '[Gmail]/All Mail', '[Gmail]/Sent Mail'; Labels = '\Sent'; ThreadId = 222; From = 'Me <me@gmail.com>'; Subject = 'Re: Proposal'; Date = $now.AddHours(-2); Size = 2000; Seen = $true; Raw = 'in:sent proposal' }
             @{ Uid = 4; Folders = '[Gmail]/All Mail', 'Sent'; Labels = @('Sent'); ThreadId = 444; From = 'Me <me@gmail.com>'; Subject = 'Labelled Sent'; Date = $now.AddHours(-1); Size = 1000; Text = "Fine `u{1F600} thanks" }
         )
-        $passwords = Set-TestAccount 'gmail' $server.Port -Accounts @{ open = @{}; agent = @{ Policy = 'agent' }; recent = @{ Policy = 'recent' }; one = @{ Policy = 'one' } } -Policies @{
+        $passwords = Set-TestAccount 'gmail' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; agent = @{ Policy = 'agent' }; recent = @{ Policy = 'recent' }; one = @{ Policy = 'one' } } -Policies @{
             agent  = @{ DenyFolders = @('Finance/*'); AllowReadFrom = @('*@client.example', 'me@gmail.com'); TrustAuthenticationResults = 'mx.google.com' }
             recent = @{ MaxAgeDays = 30 }
             one    = @{ MaxMessages = 1 }
@@ -582,8 +563,10 @@ Describe 'Get-ImapMessage on Gmail' {
         $result.Format | Should -Be 'Text'
         $result.Attachments.Count | Should -Be 1
         $result.Attachments[0].Name | Should -Be 'statement.pdf'
+        $result.Attachments[0].FileName | Should -Be 'statement.pdf'
         $result.Attachments[0].ContentType | Should -Be 'application/pdf'
-        $result.Attachments[0].Size | Should -Be 1000
+        $result.Attachments[0].Size | Should -Be 750 -Because '1000 characters of base64 decode to 750 bytes at most'
+        $result.Attachments[0].Withheld | Should -BeNullOrEmpty
         $fetch = @($server.State.Commands.ToArray() | Where-Object { $_ -like '* UID FETCH *BODY.PEEK`[1`]*' })
         $fetch.Count | Should -Be 1
         $server.State.Commands.ToArray() | Where-Object { $_ -like '*BODY.PEEK`[2*' -or $_ -like '*BODY.PEEK`[`]*' } | Should -BeNullOrEmpty
@@ -664,7 +647,7 @@ Describe 'Read-ImapMessage against smtp4dev' -Skip:(-not $smtp4devInstalled) {
         Send-Smtp4devMessage $server 'Alternative' -Body $alternative
         Send-Smtp4devMessage $server 'HTML only' -Body (New-Text 'html' 'utf-8' $htmlText 'Base64')
 
-        $passwords = Set-TestAccount 'config-read' $server.ImapPort -Policies @{ inbox = @{ DenyFolders = @('Inbox') }; two = @{ MaxMessages = 2 } } -Accounts @{
+        $passwords = Set-TestAccount 'config-read' $server.ImapPort -SavedEnvironment $savedEnvironment -Policies @{ inbox = @{ DenyFolders = @('Inbox') }; two = @{ MaxMessages = 2 } } -Accounts @{
             local  = @{}
             denied = @{ Policy = 'inbox' }
             two    = @{ Policy = 'two' }

@@ -74,7 +74,8 @@
               <ListItem><Label>To</Label><ScriptBlock>$_.To -join ', '</ScriptBlock></ListItem>
               <ListItem><Label>Cc</Label><ScriptBlock>$_.Cc -join ', '</ScriptBlock></ListItem>
               <ListItem><PropertyName>Subject</PropertyName></ListItem>
-              <ListItem><Label>Attachments</Label><ScriptBlock>@($_.Attachments | ForEach-Object { "$($_.Name) ($($_.ContentType), $($_.Size) bytes)" }) -join ', '</ScriptBlock></ListItem>
+              <ListItem><Label>Attachments</Label><ScriptBlock>@($_.Attachments | ForEach-Object { "$($_.FileName) ($($_.ContentType), up to $($_.Size) bytes$(if ($_.Withheld) { ', withheld' }))" }) -join ', '</ScriptBlock></ListItem>
+              <ListItem><Label>InlineParts</Label><ScriptBlock>@($_.InlineParts | ForEach-Object { "$($_.FileName) ($($_.ContentType), up to $($_.Size) bytes$(if ($_.Withheld) { ', withheld' }))" }) -join ', '</ScriptBlock></ListItem>
               <ListItem><PropertyName>Format</PropertyName></ListItem>
               <ListItem><Label>Text</Label><ScriptBlock>if ($_.Truncated) { "$($_.Text) [...]" } else { $_.Text }</ScriptBlock></ListItem>
             </ListItems>

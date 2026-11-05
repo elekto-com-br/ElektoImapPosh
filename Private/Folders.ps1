@@ -60,6 +60,22 @@ function Select-ImapFolderList($Cmdlet, $Session, $Folders, [string[]]$Names, [s
     return , $chosen.ToArray()
 }
 
+# The folders a name given to -Folder stands for (Select-ImapFolderList), for a command that takes messages from the
+# pipeline, each with the name of its folder; or $null when the folders cannot be listed. Found once for each name in
+# the session, since a search of the list for each message would take the number of folders times that of the
+# messages (3 ms a message with 500 labels). A name that finds no folder is looked for, and reported, again each time.
+function Find-ImapFolder($Cmdlet, $Session, [string]$Name, [switch]$Literal) {
+    $folders = Get-ImapFolderList $Cmdlet $Session
+    if ($null -eq $folders) { return $null }
+    if (-not $Session.ContainsKey('FoundFolders')) { $Session.FoundFolders = [System.Collections.Generic.Dictionary[string, object[]]]::new([StringComparer]::Ordinal) }
+    $key = "$([int][bool]$Literal)$Name"
+    $found = $null
+    if ($Session.FoundFolders.TryGetValue($key, [ref]$found)) { return , $found }
+    $found = Select-ImapFolderList $Cmdlet $Session $folders $Name -Literal:$Literal
+    if ($found.Count) { $Session.FoundFolders[$key] = $found }
+    return , $found
+}
+
 # The folders of the session that can hold messages, in an array, as the server lists them; or $null after
 # reporting why not. With StatusItems, their counts come in the listing (one command, with LIST-STATUS).
 # The folders do not change while a command runs, so they are listed once per session, unless the counts are

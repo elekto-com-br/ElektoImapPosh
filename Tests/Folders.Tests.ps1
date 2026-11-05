@@ -118,6 +118,20 @@ Describe 'Special uses' {
         Select-Folder 'sent' -Literal | Should -BeNullOrEmpty
     }
 
+    # Each message of a pipeline comes with the name of its folder, and a mailbox may have hundreds of labels: the folder
+    # is found once for each name. Compared with itself on few folders, so that a slow machine does not fail it.
+    It 'finds the folder of messages from the pipeline in a time that does not grow with the number of folders' {
+        $milliseconds = InModuleScope ElektoImapPosh {
+            foreach ($count in 10, 1000) {
+                $folders = @(foreach ($i in 1..$count) { [PSCustomObject]@{ FullName = "Label $i"; Attributes = [MailKit.FolderAttributes]'None' } })
+                $session = @{ Settings = @{ User = 'me@gmail.com' }; Folders = $folders }
+                (Measure-Command { foreach ($i in 1..300) { $null = Find-ImapFolder $null $session "Label $count" -Literal } }).TotalMilliseconds
+            }
+        }
+
+        $milliseconds[1] | Should -BeLessThan ($milliseconds[0] * 5) -Because "with 1000 folders ($($milliseconds[1]) ms) the search should take about as long as with 10 ($($milliseconds[0]) ms)"
+    }
+
     It 'leaves out the folders that cannot hold messages' {
         InModuleScope ElektoImapPosh {
             Test-SelectableFolder ([PSCustomObject]@{ FullName = '[Gmail]'; Attributes = [MailKit.FolderAttributes]'HasChildren, NoSelect' })

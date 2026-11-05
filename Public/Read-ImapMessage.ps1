@@ -9,7 +9,10 @@ part first. The property Format says which one came (Text or Html). The text is 
 quoted-printable, and its character set), but HTML is never converted: whoever wants plain text from
 it pipes it to a converter of its own.
 
-Only that part is downloaded, never the attachments, which are listed by name, type and size. The
+Only that part is downloaded, never the attachments, which are listed in Attachments: the name the
+message gives, the name of the file Save-ImapAttachment would save (FileName), the type, the most the file
+takes (Size), and why the policy keeps it from being saved, if it does (Withheld). The parts shown in the
+body rather than attached, such as images pasted in it, are listed the same way in InlineParts. The
 folder is opened read-only, so nothing is marked as read, and nothing in the message is fetched from
 the network (images) nor followed (links).
 
@@ -109,33 +112,12 @@ Function Read-ImapMessage {
             return
         }
 
-        $folders = Get-ImapFolderList $PSCmdlet $session
-        if ($null -eq $folders) { return }
         $name = if ($Folder) { $Folder } else { 'Inbox' }
-        $chosen = Select-ImapFolderList $PSCmdlet $session $folders $name -Literal:($folderFromPipeline -and $Folder)
-        if ($chosen.Count -gt 1) {
-            Write-ImapError $PSCmdlet "'$name' names $($chosen.Count) folders of $($settings.User) ($($chosen.FullName -join ', ')), and a UID is of one: give its full name." 'FolderAmbiguous' InvalidArgument $name
-            return
-        }
-        if ($chosen.Count -eq 0) { return }
-        $item = $chosen[0]
-        if (-not (Open-ImapFolder $PSCmdlet $session $item)) { return }
-
-        # UIDVALIDITY is never 0, so 0 is a UidValidity not given
-        if ($UidValidity -and $UidValidity -ne $item.UidValidity) {
-            foreach ($id in $Uid) {
-                Write-ImapError $PSCmdlet "The folder '$($item.FullName)' of $($settings.User) was numbered anew since its messages were listed (UIDVALIDITY $UidValidity, now $($item.UidValidity)), so the UID $id may be another message: list them again with Get-ImapMessage." 'UidValidityChanged' InvalidData $id
-            }
-            return
-        }
-
-        $summaries = Get-ImapMessageSummary $PSCmdlet $session $item @($Uid | ForEach-Object { [MailKit.UniqueId]::new($item.UidValidity, $_) })
-        if ($null -eq $summaries) { return }
-        # By UID, found once: a search of the list for each of many UIDs would take their square
-        $byUid = @{}
-        foreach ($summary in $summaries) { $byUid[$summary.UniqueId.Id] = $summary }
+        $found = Get-ImapMessageByUid $PSCmdlet $session $name -Literal:($folderFromPipeline -and $Folder) -Uid $Uid -UidValidity $UidValidity
+        if (-not $found) { return }
+        $item = $found.Folder
         foreach ($id in $Uid) {
-            $summary = $byUid[$id]
+            $summary = $found.ByUid[$id]
             if (-not $summary) {
                 Write-ImapError $PSCmdlet "There is no message with the UID $id in the folder '$($item.FullName)' of $($settings.User)." 'MessageNotFound' ObjectNotFound $id
                 continue
@@ -166,8 +148,10 @@ Function Read-ImapMessage {
             # Not withheld: the check above passed
             $message = ConvertTo-ImapMessage $session $item $summary $null
             $message.PSObject.TypeNames.Insert(0, 'ElektoImapPosh.MessageText')
+            $parts = Get-ImapPartList $session $item $summary
             $message | Add-Member -NotePropertyMembers ([ordered]@{
-                    Attachments = Get-ImapAttachmentList $summary
+                    Attachments = [object[]]@($parts | Where-Object { -not $_.Inline } | Select-Object Name, FileName, ContentType, Size, Withheld)
+                    InlineParts = [object[]]@($parts | Where-Object { $_.Inline } | Select-Object Name, FileName, ContentType, Size, Withheld)
                     Format      = $content.Format
                     Truncated   = $truncated
                     Text        = $text
