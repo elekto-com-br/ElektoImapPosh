@@ -25,8 +25,10 @@ so. Read-ImapMessage shows that name,
 as the FileName of each attachment and inline part. -UniqueName puts the UID of the message before it
 ("12045-image.png"), so that the files of several messages do not take each other's names.
 
-A file that already exists is not replaced, unless -Force is given. Each file is written under a temporary
-name and then renamed, so whoever watches the directory never sees half a file.
+A file that already exists is not replaced, unless -Force is given; a file this command saved is never
+replaced by it, -Force or not, so that two messages that give the same name do not lose one of them. Each
+file is written under a temporary name and then renamed, so whoever watches the directory never sees half
+a file.
 
 When the account follows a policy (Set-ImapAccount -Policy), the attachments of a message whose body it
 withholds are not saved (the error MessageWithheld says why), and each attachment must also pass the rules
@@ -69,7 +71,8 @@ Also saves the parts shown in the body of a message rather than attached, such a
 .PARAMETER UniqueName
 Puts the UID of the message before the name of each file ("12045-image.png"), so that files of the same
 name in several messages, such as the prints of Gmail or the photos of a camera, do not take each other's
-names. UIDs grow as messages arrive, so the files sort in that order.
+names. UIDs grow as messages arrive, so the files sort in that order. A UID is unique in its folder only:
+for messages of several folders or accounts, give each folder a -Path of its own.
 
 .PARAMETER Force
 Replaces the files that already exist.
@@ -133,6 +136,9 @@ Function Save-ImapAttachment {
 
     begin {
         $sessions = @{}
+        # The files this command saved, which it never replaces: UIDs are per folder, so messages of other folders can
+        # give the same name, -UniqueName or not
+        $written = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         # Here, before any input, only what was typed is bound: see Get-ImapFolder
         $folderFromPipeline = -not $PSBoundParameters.ContainsKey('Folder')
         $directory = $PSCmdlet.GetUnresolvedProviderPathFromPSPath($Path)
@@ -198,9 +204,14 @@ Function Save-ImapAttachment {
                     continue
                 }
                 $target = [IO.Path]::Combine($directory, $fileName)
+                if ($written.Contains($target)) {
+                    Write-ImapError $PSCmdlet "'$target' was saved by this command from another message, so the $what '$shown' of $where was not saved: UIDs are unique only in a folder, so give the messages of each folder a -Path of their own." 'AttachmentFileExists' ResourceExists $target
+                    continue
+                }
                 if (-not $PSCmdlet.ShouldProcess($target, "Save the $what '$shown' of $where")) { continue }
                 $file = Save-AttachmentFile $PSCmdlet $session $item $summary $attachment.Part $directory $fileName $saved -Force:$Force
                 if (-not $file) { continue }
+                $null = $written.Add($target)
                 $file | Add-Member -NotePropertyMembers ([ordered]@{
                         Account    = $settings.Account
                         Folder     = $item.FullName

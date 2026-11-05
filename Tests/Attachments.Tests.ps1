@@ -167,6 +167,10 @@ Describe 'Save-ImapAttachment on Gmail' {
                     @{ Name = 'image.png'; Type = 'image/png'; Data = 'PNG two' }
                 )
             }
+            # A file whose name starts with a dot, hidden on Linux
+            @{ Uid = 23; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Dot file'; Date = $now.AddMinutes(-4); Size = 9000; AuthenticationResults = $client
+                Attachments = @(@{ Name = '.env.local'; Type = 'text/plain'; Data = 'KEY=value' })
+            }
             # The logo of a signature, twice, as Outlook repeats it in a thread
             @{ Uid = 22; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Logos'; Date = $now.AddMinutes(-6); Size = 9000; AuthenticationResults = $client
                 Attachments = @(
@@ -371,6 +375,25 @@ Describe 'Save-ImapAttachment on Gmail' {
         [IO.File]::ReadAllText($sameSize[1].FullName) | Should -BeExactly 'PNG one'
         $logos.Name | Should -Be 'image.png', 'image (3).png'
         [IO.File]::ReadAllText($logos[1].FullName) | Should -BeExactly 'PNG print'
+    }
+
+    It 'returns a saved file whose name starts with a dot, which Linux hides' {
+        $files = Save-ImapAttachment open -Folder All -Uid 23 -Path (New-TestDirectory 'dot')
+
+        $files.Name | Should -Be '.env.local'
+        [IO.File]::ReadAllText($files[0].FullName) | Should -BeExactly 'KEY=value'
+    }
+
+    # The fake numbers each message alike in every folder, as UIDs of two folders may coincide
+    It 'never replaces a file it saved from another message, -Force or not' {
+        $twice = [PSCustomObject]@{ Account = 'open'; Folder = 'INBOX'; Uid = 10 }, [PSCustomObject]@{ Account = 'open'; Folder = '[Gmail]/All Mail'; Uid = 10 }
+        $files = $twice | Save-ImapAttachment -Path (New-TestDirectory 'collision') -Name report.pdf -UniqueName -Force -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $files.Name | Should -Be '10-report.pdf'
+        $files.Folder | Should -Be 'INBOX'
+        $errors.Count | Should -Be 1
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'AttachmentFileExists,*'
+        "$($errors[0])" | Should -BeLike "*was saved by this command from another message*a -Path of their own."
     }
 
     It 'holds the name written by -UniqueName, and the file''s own, to the policy' {

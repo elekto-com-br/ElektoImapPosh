@@ -124,5 +124,6 @@ function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [strin
     } finally {
         if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
     }
-    return Get-Item -LiteralPath $path
+    # -Force, or a file whose name starts with a dot, hidden on Linux, is not found
+    return Get-Item -LiteralPath $path -Force
 }
