@@ -25,16 +25,18 @@ so. Read-ImapMessage shows that name,
 as the FileName of each attachment and inline part. -UniqueName puts the UID of the message before it
 ("12045-image.png"), so that the files of several messages do not take each other's names.
 
-A file that already exists is not replaced, unless -Force is given; a file this command saved is never
-replaced by it, -Force or not, so that two messages that give the same name do not lose one of them. Each
-file is written under a temporary name and then renamed, so whoever watches the directory never sees half
-a file.
+A file that already exists is not replaced, unless -Force is given; a directory of that name never is,
+nor a file this command saved, -Force or not, so that two messages that give the same name do not lose one
+of them. Each file is written under a temporary name and then renamed, so whoever watches the directory
+never sees half a file. A file that cannot be written, such as one another program keeps open, is the
+error AttachmentWriteFailed: only the files written are returned.
 
 When the account follows a policy (Set-ImapAccount -Policy), the attachments of a message whose body it
 withholds are not saved (the error MessageWithheld says why), and each attachment must also pass the rules
-of the policy on attachments, on the name its file gets: AllowAttachmentsFrom (an authenticated sender, or
-the user's own message), DenyAttachmentTypes and AllowAttachmentTypes (by MIME type, as the sender declares
-it, or by file name), and MaxAttachmentSize, checked before anything is downloaded. An attachment withheld
+of the policy on attachments: AllowAttachmentsFrom (an authenticated sender, or the user's own message),
+DenyAttachmentTypes and AllowAttachmentTypes (by MIME type, as the sender declares it, or by file name), and
+MaxAttachmentSize, checked before anything is downloaded. The rules on names take the name the file gets
+and, when a number or -UniqueName changes it, the name written too: both must pass. An attachment withheld
 is the error AttachmentWithheld, which says why. MaxMessages limits how many messages of each account one
 command handles, with a warning that says how many were left out.
 
@@ -75,7 +77,8 @@ names. UIDs grow as messages arrive, so the files sort in that order. A UID is u
 for messages of several folders or accounts, give each folder a -Path of its own.
 
 .PARAMETER Force
-Replaces the files that already exist.
+Replaces the files that already exist, but never a directory, nor a file this command saved from another
+message.
 
 .EXAMPLE
 Get-ImapMessage -From bank.example -Since (Get-Date).Date | Save-ImapAttachment -Path ~/Statements -Name *.pdf

@@ -2,6 +2,11 @@
 # since the BODYSTRUCTURE of smtp4dev leaves attachments out. The fake serves each part on its own, and keeps the
 # commands it got, so the tests see what was fetched.
 
+BeforeDiscovery {
+    # Root writes in a directory whatever its permissions
+    $isRoot = -not $IsWindows -and (id -u) -eq '0'
+}
+
 BeforeAll {
     . (Join-Path $PSScriptRoot 'FakeGmail.ps1')
     . (Join-Path $PSScriptRoot 'TestAccounts.ps1')
@@ -180,7 +185,7 @@ Describe 'Save-ImapAttachment on Gmail' {
                 )
             }
         )
-        $passwords = Set-TestAccount 'gmail-attachments' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; strict = @{ Policy = 'strict' }; one = @{ Policy = 'one' }; pdf = @{ Policy = 'pdf' }; prefixed = @{ Policy = 'prefixed' } } -Policies @{
+        $passwords = Set-TestAccount 'gmail-attachments' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; strict = @{ Policy = 'strict' }; one = @{ Policy = 'one' }; pdf = @{ Policy = 'pdf' }; prefixed = @{ Policy = 'prefixed' }; exact = @{ Policy = 'exact' }; named = @{ Policy = 'named' } } -Policies @{
             strict = @{
                 DenyFolders                = @('Finance/*')
                 AllowAttachmentsFrom       = @('*@client.example', 'me@gmail.com')
@@ -192,6 +197,8 @@ Describe 'Save-ImapAttachment on Gmail' {
             one    = @{ MaxMessages = 1 }
             pdf    = @{ AllowAttachmentTypes = @('*.pdf') }
             prefixed = @{ DenyAttachmentTypes = @('16-image*', 'spec.pdf') }
+            exact    = @{ DenyAttachmentTypes = @('report.pdf') }
+            named    = @{ AllowAttachmentTypes = @('report.pdf') }
         }
 
         # A new directory of the test drive for each test, and the commands the server got since the test began
@@ -245,6 +252,41 @@ Describe 'Save-ImapAttachment on Gmail' {
 
         $null = Save-ImapAttachment open -Folder All -Uid 10 -Path $directory -Name report.pdf -Force
         Get-Content -LiteralPath $existing -Raw | Should -BeExactly '%PDF-1.4 report'
+    }
+
+    It 'refuses a directory in the place of a file, -Force or not, before fetching the attachment' {
+        $directory = New-TestDirectory 'directory-in-place'
+        $null = New-Item -ItemType Directory -Path (Join-Path $directory 'report.pdf')
+        $before = $server.State.Commands.Count
+        $files = Save-ImapAttachment open -Folder All -Uid 10 -Path $directory -Name report.pdf -Force -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $files | Should -BeNullOrEmpty
+        $errors.Count | Should -Be 1
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'AttachmentFileExists,*'
+        "$($errors[0])" | Should -BeLike "'*report.pdf' is a directory, so the part 'report.pdf' of the message 10 in the folder * was not saved."
+        Get-CommandSince $before | Where-Object { $_ -like '*BODY.PEEK`[2*' } | Should -BeNullOrEmpty
+    }
+
+    # A file another program keeps open, on Windows, or a directory that cannot be written, elsewhere
+    It 'reports a file it could not write once, and does not return the file that was there' -Skip:$isRoot {
+        $directory = New-TestDirectory 'cannot-write'
+        $existing = Join-Path $directory 'report.pdf'
+        Set-Content -LiteralPath $existing -Value 'kept' -NoNewline
+        $lock = $null
+        if ($IsWindows) { $lock = [IO.File]::Open($existing, 'Open', 'Read', 'None') }
+        else { [IO.File]::SetUnixFileMode($directory, 'UserRead, UserExecute') }
+        try {
+            $files = Save-ImapAttachment open -Folder All -Uid 10 -Path $directory -Name report.pdf -Force -ErrorVariable errors -ErrorAction SilentlyContinue
+        } finally {
+            if ($lock) { $lock.Dispose() } else { [IO.File]::SetUnixFileMode($directory, 'UserRead, UserWrite, UserExecute') }
+        }
+
+        $files | Should -BeNullOrEmpty
+        $errors.Count | Should -Be 1
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'AttachmentWriteFailed,*'
+        "$($errors[0])" | Should -BeLike "Could not write '*report.pdf', so the part 'report.pdf' of the message 10 in the folder * was not saved: ?*"
+        Get-Content -LiteralPath $existing -Raw | Should -BeExactly 'kept'
+        @(Get-ChildItem -LiteralPath $directory -Force).Name | Should -Be 'report.pdf' -Because 'no temporary file is left'
     }
 
     It 'saves under names that stay in the directory and that Windows takes' {
@@ -394,6 +436,20 @@ Describe 'Save-ImapAttachment on Gmail' {
         $errors.Count | Should -Be 1
         $errors[0].FullyQualifiedErrorId | Should -BeLike 'AttachmentFileExists,*'
         "$($errors[0])" | Should -BeLike "*was saved by this command from another message*a -Path of their own."
+    }
+
+    # Message 18 carries two files named report.pdf: the second is written as "report (2).pdf"
+    It 'holds the name of the file to the policy, and the numbered name written too' {
+        $denied = Save-ImapAttachment exact -Folder All -Uid 18 -Path (New-TestDirectory 'numbered-denied') -ErrorVariable deniedErrors -ErrorAction SilentlyContinue
+        $named = Save-ImapAttachment named -Folder All -Uid 18 -Path (New-TestDirectory 'numbered-named') -ErrorVariable namedErrors -ErrorAction SilentlyContinue
+
+        $denied | Should -BeNullOrEmpty
+        $deniedErrors.Count | Should -Be 2
+        "$($deniedErrors[1])" | Should -BeLike "*was not saved: The attachment report.pdf (application/pdf) matches 'report.pdf' in DenyAttachmentTypes of the policy 'exact'."
+        @((Read-ImapMessage exact -Folder All -Uid 18).Attachments | Where-Object Withheld).Count | Should -Be 2
+        $named.Name | Should -Be 'report.pdf'
+        $namedErrors.Count | Should -Be 1
+        "$($namedErrors[0])" | Should -BeLike "*was not saved: The attachment report (2).pdf (application/pdf) matches nothing in AllowAttachmentTypes of the policy 'named'."
     }
 
     It 'holds the name written by -UniqueName, and the file''s own, to the policy' {

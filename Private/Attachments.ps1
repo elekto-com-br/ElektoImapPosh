@@ -51,8 +51,10 @@ function Get-UniqueFileName([string]$FileName, [System.Collections.Generic.HashS
 # message gives, the name its file gets (Get-AttachmentFileName; a name repeated in the message numbered by
 # Get-UniqueFileName, attachments first, so that each file of a message has a name of its own, the same every time,
 # and an attachment keeps its own), the MIME type, the most the file takes (Get-AttachmentSize), why the policy keeps
-# it from being saved, if it does, and Part, the part of MailKit, to fetch it. A part that is the same file as another
-# is listed all the same: only its content tells (Save-AttachmentFile).
+# it from being saved, if it does, and Part, the part of MailKit, to fetch it. The policy takes the name of the file
+# and, when a number changes it, the name written too, both having to pass, as with -UniqueName: a second "secret.pdf",
+# written as "secret (2).pdf", is a "secret.pdf" all the same. A part that is the same file as another is listed all
+# the same: only its content tells (Save-AttachmentFile).
 function Get-ImapPartList($Session, $Folder, $Summary) {
     $attachments = @($Summary.BodyParts | Where-Object { $_.IsAttachment })
     $inline = @($Summary.BodyParts | Where-Object { -not $_.IsAttachment -and $_.ContentType.MediaType -notin 'text', 'message' })
@@ -60,14 +62,17 @@ function Get-ImapPartList($Session, $Folder, $Summary) {
     return , [object[]]@(foreach ($part in $attachments + $inline) {
             # In lower case: a part without parameters keeps the case of the server, upper case on Gmail
             $type = $part.ContentType.MimeType.ToLowerInvariant()
-            $fileName = Get-UniqueFileName (Get-AttachmentFileName $part.FileName $type) $used
+            $own = Get-AttachmentFileName $part.FileName $type
+            $fileName = Get-UniqueFileName $own $used
+            $withheld = Get-AttachmentWithheldReason $Session $Folder $Summary $part $own
+            if (-not $withheld -and $fileName -cne $own) { $withheld = Get-AttachmentWithheldReason $Session $Folder $Summary $part $fileName }
             [PSCustomObject]@{
                 Name        = $part.FileName
                 FileName    = $fileName
                 ContentType = $type
                 Size        = Get-AttachmentSize $part
                 Inline      = -not $part.IsAttachment
-                Withheld    = Get-AttachmentWithheldReason $Session $Folder $Summary $part $fileName
+                Withheld    = $withheld
                 Part        = $part
             }
         })
@@ -88,9 +93,44 @@ function Write-AttachmentContent($Entity, [IO.Stream]$Stream) {
     else { $Entity.Content.DecodeTo($Stream) }
 }
 
+# Writes the content of a file under a temporary name, new (CreateNew) and kept from other programs while it is
+# written, and renames it to its path, replacing a file there only when told to; the temporary file is deleted when
+# that fails. In a task, so that a failure (a file another program keeps open, a directory that cannot be written, a
+# full disk) is the message of the task (Wait-ImapTask), reported once, and not an exception that PowerShell would also
+# add to $Error and to the -ErrorVariable of the command. A delegate compiled from an expression tree, since a script
+# block has no runspace to run in on the thread of a task:
+#   (content, temporary, path, overwrite) => Task.Run(() => {
+#       var stream = File.Open(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+#       try { try { content.WriteTo(stream); } finally { stream.Dispose(); } File.Move(temporary, path, overwrite); }
+#       finally { if (File.Exists(temporary)) File.Delete(temporary); } })
+$script:SaveFileTask = & {
+    $E = [System.Linq.Expressions.Expression]
+    $content = $E::Parameter([IO.MemoryStream], 'content')
+    $temporary = $E::Parameter([string], 'temporary')
+    $path = $E::Parameter([string], 'path')
+    $overwrite = $E::Parameter([bool], 'overwrite')
+    $stream = $E::Variable([IO.FileStream], 'stream')
+    $file = [IO.File]
+    $save = $E::Block(
+        [System.Linq.Expressions.ParameterExpression[]]@($stream),
+        $E::Assign($stream, $E::Call($file.GetMethod('Open', [type[]]@([string], [IO.FileMode], [IO.FileAccess], [IO.FileShare])),
+                [System.Linq.Expressions.Expression[]]@($temporary, $E::Constant([IO.FileMode]::CreateNew), $E::Constant([IO.FileAccess]::Write), $E::Constant([IO.FileShare]::None)))),
+        $E::TryFinally(
+            $E::Block(
+                $E::TryFinally(
+                    $E::Call($content, [IO.MemoryStream].GetMethod('WriteTo', [type[]]@([IO.Stream])), [System.Linq.Expressions.Expression[]]@($stream)),
+                    $E::Call($stream, [IO.Stream].GetMethod('Dispose', [type[]]@()))),
+                $E::Call($file.GetMethod('Move', [type[]]@([string], [string], [bool])), [System.Linq.Expressions.Expression[]]@($temporary, $path, $overwrite))),
+            $E::IfThen($E::Call($file.GetMethod('Exists', [type[]]@([string])), $temporary), $E::Call($file.GetMethod('Delete', [type[]]@([string])), $temporary))))
+    $run = $E::Call([System.Threading.Tasks.Task].GetMethod('Run', [type[]]@([Action])), $E::Lambda([Action], $save))
+    $E::Lambda([Func[IO.MemoryStream, string, string, bool, System.Threading.Tasks.Task]], $run, [System.Linq.Expressions.ParameterExpression[]]@($content, $temporary, $path, $overwrite)).Compile()
+}
+
 # Saves an attachment of a message in a directory, under $FileName, and returns the file; or $null after reporting why
 # not. Fetches that part alone (BODY.PEEK), and writes it under a temporary name in the same directory, which it then
-# renames: whoever watches the directory never sees half a file. An existing file is replaced only with -Force.
+# renames ($script:SaveFileTask): whoever watches the directory never sees half a file. An existing file is replaced
+# only with -Force, and a directory never, told before the part is fetched. When the file cannot be written, the one
+# that was there is not returned as if it were the attachment.
 # A part that is the same file as one saved before from the same message, by the SHA-256 of its content in $Saved, is
 # not written again: a message forwarded by Gmail carries an image both shown and attached (JP's NVR, 2026-11-05), and
 # Outlook repeats the logos of a signature. A file that exists counts as saved, so that running again gives the same.
@@ -98,8 +138,12 @@ function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [strin
     $where = "the message $($Summary.UniqueId.Id) in the folder '$($Folder.FullName)' of $($Session.Settings.User)"
     $shown = if ($Part.FileName) { $Part.FileName } else { $FileName }
     $path = [IO.Path]::Combine($Directory, $FileName)
-    if (-not $Force -and ([IO.File]::Exists($path) -or [IO.Directory]::Exists($path))) {
-        if ([IO.File]::Exists($path)) { $null = $Saved.Add((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash) }
+    if ([IO.Directory]::Exists($path)) {
+        Write-ImapError $Cmdlet "'$path' is a directory, so the part '$shown' of $where was not saved." 'AttachmentFileExists' ResourceExists $path
+        return $null
+    }
+    if (-not $Force -and [IO.File]::Exists($path)) {
+        $null = $Saved.Add((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash)
         Write-ImapError $Cmdlet "'$path' already exists, so the part '$shown' of $where was not saved: give -Force to replace the file." 'AttachmentFileExists' ResourceExists $path
         return $null
     }
@@ -112,17 +156,16 @@ function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [strin
     # Decoded in memory, where MimeKit already holds the part, to tell a file saved before by its content
     $content = [IO.MemoryStream]::new()
     Write-AttachmentContent $task.Result $content
-    if (-not $Saved.Add([Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($content.ToArray())))) {
+    $content.Position = 0
+    if (-not $Saved.Add([Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([IO.Stream]$content)))) {
         Write-Verbose "The part '$shown' of $where is the same file as one saved before from it, and was not saved again."
         return $null
     }
     $temporary = "$path.$([guid]::NewGuid().ToString('N').Substring(0, 8)).part"
-    try {
-        $stream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-        try { $content.Position = 0; $content.CopyTo($stream) } finally { $stream.Dispose() }
-        [IO.File]::Move($temporary, $path, [bool]$Force)
-    } finally {
-        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+    $failure = Wait-ImapTask ($script:SaveFileTask.Invoke($content, $temporary, $path, [bool]$Force))
+    if ($failure) {
+        Write-ImapError $Cmdlet "Could not write '$path', so the part '$shown' of $where was not saved: $failure" 'AttachmentWriteFailed' WriteError $path
+        return $null
     }
     # -Force, or a file whose name starts with a dot, hidden on Linux, is not found
     return Get-Item -LiteralPath $path -Force
