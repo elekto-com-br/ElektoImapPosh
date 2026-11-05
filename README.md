@@ -120,18 +120,19 @@ Get-ImapPolicy                  # the policies, and the accounts that follow eac
 | `DenyFolders` | Folders whose messages are listed but not read nor changed: full names, special uses (`Junk`, `Trash`...) or patterns, as `-Folder` takes them. On Gmail, also the messages with their label, wherever they are read from |
 | `AllowReadFrom` | The senders whose messages may be read in full; those of any other sender are withheld |
 | `DenyReadFrom` | The senders whose messages are withheld, even if `AllowReadFrom` names them |
-| `AllowAttachmentsFrom` | The senders whose attachments may be saved |
-| `AllowAttachmentTypes` | The attachments that may be saved, by MIME type (`application/pdf`, `image/*`) or by file name (`*.pdf`) |
-| `DenyAttachmentTypes` | The attachments that may not be saved, even if `AllowAttachmentTypes` names them: denied when either the type or the name matches |
+| `AllowAttachmentsFrom` | The senders whose attachments may be saved, authenticated as for `AllowReadFrom` |
+| `AllowAttachmentTypes` | The attachments that may be saved, by MIME type (`application/pdf`, `image/*`) or by the name of the file (`*.pdf`) |
+| `DenyAttachmentTypes` | The attachments that may not be saved, even if `AllowAttachmentTypes` names them: denied when either the type or the name of the file matches |
 | `MaxAgeDays` | Older messages are not searched nor read: every search is narrowed to these days |
 | `MaxMessages` | How many messages of each account one command may handle, over all its folders |
 | `MaxMessageSize` | The largest message read in full, in bytes (`25MB`); of a larger one, only its metadata |
-| `MaxAttachmentSize` | The largest attachment that may be saved, in bytes (`10MB`) |
+| `MaxAttachmentSize` | The largest attachment that may be saved, in bytes (`10MB`), told before it is downloaded |
 | `TrustAuthenticationResults` | The receiving server whose `Authentication-Results` headers tell an authenticated sender: `mx.google.com` on Gmail |
 
 - Senders are addresses or wildcard patterns (`jp@example.com`, `*@example.com`), read ignoring case. Anyone can write any address as the sender, so the allow lists match only a sender authenticated by the server named in `TrustAuthenticationResults` (the topmost of its headers says that DMARC passed for the domain of the sender); without it, they pass no sender. The deny lists match the sender as the message gives it, since a forged sender there only withholds more.
 - Your own messages, in the sent folder, have no such header: they count as authenticated, so an allow list that names your address lets them be read. The sent folder is the one the server marks so, or else, on a server that marks none, the folder named `Sent`; on Gmail, the messages with the label `\Sent` too.
 - An allow list, when given, withholds what it does not name, and a deny list wins over it. An account without a policy allows all reading.
+- An attachment is saved only from a message whose body may be read, and only when the rules on attachments let it. So `MaxMessageSize` bounds the attachments too: a message larger than it has none saved, whatever `MaxAttachmentSize` says. They take the name the file is saved under, not the one the message gives: an attachment named `x.exe.` would be saved as `x.exe` (Windows drops the dot), and `*.exe` denies it. The MIME type is the one the sender declares, and clients name the same kind of file differently (Outlook sends a zip as `application/x-zip-compressed`, not `application/zip`), so a name says more of what a file is: `-AllowAttachmentTypes '*.pdf'` rather than `application/pdf` alone.
 - What a policy withholds is the body and the attachments. The metadata of every message (sender, recipients, subject, date, labels, the names and sizes of its attachments) can always be read, and a message withheld says so, rather than missing without a word: `Get-ImapMessage` lists it, with the reason in its property `Withheld`, and `Read-ImapMessage` refuses it with a `MessageWithheld` error that gives the reason, having downloaded nothing of it but its metadata.
 - On Gmail, a label is a folder, a message is in the folder of each of its labels, and All Mail holds them all. A message with the label of a denied folder is therefore withheld wherever it is read from: All Mail (where `-Query` searches), the inbox or another label. The system labels (`\Inbox`, `\Sent`, `\Important`...) stand for their special folders.
 - A command never goes beyond the limits: `-Since` earlier than `MaxAgeDays` allows is narrowed to its days, with a warning, and `-First` is lowered to what `MaxMessages` leaves; when that leaves messages out, a warning says how many.
@@ -222,10 +223,30 @@ Get-ImapMessage work -From bank.example -Since (Get-Date).Date | Read-ImapMessag
 ```
 
 - `Text` is the plain text of the message or, when it has none, its HTML as it is; `Format` says which (`Text` or `Html`), and `-Html` gives the HTML first. The text is decoded (base64, quoted-printable, its character set), but HTML is never converted: pipe it to a converter of your choice, such as `pandoc -f html -t plain`.
-- Only that part of the message is downloaded. Its attachments are listed in `Attachments`, by name, type and size (as the message carries them: a file sent in base64 is about three quarters of it), and not downloaded. Nothing is marked as read, and nothing in the message is fetched from the network (images) nor followed (links).
+- Only that part of the message is downloaded. Its attachments are listed in `Attachments`, and not downloaded: the name the message gives (`Name`), the name the file would be saved under (`FileName`), the type, the most the file takes (`Size`, told from the message), and why the policy keeps it from being saved, if it does (`Withheld`). The parts shown in the body rather than attached, such as prints pasted in it, are listed the same way in `InlineParts`. Nothing is marked as read, and nothing in the message is fetched from the network (images) nor followed (links).
 - `-MaxLength` cuts the text, and `Truncated` says so.
 - A message that the policy of the account withholds is not read: a `MessageWithheld` error says why. `MaxMessages` limits how many messages of each account one command reads, with a warning that says how many were left out.
 - When a folder was numbered anew since its messages were listed (another `UidValidity`), a `UidValidityChanged` error says so, rather than read another message with the same UID. A UID that is not in the folder is a `MessageNotFound` error, and a folder pattern that names more than one folder is `FolderAmbiguous`.
+
+### Saving Attachments
+
+`Save-ImapAttachment` saves the attachments of messages, decoded, as files in a directory, and returns the files. Only the attachments are downloaded, one part at a time:
+
+```powershell
+Get-ImapMessage -From bank.example -Since (Get-Date).Date | Save-ImapAttachment -Path ~/Statements -Name *.pdf
+Save-ImapAttachment work -Folder Inbox -Uid 12045 -Path .
+Get-ImapMessage work -From reports@client.example | Save-ImapAttachment -Path ./Reports -Name CPTO.xlsx -Force | ForEach-Object { ./Import-Report.ps1 $_.FullName }
+Get-ImapMessage work -From client.example | Save-ImapAttachment -Path ./Prints -Inline -ContentType image/* -UniqueName
+```
+
+- `-Inline` also saves the parts shown in the body of a message rather than attached: prints pasted in it, images its HTML shows, photos that a camera sends that way. Without it they are left out, since most messages carry logos and signatures so. `-ContentType` picks parts by MIME type, with wildcards: `-Inline -ContentType image/*` saves the images of a message, embedded or attached (signature logos among them).
+- A name that comes more than once in a message is numbered, attachments first, then inline parts, each in the order of the message: Gmail names every print pasted in a message `image.png`, saved as `image.png`, `image (2).png`... A part shown in the body that is the same file as an attachment (same name and size), as a message forwarded by Gmail carries an image both shown and attached, is saved once, as the attachment. A part without a name is `attachment`, with the extension of its type (`attachment.jpg`). `-UniqueName` puts the UID of the message before each name (`12045-image.png`), so that files of the same name in several messages do not take each other's names; UIDs grow as messages arrive, so the files sort in that order.
+
+- The name of an attachment comes from whoever sent the message, so the file gets a name that is safe on any platform: only the last part of the name (`../../x` is saved as `x`, in `-Path`), without the characters Windows refuses, nor the dots and spaces it drops at the end, nor characters that reverse the direction of text (they can show `exe.pdf` for `fdp.exe`), with `_` before a name Windows keeps for a device (`_CON.txt`), and `attachment` when nothing is left. `Read-ImapMessage` shows that name as `FileName`.
+- `-Path` must be a directory that exists. A file that exists is not replaced without `-Force` (`AttachmentFileExists`). Each file is written under a temporary name and then renamed, so whoever watches the directory never sees half a file.
+- `-Name` takes names or patterns, matched against the name the message gives and the name of the file. `-WhatIf` shows what would be saved, and where, without fetching any attachment.
+- Each file carries the `Account`, `Folder` and `Uid` of its message, the name of the `Attachment` in the message, and whether it was `Inline`.
+- Under a policy, the attachments of a message it withholds are not saved (`MessageWithheld`), and an attachment or inline part that the rules on attachments keep is an `AttachmentWithheld` error that says why; neither is downloaded.
 
 ## Building from Source
 

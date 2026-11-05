@@ -20,7 +20,8 @@
 # patterns, ignoring case: senders such as *@example.com, attachments a MIME type when they have a "/" (image/*) and
 # a file name otherwise (*.pdf). Sizes are in bytes.
 # Every command that reads messages makes one check, Get-WithheldReason, on the metadata of each message, before its
-# body or an attachment is fetched: a message withheld is still listed, saying why. On Gmail a message is in every
+# body or an attachment is fetched: a message withheld is still listed, saying why. Saving an attachment also needs
+# Get-AttachmentWithheldReason, on the attachment and the name its file gets. On Gmail a message is in every
 # folder its labels name (All Mail holds them all), so a label that names a denied folder withholds it too. Messages
 # in the sent folder are the user's own and have no Authentication-Results: they count as authenticated.
 
@@ -192,6 +193,35 @@ function Test-AuthenticatedSender($Summary, [string]$Server) {
     return $false
 }
 
+# Whether a message is the user's own: in the sent folder, or, on Gmail, with a label that stands for it
+function Test-OwnMessage($Session, $Folder, $Summary) {
+    $places = Get-PolicyFolderSet $Session
+    if ($places.Sent.Contains($Folder.FullName)) { return $true }
+    foreach ($label in $Summary.GMailLabels) {
+        foreach ($name in (Get-LabelFolder $places $label)) {
+            if ($places.Sent.Contains($name)) { return $true }
+        }
+    }
+    return $false
+}
+
+# Why a list of senders of a policy (AllowReadFrom or AllowAttachmentsFrom, named by $Setting) does not pass the
+# sender of a message, in a sentence, or $null when it does. It passes only an authenticated sender, or the user's own
+# message ($Own), whose every sender it names.
+function Get-SenderOutsideReason($Policy, [string]$Setting, $Summary, [bool]$Own) {
+    $of = "of the policy '$($Policy.Name)'"
+    $server = $Policy.TrustAuthenticationResults
+    if (-not $Own -and -not (Test-AuthenticatedSender $Summary $server)) {
+        if (-not $server) { return "$Setting $of passes only authenticated senders, and the policy has no TrustAuthenticationResults to authenticate them." }
+        return "The sender is not authenticated by $server (no DMARC pass for the domain of the From), and $Setting $of passes only authenticated senders."
+    }
+    $senders = @($Summary.Envelope.From.Mailboxes | ForEach-Object { $_.Address })
+    if ($senders.Count -eq 0) { return "It has no sender, and $Setting $of passes only the senders it names." }
+    $outside = @($senders | Where-Object { $address = $_; -not @($Policy[$Setting] | Where-Object { $address -like $_ }).Count })
+    if ($outside.Count) { return "The sender $($outside[0]) is not in $Setting $of." }
+    return $null
+}
+
 # Why the policy of a session withholds the body and the attachments of a message, in a sentence, or $null when it does
 # not. The one check for every command that reads messages, made on the summary that Get-ImapMessageSummary fetches,
 # before the body or an attachment is; $Folder is the folder the message was read from. Fails closed: a message whose
@@ -203,11 +233,9 @@ function Get-WithheldReason($Session, $Folder, $Summary) {
     $places = Get-PolicyFolderSet $Session
 
     if ($places.Denied.Contains($Folder.FullName)) { return "The folder '$($Folder.FullName)' is in DenyFolders $of." }
-    $own = $places.Sent.Contains($Folder.FullName)
     foreach ($label in $Summary.GMailLabels) {
         foreach ($name in (Get-LabelFolder $places $label)) {
             if ($places.Denied.Contains($name)) { return "It has the label '$label', and the folder '$name' is in DenyFolders $of." }
-            if ($places.Sent.Contains($name)) { $own = $true }
         }
     }
 
@@ -225,15 +253,40 @@ function Get-WithheldReason($Session, $Folder, $Summary) {
         $match = @($senders | Where-Object { $_ -like $pattern })
         if ($match.Count) { return "The sender $($match[0]) matches '$pattern' in DenyReadFrom $of." }
     }
-    if ($policy.AllowReadFrom) {
-        $server = $policy.TrustAuthenticationResults
-        if (-not $own -and -not (Test-AuthenticatedSender $Summary $server)) {
-            if (-not $server) { return "AllowReadFrom $of passes only authenticated senders, and the policy has no TrustAuthenticationResults to authenticate them." }
-            return "The sender is not authenticated by $server (no DMARC pass for the domain of the From), and AllowReadFrom $of passes only authenticated senders."
-        }
-        if ($senders.Count -eq 0) { return "It has no sender, and AllowReadFrom $of passes only the senders it names." }
-        $outside = @($senders | Where-Object { $address = $_; -not @($policy.AllowReadFrom | Where-Object { $address -like $_ }).Count })
-        if ($outside.Count) { return "The sender $($outside[0]) is not in AllowReadFrom $of." }
+    if ($policy.AllowReadFrom) { return Get-SenderOutsideReason $policy 'AllowReadFrom' $Summary (Test-OwnMessage $Session $Folder $Summary) }
+    return $null
+}
+
+# Whether a pattern of AllowAttachmentTypes or DenyAttachmentTypes takes an attachment: its MIME type, when the pattern
+# has a "/" (image/*), and otherwise the name its file gets (*.pdf)
+function Test-AttachmentPattern([string]$Pattern, [string]$Type, [string]$FileName) {
+    if ($Pattern.Contains('/')) { return $Type -like $Pattern }
+    return $FileName -like $Pattern
+}
+
+# Why the policy of a session withholds an attachment of a message whose body it lets be read (Get-WithheldReason), in
+# a sentence, or $null when the attachment may be saved. In order: its sender (AllowAttachmentsFrom, as AllowReadFrom),
+# its type and name (a deny list wins), its size before it is fetched (Get-AttachmentSize). $FileName is the name the
+# file gets (Get-AttachmentFileName), not the one the message gives: "x.exe." is saved as "x.exe", which "*.exe" must
+# deny. The MIME type is the one the sender declares, so a name says more of what a file is.
+function Get-AttachmentWithheldReason($Session, $Folder, $Summary, $Part, [string]$FileName) {
+    $policy = $Session.Settings.Policy
+    if (-not $policy) { return $null }
+    $of = "of the policy '$($policy.Name)'"
+    if ($policy.AllowAttachmentsFrom) {
+        $reason = Get-SenderOutsideReason $policy 'AllowAttachmentsFrom' $Summary (Test-OwnMessage $Session $Folder $Summary)
+        if ($reason) { return $reason }
+    }
+    $type = $Part.ContentType.MimeType.ToLowerInvariant()
+    foreach ($pattern in $policy.DenyAttachmentTypes) {
+        if (Test-AttachmentPattern $pattern $type $FileName) { return "The attachment $FileName ($type) matches '$pattern' in DenyAttachmentTypes $of." }
+    }
+    if ($policy.AllowAttachmentTypes -and -not @($policy.AllowAttachmentTypes | Where-Object { Test-AttachmentPattern $_ $type $FileName }).Count) {
+        return "The attachment $FileName ($type) matches nothing in AllowAttachmentTypes $of."
+    }
+    $size = Get-AttachmentSize $Part
+    if ($policy.MaxAttachmentSize -and $size -gt $policy.MaxAttachmentSize) {
+        return "The attachment $FileName has up to $size bytes, more than MaxAttachmentSize $of ($($policy.MaxAttachmentSize))."
     }
     return $null
 }

@@ -10,7 +10,9 @@
 # Gmail says, for one, comes from a real message.
 # Each message is a hashtable: Uid, Folders (the full names of those it is in), Labels, ThreadId, From, Subject, Date,
 # Size, Seen, AuthenticationResults (the value of the topmost header), Text (of its text/plain part, the only one, or
-# the first of a multipart/mixed when it has an Attachment, a file name), Raw (the X-GM-RAW
+# the first of a multipart/mixed when it has attachments), Attachments (each a hashtable: Name, Type, Data, its content
+# as text, sent in base64, Octets, a size to declare in place of the real one, Disposition, attachment by default, or
+# inline, or none, and ContentId) or Attachment (the name of a PDF), Raw (the X-GM-RAW
 # searches it matches; any other search matches every message of the folder), and ChangedElsewhere: as if another
 # client had changed its flags, a FETCH of them comes, unasked, with every UID FETCH that does not ask for it.
 
@@ -57,22 +59,44 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                 }
                 return @($uids | Sort-Object -Unique)
             }
-            # A section of a message, as BODY[section] gives it: the whole message (""), a part ("1"), or its headers ("1.MIME")
+            # The attachments of a message, each a hashtable with Name, Type and Data (and Octets, a size to declare)
+            function Get-Attachment($Message) {
+                if ($Message.Attachments) { return , @($Message.Attachments) }
+                if ($Message.Attachment) { return , @(@{ Name = $Message.Attachment; Type = 'application/pdf'; Data = "%PDF-1.4`n" }) }
+                return , @()
+            }
+            function Get-Base64($Attachment) { return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Attachment.Data)) }
+            # The disposition of an attachment: attachment, unless it says inline, or none (no Content-Disposition)
+            function Get-Disposition($Attachment) { if ($Attachment.Disposition) { return $Attachment.Disposition }; return 'attachment' }
+            function Get-AttachmentHeader($Attachment) {
+                $name = $Attachment.Name -replace '\\', '\\' -replace '"', '\"'
+                $disposition = Get-Disposition $Attachment
+                $lines = @(
+                    if ($Attachment.Name) { "Content-Type: $($Attachment.Type); name=`"$name`"" } else { "Content-Type: $($Attachment.Type)" }
+                    if ($disposition -ne 'none') { if ($Attachment.Name) { "Content-Disposition: $disposition; filename=`"$name`"" } else { "Content-Disposition: $disposition" } }
+                    if ($Attachment.ContentId) { "Content-ID: <$($Attachment.ContentId)>" }
+                    'Content-Transfer-Encoding: base64'
+                )
+                return ($lines -join "`r`n") + "`r`n`r`n"
+            }
+            # A section of a message, as BODY[section] gives it: the whole message (""), a part ("1", the text, "2" and on, the
+            # attachments), or the headers of a part ("1.MIME")
             function Get-Section($Message, [string]$Section) {
                 $text = if ($Message.Text) { $Message.Text } else { "The body of $($Message.Subject)." }
                 $textHeaders = "Content-Type: text/plain; charset=utf-8`r`nContent-Transfer-Encoding: 8bit`r`n`r`n"
-                $name = $Message.Attachment
-                switch ($Section) {
-                    '' {
-                        $top = "From: $($Message.From)`r`nTo: Me <me@gmail.com>`r`nSubject: $($Message.Subject)`r`nMessage-ID: <$($Message.Uid)@fake.example>`r`nMIME-Version: 1.0`r`n"
-                        if (-not $name) { return $top + $textHeaders + $text }
-                        return $top + "Content-Type: multipart/mixed; boundary=b1`r`n`r`n--b1`r`n$textHeaders$text`r`n--b1`r`n" +
-                            "Content-Type: application/pdf; name=$name`r`nContent-Disposition: attachment; filename=$name`r`nContent-Transfer-Encoding: base64`r`n`r`nJVBERi0xLjQK`r`n--b1--`r`n"
-                    }
-                    '1' { return $text }
-                    '1.MIME' { return $textHeaders }
-                    '2' { return "JVBERi0xLjQK`r`n" }
-                    '2.MIME' { return "Content-Type: application/pdf; name=$name`r`nContent-Disposition: attachment; filename=$name`r`nContent-Transfer-Encoding: base64`r`n`r`n" }
+                $attachments = Get-Attachment $Message
+                if ($Section -eq '') {
+                    $top = "From: $($Message.From)`r`nTo: Me <me@gmail.com>`r`nSubject: $($Message.Subject)`r`nMessage-ID: <$($Message.Uid)@fake.example>`r`nMIME-Version: 1.0`r`n"
+                    if (-not $attachments.Count) { return $top + $textHeaders + $text }
+                    $parts = @("--b1`r`n$textHeaders$text`r`n") + @(foreach ($attachment in $attachments) { "--b1`r`n$(Get-AttachmentHeader $attachment)$(Get-Base64 $attachment)`r`n" })
+                    return $top + "Content-Type: multipart/mixed; boundary=b1`r`n`r`n" + ($parts -join '') + "--b1--`r`n"
+                }
+                if ($Section -eq '1') { return $text }
+                if ($Section -eq '1.MIME') { return $textHeaders }
+                if ($Section -match '^(\d+)(\.MIME)?$' -and [int]$Matches[1] -ge 2 -and [int]$Matches[1] -le $attachments.Count + 1) {
+                    $attachment = $attachments[[int]$Matches[1] - 2]
+                    if ($Matches[2]) { return Get-AttachmentHeader $attachment }
+                    return "$(Get-Base64 $attachment)`r`n"
                 }
                 return ''
             }
@@ -92,9 +116,22 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                         Format-Quoted "<$($Message.Uid)@fake.example>"
                     ) -join ' ') + ')'
                 $text = '("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 20 1 NIL NIL NIL NIL)'
-                $structure = if (-not $Message.Attachment) { $text } else {
-                    $name = Format-Quoted $Message.Attachment
-                    "($text(`"APPLICATION`" `"PDF`" (`"NAME`" $name) NIL NIL `"BASE64`" 1000 NIL (`"ATTACHMENT`" (`"FILENAME`" $name)) NIL NIL) `"MIXED`" (`"BOUNDARY`" `"b1`") NIL NIL NIL)"
+                $attachments = Get-Attachment $Message
+                $structure = if (-not $attachments.Count) { $text } else {
+                    $parts = foreach ($attachment in $attachments) {
+                        $type, $subtype = $attachment.Type -split '/'
+                        # Without a name, no parameters at all, as a server gives them
+                        $name = Format-Quoted $attachment.Name
+                        $parameters = if ($attachment.Name) { "(`"NAME`" $name)" } else { 'NIL' }
+                        $kind = (Get-Disposition $attachment).ToUpperInvariant()
+                        $disposition = if ($kind -eq 'NONE') { 'NIL' } elseif ($attachment.Name) { "(`"$kind`" (`"FILENAME`" $name))" } else { "(`"$kind`" NIL)" }
+                        $id = if ($attachment.ContentId) { Format-Quoted "<$($attachment.ContentId)>" } else { 'NIL' }
+                        $octets = if ($attachment.Octets) { $attachment.Octets } else { (Get-Base64 $attachment).Length + 2 }
+                        # A part of type TEXT also gives its number of lines, after its size
+                        $size = if ($type -eq 'text') { "$octets 1" } else { "$octets" }
+                        "(`"$($type.ToUpperInvariant())`" `"$($subtype.ToUpperInvariant())`" $parameters $id NIL `"BASE64`" $size NIL $disposition NIL NIL)"
+                    }
+                    "($text$($parts -join '') `"MIXED`" (`"BOUNDARY`" `"b1`") NIL NIL NIL)"
                 }
                 $labels = @($Message.Labels | ForEach-Object { Format-Quoted $_ }) -join ' '
                 $thread = if ($Message.ThreadId) { $Message.ThreadId } else { $Message.Uid }

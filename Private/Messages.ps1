@@ -72,6 +72,37 @@ function Format-ImapAddress($List) {
         })
 }
 
+# The messages with the UIDs given in a folder, named as -Folder of Read-ImapMessage takes it (a single folder; with
+# -Literal, as from the pipeline, its exact name), opened read-only: a hashtable with the Folder and the summaries
+# ByUid; or $null after reporting why not. A UidValidity that is not the folder's (0 is none given: UIDVALIDITY never
+# is) means that its messages were numbered anew since they were listed, so that the UIDs may be of other messages:
+# each one is reported, and none is read.
+function Get-ImapMessageByUid($Cmdlet, $Session, [string]$FolderName, [switch]$Literal, [uint32[]]$Uid, [uint32]$UidValidity) {
+    $user = $Session.Settings.User
+    $folders = Get-ImapFolderList $Cmdlet $Session
+    if ($null -eq $folders) { return $null }
+    $chosen = Select-ImapFolderList $Cmdlet $Session $folders $FolderName -Literal:$Literal
+    if ($chosen.Count -gt 1) {
+        Write-ImapError $Cmdlet "'$FolderName' names $($chosen.Count) folders of $user ($($chosen.FullName -join ', ')), and a UID is of one: give its full name." 'FolderAmbiguous' InvalidArgument $FolderName
+        return $null
+    }
+    if ($chosen.Count -eq 0) { return $null }
+    $folder = $chosen[0]
+    if (-not (Open-ImapFolder $Cmdlet $Session $folder)) { return $null }
+    if ($UidValidity -and $UidValidity -ne $folder.UidValidity) {
+        foreach ($id in $Uid) {
+            Write-ImapError $Cmdlet "The folder '$($folder.FullName)' of $user was numbered anew since its messages were listed (UIDVALIDITY $UidValidity, now $($folder.UidValidity)), so the UID $id may be another message: list them again with Get-ImapMessage." 'UidValidityChanged' InvalidData $id
+        }
+        return $null
+    }
+    $summaries = Get-ImapMessageSummary $Cmdlet $Session $folder @($Uid | ForEach-Object { [MailKit.UniqueId]::new($folder.UidValidity, $_) })
+    if ($null -eq $summaries) { return $null }
+    # By UID, found once: a search of the list for each of many UIDs would take their square
+    $byUid = @{}
+    foreach ($summary in $summaries) { $byUid[$summary.UniqueId.Id] = $summary }
+    return @{ Folder = $folder; ByUid = $byUid }
+}
+
 # A message as the commands return it: its metadata, and why the policy withholds its body, if it does, as the check of
 # the caller found (Get-WithheldReason). The properties are the same on every server (ThreadId and Labels are $null
 # off Gmail), so that the objects export alike.
@@ -117,12 +148,4 @@ function Get-ImapMessageText($Cmdlet, $Session, $Folder, $Summary, [switch]$Html
         return $null
     }
     return @{ Text = $task.Result.Text; Format = if ($part.IsHtml) { 'Html' } else { 'Text' } }
-}
-
-# The attachments of a message, as its structure describes them, without fetching them: name, MIME type, and size as
-# the message carries them (encoded: a file sent in base64 is about three quarters of it)
-function Get-ImapAttachmentList($Summary) {
-    return , [object[]]@($Summary.Attachments | ForEach-Object {
-            [PSCustomObject]@{ Name = $_.FileName; ContentType = $_.ContentType.MimeType; Size = [long]$_.Octets }
-        })
 }
