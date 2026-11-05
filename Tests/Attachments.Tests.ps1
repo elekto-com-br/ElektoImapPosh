@@ -308,6 +308,60 @@ Describe 'Save-ImapAttachment on Gmail' {
         # A new directory of the test drive for each test, and the commands the server got since the test began
         function New-TestDirectory([string]$Name) { (New-Item -ItemType Directory -Path (Join-Path $TestDrive $Name) -Force).FullName }
         function Get-CommandSince([int]$Count) { @($server.State.Commands.ToArray() | Select-Object -Skip $Count) }
+
+        # The write of the module held until the gate opens: all of it, or with after only the end of its task, the file
+        # written and renamed already; started gives the task the command waits for, once it is held. In C#, since the
+        # task runs on threads where a script block has no runspace
+        if (-not ('ElektoImapPoshTests.HeldSave' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Threading.Tasks;
+
+namespace ElektoImapPoshTests
+{
+    public static class HeldSave
+    {
+        // Wraps the write of the module: (content, temporary, path, overwrite, commit) => task
+        public static Func<MemoryStream, string, string, bool, TaskCompletionSource<bool>, Task> Hold(
+            Func<MemoryStream, string, string, bool, TaskCompletionSource<bool>, Task> save, Task gate, TaskCompletionSource<Task> started, bool after)
+        {
+            return (content, temporary, path, overwrite, commit) =>
+            {
+                if (!after)
+                {
+                    Task held = gate.ContinueWith(_ => save(content, temporary, path, overwrite, commit)).Unwrap();
+                    started.TrySetResult(held);
+                    return held;
+                }
+                Task saved = save(content, temporary, path, overwrite, commit);
+                Task end = saved.ContinueWith(_ => gate).Unwrap();
+                saved.ContinueWith(_ => started.TrySetResult(end));
+                return end;
+            };
+        }
+    }
+}
+'@
+        }
+
+        # Save-ImapAttachment in a runspace of its own, which Ctrl+C stops (BeginStop), saving report.pdf of the message 10
+        # with -Force, its write held until Gate opens (HeldSave)
+        function Start-HeldSave([string]$Directory, [switch]$After) {
+            $held = [pscustomobject]@{
+                PowerShell = [powershell]::Create()
+                Gate       = [System.Threading.Tasks.TaskCompletionSource[object]]::new()
+                Started    = [System.Threading.Tasks.TaskCompletionSource[System.Threading.Tasks.Task]]::new()
+            }
+            $null = $held.PowerShell.AddScript({
+                    param($Manifest, $Gate, $Started, $After, $Directory)
+                    Import-Module $Manifest
+                    & (Get-Module ElektoImapPosh) { param($Gate, $Started, $After) $script:SaveFileTask = [ElektoImapPoshTests.HeldSave]::Hold($script:SaveFileTask, $Gate, $Started, $After) } $Gate $Started $After
+                    Save-ImapAttachment open -Folder All -Uid 10 -Path $Directory -Name report.pdf -Force
+                }).AddArgument((Join-Path (Split-Path $PSScriptRoot) 'ElektoImapPosh.psd1')).AddArgument($held.Gate.Task).AddArgument($held.Started).AddArgument([bool]$After).AddArgument($Directory)
+            $null = $held.PowerShell.BeginInvoke()
+            return $held
+        }
     }
 
     AfterAll {
@@ -442,6 +496,55 @@ Describe 'Save-ImapAttachment on Gmail' {
         $errors.Count | Should -Be 1
         $errors[0].FullyQualifiedErrorId | Should -BeLike 'AttachmentFileExists,*'
         Get-Content -LiteralPath $existing -Raw | Should -BeExactly 'kept'
+    }
+
+    # Ctrl+C stops the wait for the task that writes a file, not the task, which went on and replaced the file there
+    # after the command had ended (Copilot on #13). The write is held until the command is stopped, as a slow disk holds it
+    It 'stops at once on Ctrl+C while writing a file, without saving it later or replacing the file there' {
+        $directory = New-TestDirectory 'stopped-while-writing'
+        $existing = Join-Path $directory 'report.pdf'
+        Set-Content -LiteralPath $existing -Value 'kept' -NoNewline
+        $held = Start-HeldSave $directory
+        try {
+            $held.Started.Task.Wait(30000) | Should -BeTrue -Because 'the command should be writing the file by now'
+
+            # What Ctrl+C does; then the write goes on
+            $stopping = $held.PowerShell.BeginStop($null, $null)
+            $stopped = $stopping.AsyncWaitHandle.WaitOne(2000)
+            $held.Gate.SetResult($null)
+            $written = [System.Threading.Tasks.Task]::WaitAny([System.Threading.Tasks.Task[]]@($held.Started.Task.Result), 10000)
+
+            $stopped | Should -BeTrue -Because 'Ctrl+C should not wait for the file being written'
+            $written | Should -Be 0 -Because 'the write should have ended'
+            Get-Content -LiteralPath $existing -Raw | Should -BeExactly 'kept'
+            @(Get-ChildItem -LiteralPath $directory -Force).Name | Should -Be 'report.pdf' -Because 'no temporary file is left'
+        } finally {
+            $null = $held.Gate.TrySetResult($null)
+            $held.PowerShell.Dispose()
+        }
+    }
+
+    # Stopped once the task renames the file, the command waits for the task, so that nothing changes in the directory
+    # after it ends. The end of the task is held, the file written and renamed already
+    It 'waits on Ctrl+C for the task that already renames a file, and ends after it' {
+        $directory = New-TestDirectory 'stopped-while-renaming'
+        $held = Start-HeldSave $directory -After
+        try {
+            $held.Started.Task.Wait(30000) | Should -BeTrue -Because 'the command should have written the file by now'
+
+            $stopping = $held.PowerShell.BeginStop($null, $null)
+            $waited = -not $stopping.AsyncWaitHandle.WaitOne(1000)
+            $held.Gate.SetResult($null)
+            $stopped = $stopping.AsyncWaitHandle.WaitOne(10000)
+
+            $waited | Should -BeTrue -Because 'the command should wait for the task that renames the file'
+            $stopped | Should -BeTrue -Because 'the command should end once the task does'
+            [IO.File]::ReadAllText((Join-Path $directory 'report.pdf')) | Should -BeExactly '%PDF-1.4 report'
+            @(Get-ChildItem -LiteralPath $directory -Force).Name | Should -Be 'report.pdf' -Because 'no temporary file is left'
+        } finally {
+            $null = $held.Gate.TrySetResult($null)
+            $held.PowerShell.Dispose()
+        }
     }
 
     It 'saves under names that stay in the directory and that Windows takes' {

@@ -127,18 +127,23 @@ function Write-AttachmentContent($Entity, [IO.Stream]$Stream) {
 # written, and renames it to its path, replacing a file there only when told to; the temporary file is deleted when
 # that fails. In a task, so that a failure (a file another program keeps open, a directory that cannot be written, a
 # full disk) is the message of the task (Wait-ImapTask), reported once, and not an exception that PowerShell would also
-# add to $Error and to the -ErrorVariable of the command. A delegate compiled from an expression tree, since a script
-# block has no runspace to run in on the thread of a task:
-#   (content, temporary, path, overwrite) => Task.Run(() => {
+# add to $Error and to the -ErrorVariable of the command. It renames the file only once it takes $commit, a
+# TaskCompletionSource that only one side can complete: the command takes it first when it no longer waits for the
+# file (Save-AttachmentFile), and the task then deletes the temporary file instead. A delegate compiled from an
+# expression tree, since a script block has no runspace to run in on the thread of a task:
+#   (content, temporary, path, overwrite, commit) => Task.Run(() => {
 #       var stream = File.Open(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-#       try { try { content.WriteTo(stream); } finally { stream.Dispose(); } File.Move(temporary, path, overwrite); }
-#       finally { if (File.Exists(temporary)) File.Delete(temporary); } })
+#       try {
+#           try { content.WriteTo(stream); } finally { stream.Dispose(); }
+#           if (commit.TrySetResult(true)) File.Move(temporary, path, overwrite);
+#       } finally { if (File.Exists(temporary)) File.Delete(temporary); } })
 $script:SaveFileTask = & {
     $E = [System.Linq.Expressions.Expression]
     $content = $E::Parameter([IO.MemoryStream], 'content')
     $temporary = $E::Parameter([string], 'temporary')
     $path = $E::Parameter([string], 'path')
     $overwrite = $E::Parameter([bool], 'overwrite')
+    $commit = $E::Parameter([System.Threading.Tasks.TaskCompletionSource[bool]], 'commit')
     $stream = $E::Variable([IO.FileStream], 'stream')
     $file = [IO.File]
     $save = $E::Block(
@@ -150,10 +155,11 @@ $script:SaveFileTask = & {
                 $E::TryFinally(
                     $E::Call($content, [IO.MemoryStream].GetMethod('WriteTo', [type[]]@([IO.Stream])), [System.Linq.Expressions.Expression[]]@($stream)),
                     $E::Call($stream, [IO.Stream].GetMethod('Dispose', [type[]]@()))),
-                $E::Call($file.GetMethod('Move', [type[]]@([string], [string], [bool])), [System.Linq.Expressions.Expression[]]@($temporary, $path, $overwrite))),
+                $E::IfThen($E::Call($commit, [System.Threading.Tasks.TaskCompletionSource[bool]].GetMethod('TrySetResult', [type[]]@([bool])), [System.Linq.Expressions.Expression[]]@($E::Constant($true))),
+                    $E::Call($file.GetMethod('Move', [type[]]@([string], [string], [bool])), [System.Linq.Expressions.Expression[]]@($temporary, $path, $overwrite)))),
             $E::IfThen($E::Call($file.GetMethod('Exists', [type[]]@([string])), $temporary), $E::Call($file.GetMethod('Delete', [type[]]@([string])), $temporary))))
     $run = $E::Call([System.Threading.Tasks.Task].GetMethod('Run', [type[]]@([Action])), $E::Lambda([Action], $save))
-    $E::Lambda([Func[IO.MemoryStream, string, string, bool, System.Threading.Tasks.Task]], $run, [System.Linq.Expressions.ParameterExpression[]]@($content, $temporary, $path, $overwrite)).Compile()
+    $E::Lambda([Func[IO.MemoryStream, string, string, bool, System.Threading.Tasks.TaskCompletionSource[bool], System.Threading.Tasks.Task]], $run, [System.Linq.Expressions.ParameterExpression[]]@($content, $temporary, $path, $overwrite, $commit)).Compile()
 }
 
 # Saves an attachment of a message in a directory, under $FileName, and returns the file; or $null after reporting why
@@ -221,7 +227,18 @@ function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [strin
         return $null
     }
     $temporary = "$path.$([guid]::NewGuid().ToString('N').Substring(0, 8)).part"
-    $failure = Wait-ImapTask ($script:SaveFileTask.Invoke($content, $temporary, $path, [bool]$Force))
+    # Ctrl+C stops the wait, not the task, which went on and renamed the file after the command had ended, replacing the
+    # one there with -Force (Copilot on #13). Stopped, the command takes $commit before the task can: the task then
+    # renames nothing, and deletes the temporary file once written. If the task took it first, it is renaming the file,
+    # and the command waits for that, as a finally entered by Ctrl+C runs to its end (measured). The task starts inside
+    # the try, so as not to count on where PowerShell notices Ctrl+C
+    $commit = [System.Threading.Tasks.TaskCompletionSource[bool]]::new()
+    try {
+        $task = $script:SaveFileTask.Invoke($content, $temporary, $path, [bool]$Force, $commit)
+        $failure = Wait-ImapTask $task
+    } finally {
+        if (-not $commit.TrySetResult($false)) { $null = [System.Threading.Tasks.Task]::WaitAny([System.Threading.Tasks.Task[]]@($task)) }
+    }
     if ($failure) {
         Write-ImapError $Cmdlet "Could not write '$path', so the part '$Shown' of $where was not saved: $failure" 'AttachmentWriteFailed' WriteError $path
         return $null

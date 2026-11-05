@@ -34,8 +34,10 @@ a read-only file, nor a file this command saved, -Force or not, so that two mess
 name do not lose one of them. The sender picks the names, so give -Force only for a directory of their
 own: in a directory of scripts, or in the home directory, an attachment could replace a script or a
 profile. Each file is written under a temporary name ending in .part and then renamed, so whoever watches
-the directory never sees half a file under its name. A file that cannot be written, such as one another
-program keeps open, is the error AttachmentWriteFailed: only the files written are returned.
+the directory never sees half a file under its name. Ctrl+C while a file is written stops the command
+without saving that file or replacing the one there; the temporary file is deleted once written. A file
+that cannot be written, such as one another program keeps open, is the error AttachmentWriteFailed: only
+the files written are returned.
 
 When the account follows a policy (Set-ImapAccount -Policy), the attachments of a message whose body it
 withholds are not saved (the error MessageWithheld says why), and each attachment must also pass the rules
