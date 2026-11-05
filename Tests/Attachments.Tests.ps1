@@ -289,6 +289,56 @@ Describe 'Save-ImapAttachment on Gmail' {
         @(Get-ChildItem -LiteralPath $directory -Force).Name | Should -Be 'report.pdf' -Because 'no temporary file is left'
     }
 
+    # Message 19 carries the same file attached and shown in the body. Where the attachment's file is open in another
+    # program, on Windows, the copy shown is saved under its own name; where the directory cannot be written, it is
+    # reported too. Neither is skipped as a file saved before
+    It 'counts as saved only the files it wrote, so a copy of one it could not write is saved, or reported' -Skip:$isRoot {
+        $directory = New-TestDirectory 'copy-of-unwritten'
+        $existing = Join-Path $directory 'snapshot0.jpg'
+        Set-Content -LiteralPath $existing -Value 'kept' -NoNewline
+        $lock = $null
+        if ($IsWindows) { $lock = [IO.File]::Open($existing, 'Open', 'Read', 'None') }
+        else { [IO.File]::SetUnixFileMode($directory, 'UserRead, UserExecute') }
+        try {
+            $files = Save-ImapAttachment open -Folder All -Uid 19 -Path $directory -Inline -Force -ErrorVariable errors -ErrorAction SilentlyContinue
+        } finally {
+            if ($lock) { $lock.Dispose() } else { [IO.File]::SetUnixFileMode($directory, 'UserRead, UserWrite, UserExecute') }
+        }
+
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'AttachmentWriteFailed,*'
+        "$($errors[0])" | Should -BeLike "Could not write '*snapshot0.jpg', so the part 'snapshot0.jpg' *"
+        if ($IsWindows) {
+            $errors.Count | Should -Be 1
+            $files.Name | Should -Be 'snapshot0 (2).jpg'
+            [IO.File]::ReadAllText($files[0].FullName) | Should -BeExactly 'JPEG snapshot'
+        } else {
+            $files | Should -BeNullOrEmpty
+            $errors.Count | Should -Be 2
+            "$($errors[1])" | Should -BeLike "Could not write '*snapshot0 (2).jpg', *"
+        }
+        Get-Content -LiteralPath $existing -Raw | Should -BeExactly 'kept'
+    }
+
+    # A file another program keeps open with no sharing, on Windows, or one its owner cannot read, elsewhere
+    It 'refuses a file that exists with one error, also when it cannot read the file' -Skip:$isRoot {
+        $directory = New-TestDirectory 'cannot-read'
+        $existing = Join-Path $directory 'report.pdf'
+        Set-Content -LiteralPath $existing -Value 'kept' -NoNewline
+        $lock = $null
+        if ($IsWindows) { $lock = [IO.File]::Open($existing, 'Open', 'Read', 'None') }
+        else { [IO.File]::SetUnixFileMode($existing, 'None') }
+        try {
+            $files = Save-ImapAttachment open -Folder All -Uid 10 -Path $directory -Name report.pdf -ErrorVariable errors -ErrorAction SilentlyContinue
+        } finally {
+            if ($lock) { $lock.Dispose() } else { [IO.File]::SetUnixFileMode($existing, 'UserRead, UserWrite') }
+        }
+
+        $files | Should -BeNullOrEmpty
+        $errors.Count | Should -Be 1
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'AttachmentFileExists,*'
+        Get-Content -LiteralPath $existing -Raw | Should -BeExactly 'kept'
+    }
+
     It 'saves under names that stay in the directory and that Windows takes' {
         $directory = New-TestDirectory 'odd/inner'
         $files = Save-ImapAttachment open -Folder All -Uid 11 -Path $directory

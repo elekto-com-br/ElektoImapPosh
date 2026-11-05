@@ -133,7 +133,8 @@ $script:SaveFileTask = & {
 # that was there is not returned as if it were the attachment.
 # A part that is the same file as one saved before from the same message, by the SHA-256 of its content in $Saved, is
 # not written again: a message forwarded by Gmail carries an image both shown and attached (JP's NVR, 2026-11-05), and
-# Outlook repeats the logos of a signature. A file that exists counts as saved, so that running again gives the same.
+# Outlook repeats the logos of a signature. A file that exists counts as saved, so that running again gives the same;
+# one that could not be written does not (Copilot on #13), nor one that exists but cannot be read, of unknown content.
 function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [string]$Directory, [string]$FileName, [System.Collections.Generic.HashSet[string]]$Saved, [switch]$Force) {
     $where = "the message $($Summary.UniqueId.Id) in the folder '$($Folder.FullName)' of $($Session.Settings.User)"
     $shown = if ($Part.FileName) { $Part.FileName } else { $FileName }
@@ -143,7 +144,10 @@ function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [strin
         return $null
     }
     if (-not $Force -and [IO.File]::Exists($path)) {
-        $null = $Saved.Add((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash)
+        # A file that cannot be read, such as one another program keeps open with no sharing, counts for no part, and
+        # Get-FileHash adds no error of its own to the one refusal
+        $existing = Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Ignore
+        if ($existing) { $null = $Saved.Add($existing.Hash) }
         Write-ImapError $Cmdlet "'$path' already exists, so the part '$shown' of $where was not saved: give -Force to replace the file." 'AttachmentFileExists' ResourceExists $path
         return $null
     }
@@ -157,7 +161,8 @@ function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [strin
     $content = [IO.MemoryStream]::new()
     Write-AttachmentContent $task.Result $content
     $content.Position = 0
-    if (-not $Saved.Add([Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([IO.Stream]$content)))) {
+    $hash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([IO.Stream]$content))
+    if ($Saved.Contains($hash)) {
         Write-Verbose "The part '$shown' of $where is the same file as one saved before from it, and was not saved again."
         return $null
     }
@@ -167,6 +172,7 @@ function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [strin
         Write-ImapError $Cmdlet "Could not write '$path', so the part '$shown' of $where was not saved: $failure" 'AttachmentWriteFailed' WriteError $path
         return $null
     }
+    $null = $Saved.Add($hash)
     # -Force, or a file whose name starts with a dot, hidden on Linux, is not found
     return Get-Item -LiteralPath $path -Force
 }
