@@ -5,8 +5,18 @@ Lists the messages of one or more accounts, with their senders, subjects and dat
 .DESCRIPTION
 The `Get-ImapMessage` function searches folders of each account, on the server, and returns the newest
 messages that match, with their metadata: sender, recipients, subject, the date the server received
-them, size, flags, whether they have attachments and, on Gmail, their thread and labels. It downloads
-no body and marks nothing as read.
+them, size, flags, whether they have attachments (a file attached, or shown in the body with a name of
+its own, unless it is an image) and, on Gmail, their thread and labels. It downloads no body and marks
+nothing as read.
+
+What the sender writes (the subject, the senders and recipients, the Message-IDs) comes without what
+would drive a terminal (an escape sequence), reorder the text (an override of direction) or hide it from
+whoever reads it (the tags of Unicode, which an AI reads and a person does not see): each run of such
+characters is shown as one U+FFFD, the replacement character, a tab or line break as a space, and the
+invisible characters that only change how a text is shown (soft hyphen, zero-width space, marks of
+direction) are removed. Each of those texts is cut to 1000 characters, ending in an ellipsis (U+2026), and
+each list of addresses to its first 100, with a last entry that says how many more there were, such as
+"... and 9900 more" (with the ellipsis).
 
 Without -Folder, it searches the inbox, or All Mail with -Query. -First says how many messages of each
 folder it returns, the newest first.

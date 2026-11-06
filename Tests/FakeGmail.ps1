@@ -8,8 +8,9 @@
 # It announces fewer capabilities than Gmail (no ESEARCH, LIST-STATUS or CONDSTORE), so MailKit sends the plain form of
 # its commands. It proves the module's reading of those answers, not Gmail's: what an Authentication-Results header of
 # Gmail says, for one, comes from a real message.
-# Each message is a hashtable: Uid, Folders (the full names of those it is in), Labels, ThreadId, From, Subject, Date,
-# Size, Seen, AuthenticationResults (the value of each Authentication-Results, the topmost first), XOriginalFrom,
+# Each message is a hashtable: Uid, Folders (the full names of those it is in), Labels, ThreadId, From, To and Cc
+# (lists of addresses; To is the user's by default), MessageId (<uid@fake.example> by default), InReplyTo, Subject, Date, Size,
+# Seen, AuthenticationResults (the value of each Authentication-Results, the topmost first), XOriginalFrom,
 # Text (of its text/plain part, the only one, or
 # the first of a multipart/mixed when it has attachments), Attachments (each a hashtable: Name, Type, Data, its content
 # as text, sent in base64, or as it is with Encoding 7bit, as a message attached comes, Octets, a size to declare in
@@ -42,10 +43,15 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                 if (-not $Text) { return 'NIL' }
                 return '"' + ($Text -replace '\\', '\\' -replace '"', '\"') + '"'
             }
-            # "Name <box@domain>" or "box@domain" as an address of an envelope, in a list
+            # "Name <box@domain>" or "box@domain" as an address of an envelope
             function Format-Address([string]$Address) {
                 $null = $Address -match '^(?:(.*?)\s*<)?([^<@\s]+)@([^>\s]+)>?$'
-                return "(($(Format-Quoted $Matches[1]) NIL $(Format-Quoted $Matches[2]) $(Format-Quoted $Matches[3])))"
+                return "($(Format-Quoted $Matches[1]) NIL $(Format-Quoted $Matches[2]) $(Format-Quoted $Matches[3]))"
+            }
+            # Addresses as a list of an envelope, or NIL for none
+            function Format-AddressList([string[]]$Addresses) {
+                if (-not $Addresses) { return 'NIL' }
+                return '(' + (@(foreach ($address in $Addresses) { Format-Address $address }) -join '') + ')'
             }
             function Get-FolderMessage($Messages, [string]$Folder) {
                 return , @($Messages | Where-Object { $_.Folders -contains $Folder } | Sort-Object { $_.Uid })
@@ -140,15 +146,19 @@ function Start-FakeGmail([hashtable[]]$Messages) {
             function Write-Fetch($Writer, [int]$Sequence, $Message, [string]$Items) {
                 $culture = [Globalization.CultureInfo]::InvariantCulture
                 $date = ([DateTimeOffset]$Message.Date).ToUniversalTime()
+                $to = if ($Message.To) { $Message.To } else { 'Me <me@gmail.com>' }
+                $id = if ($Message.MessageId) { $Message.MessageId } else { "<$($Message.Uid)@fake.example>" }
                 $envelope = '(' + (@(
                         Format-Quoted $date.ToString('ddd, dd MMM yyyy HH:mm:ss +0000', $culture)
                         Format-Quoted $Message.Subject
-                        Format-Address $Message.From
-                        Format-Address $Message.From
-                        Format-Address $Message.From
-                        Format-Address 'Me <me@gmail.com>'
-                        'NIL', 'NIL', 'NIL'
-                        Format-Quoted "<$($Message.Uid)@fake.example>"
+                        Format-AddressList $Message.From
+                        Format-AddressList $Message.From
+                        Format-AddressList $Message.From
+                        Format-AddressList $to
+                        Format-AddressList $Message.Cc
+                        'NIL'
+                        Format-Quoted $Message.InReplyTo
+                        Format-Quoted $id
                     ) -join ' ') + ')'
                 $text = '("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 20 1 NIL NIL NIL NIL)'
                 $attachments = Get-Attachment $Message

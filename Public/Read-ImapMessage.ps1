@@ -11,10 +11,17 @@ it pipes it to a converter of its own.
 
 Only that part is downloaded, never the attachments, which are listed in Attachments: the name the
 message gives, the name of the file Save-ImapAttachment would save (FileName), the type, the most the file
-takes (Size), and why the policy keeps it from being saved, if it does (Withheld). The parts shown in the
-body rather than attached, such as images pasted in it, are listed the same way in InlineParts. The
-folder is opened read-only, so nothing is marked as read, and nothing in the message is fetched from
-the network (images) nor followed (links).
+takes (Size), and why the policy keeps it from being saved, if it does (Withheld). A file shown in the body
+with a name of its own is an attachment too, unless it is an image (Apple Mail sends a PDF so); the other
+parts shown in the body, such as images pasted in it, are listed the same way in InlineParts. The folder
+is opened read-only, so nothing is marked as read, and nothing in the message is fetched from the network
+(images) nor followed (links).
+
+The text comes as Get-ImapMessage gives the subject, but with its tabs and line breaks, and whole: without
+what would drive a terminal (an escape sequence), reorder the text or hide it from whoever reads it (the
+tags of Unicode, which an AI reads and a person does not see), each run of them shown as one U+FFFD, the
+replacement character; the invisible characters that only change how a text is shown (soft hyphen,
+zero-width space, marks of direction) are removed.
 
 When the account follows a policy (Set-ImapAccount -Policy), a message whose body it withholds is not
 read: the error MessageWithheld says why, and nothing of the message is downloaded but its metadata.
@@ -137,7 +144,8 @@ Function Read-ImapMessage {
 
             $content = Get-ImapMessageText $PSCmdlet $session $item $summary -Html:$Html
             if ($null -eq $content) { continue }
-            $text = $content.Text
+            # With its lines, and whole; then cut by -MaxLength
+            $text = Format-ShownBody $content.Text
             $truncated = [bool]($MaxLength -and $text -and $text.Length -gt $MaxLength)
             if ($truncated) {
                 # Not between the two halves of a character outside the BMP (an emoji), which would leave half of it

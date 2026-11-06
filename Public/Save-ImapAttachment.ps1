@@ -7,16 +7,25 @@ The `Save-ImapAttachment` function saves the attachments of each message given, 
 directory of -Path, and returns the files. Only the attachments are downloaded, one part at a time, never the
 text of the message; nothing is marked as read.
 
-With -Inline, it also saves the parts shown in the body of a message rather than attached: images pasted in
-it (prints sent by clients), or embedded by its HTML, and photos of cameras that send them so. They are left
-out without it, since most messages carry logos and signatures that way. -ContentType picks the parts by
-their MIME type: -Inline -ContentType image/* saves the images of a message, embedded or attached.
+A file that a message shows in its body with a name of its own, as Apple Mail sends a PDF, is an
+attachment too, unless it is an image. With -Inline, it also saves the other parts shown in the body: images
+pasted in it (prints sent by clients), or embedded by its HTML, photos of cameras that send them so, and
+files without a name. They are left out without it, since most messages carry logos and signatures that
+way. -ContentType picks the parts by their MIME type: -Inline -ContentType image/* saves the images of a
+message, embedded or attached.
+
+On Windows, each file carries the Mark of the Web, as Outlook and the browsers write it (ZoneId=3 in its
+stream Zone.Identifier): SmartScreen warns before such a program runs, Office opens such a document in
+Protected View and blocks its macros, and PowerShell under RemoteSigned asks for the signature of such a
+script. Unblock-File takes it off. A volume that keeps no such mark (FAT32, exFAT, some network shares) gets
+the files without it, and a warning says so.
 
 The name of an attachment comes from whoever sent the message, so the file gets a name that is safe on any
 platform: only the last part of the name (never a path, so "../../x" is saved as "x" in -Path), in the
 composed form of Unicode (NFC), without the characters Windows refuses, nor control characters, nor the
-dots and spaces Windows drops at the end ("x.exe." is saved as "x.exe"), nor characters that reverse the
-direction of text; with "_" before a name Windows keeps for a device ("_CON.txt", "_NUL .txt"), and for
+dots and spaces Windows drops at the end ("x.exe." is saved as "x.exe"), nor characters that reorder or
+hide text (an override of direction can show "fdp.exe" as "exe.pdf"), nor invisible ones such as the soft
+hyphen; with "_" before a name Windows keeps for a device ("_CON.txt", "_NUL .txt"), and for
 the "~" of a name shaped as the short name Windows gives a long one ("REPORT~1.PDF" is saved as
 "REPORT_1.PDF", since it could stand for another file of the directory). A part without a name is
 "attachment", with the extension of its type ("attachment.png"). A name that comes more than once in a
@@ -117,6 +126,12 @@ Get-ImapMessage work -From reports@client.example -First 1 | Save-ImapAttachment
 
 Saves the file CPTO.xlsx of the newest message from reports@client.example, replacing the one saved before,
 and passes it to a script.
+
+.EXAMPLE
+Get-ImapMessage work -From builds@elekto.example -First 1 | Save-ImapAttachment -Path ./Tools -Name *.ps1 | Unblock-File
+
+Saves the scripts of the newest message from builds@elekto.example and takes the Mark of the Web off them, so
+that PowerShell under RemoteSigned runs them without a signature: only for a sender you trust.
 #>
 Function Save-ImapAttachment {
     [CmdletBinding(SupportsShouldProcess)]
@@ -155,6 +170,8 @@ Function Save-ImapAttachment {
         # The files this command saved, which it never replaces: UIDs are per folder, so messages of other folders can
         # give the same name, -UniqueName or not
         $written = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        # The directories whose volume keeps no Mark of the Web, told once
+        $unmarked = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         # Here, before any input, only what was typed is bound: see Get-ImapFolder
         $folderFromPipeline = -not $PSBoundParameters.ContainsKey('Folder')
         if (-not (Test-Path -LiteralPath $Path -PathType Container)) { throw "There is no directory '$Path' to save the attachments in: create it first." }
@@ -220,7 +237,8 @@ Function Save-ImapAttachment {
             $saved = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
             foreach ($attachment in $parts) {
                 $what = if ($attachment.Inline) { 'inline part' } else { 'attachment' }
-                $shown = Format-ShownName $(if ($attachment.Name) { $attachment.Name } else { $attachment.FileName })
+                # Both shown safely already: the name the message gives by Format-ShownText, the file's own by its rules
+                $shown = if ($attachment.Name) { $attachment.Name } else { $attachment.FileName }
                 $fileName = if ($UniqueName) { "$id-$($attachment.FileName)" } else { $attachment.FileName }
                 # The policy takes the name of the file, and with -UniqueName both names: the file's own, and the one written
                 $why = $attachment.Withheld
@@ -235,7 +253,7 @@ Function Save-ImapAttachment {
                     continue
                 }
                 if (-not $PSCmdlet.ShouldProcess($target, "Save the $what '$shown' of $where")) { continue }
-                $file = Save-AttachmentFile $PSCmdlet $session $item $summary $attachment.Part $directory $fileName $shown $saved -Force:$Force
+                $file = Save-AttachmentFile $PSCmdlet $session $item $summary $attachment.Part $directory $fileName $shown $saved $unmarked -Force:$Force
                 if (-not $file) { continue }
                 $null = $written.Add($target)
                 $file | Add-Member -NotePropertyMembers ([ordered]@{

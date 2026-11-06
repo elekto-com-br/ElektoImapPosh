@@ -59,7 +59,10 @@ Describe 'The file of an attachment' {
         @{ Case = 'a name written decomposed, as macOS writes names'; Name = "relato`u{301}rio.pdf"; Expected = "relat`u{F3}rio.pdf" }
         @{ Case = 'a lone surrogate'; Name = 'x' + [char]0xD800 + 'y.pdf'; Expected = 'x_y.pdf' }
         @{ Case = 'a control character of the C1 set (CSI)'; Name = "a`u{9B}b.txt"; Expected = 'a_b.txt' }
-        @{ Case = 'the Arabic letter mark, which also turns the text'; Name = "a`u{61C}b.txt"; Expected = 'a_b.txt' }
+        @{ Case = 'the Arabic letter mark, which only turns digits around, and is invisible'; Name = "a`u{61C}b.txt"; Expected = 'ab.txt' }
+        @{ Case = 'a soft hyphen and a zero-width space, which are invisible'; Name = "re`u{AD}po`u{200B}rt.pdf"; Expected = 'report.pdf' }
+        @{ Case = 'text hidden in the tags of Unicode'; Name = 'x' + [char]::ConvertFromUtf32(0xE0041) + [char]::ConvertFromUtf32(0xE0042) + '.pdf'; Expected = 'x__.pdf' }
+        @{ Case = 'an emoji of several, joined'; Name = [char]::ConvertFromUtf32(0x1F468) + "`u{200D}" + [char]::ConvertFromUtf32(0x1F4BB) + '.png'; Expected = [char]::ConvertFromUtf32(0x1F468) + "`u{200D}" + [char]::ConvertFromUtf32(0x1F4BB) + '.png' }
         @{ Case = 'the short name Windows gives a long one'; Name = 'REPORT~1.PDF'; Expected = 'REPORT_1.PDF' }
         @{ Case = 'another short name, without an extension'; Name = 'progr~12'; Expected = 'progr_12' }
         @{ Case = 'a tilde in a name no short name has'; Name = 'report~1.docx'; Expected = 'report~1.docx' }
@@ -281,6 +284,16 @@ Describe 'Save-ImapAttachment on Gmail' {
             @{ Uid = 30; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Only a message'; Date = $now.AddSeconds(-20); Size = 9000; AuthenticationResults = $client
                 Whole = @{ Name = 'forwarded.eml'; Type = 'message/rfc822'; Encoding = '7bit'; Data = "From: Someone <someone@client.example>`r`nSubject: Inside`r`n`r`nThe text inside.`r`n" }
             }
+            # Files shown in the body, with their names, as Apple Mail sends them: a PDF, a CSV and a photo; and a file
+            # shown without a name
+            @{ Uid = 31; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Shown in the body'; Date = $now.AddSeconds(-10); Size = 9000; AuthenticationResults = $client
+                Attachments = @(
+                    @{ Name = 'contract.pdf'; Type = 'application/pdf'; Data = '%PDF contract'; Disposition = 'inline' }
+                    @{ Name = 'IMG_0001.jpg'; Type = 'image/jpeg'; Data = 'JPEG photo'; Disposition = 'inline' }
+                    @{ Name = 'data.csv'; Type = 'text/csv'; Data = "a,b`r`n1,2"; Disposition = 'inline' }
+                    @{ Name = ''; Type = 'application/pdf'; Data = '%PDF nameless'; Disposition = 'inline' }
+                )
+            }
         )
         $server = Start-FakeGmail $messages
         # Another server, where the account "elsewhere" finds the same user, folder, UIDVALIDITY and UID 10
@@ -322,23 +335,34 @@ namespace ElektoImapPoshTests
 {
     public static class HeldSave
     {
-        // Wraps the write of the module: (content, temporary, path, overwrite, commit) => task
-        public static Func<MemoryStream, string, string, bool, TaskCompletionSource<bool>, Task> Hold(
-            Func<MemoryStream, string, string, bool, TaskCompletionSource<bool>, Task> save, Task gate, TaskCompletionSource<Task> started, bool after)
+        // Wraps the write of the module: (content, temporary, path, overwrite, commit, zone) => task of the message
+        // of a mark refused
+        public static Func<MemoryStream, string, string, bool, TaskCompletionSource<bool>, string, Task<string>> Hold(
+            Func<MemoryStream, string, string, bool, TaskCompletionSource<bool>, string, Task<string>> save, Task gate, TaskCompletionSource<Task> started, bool after)
         {
-            return (content, temporary, path, overwrite, commit) =>
+            return (content, temporary, path, overwrite, commit, zone) =>
             {
                 if (!after)
                 {
-                    Task held = gate.ContinueWith(_ => save(content, temporary, path, overwrite, commit)).Unwrap();
+                    Task<string> held = gate.ContinueWith(_ => save(content, temporary, path, overwrite, commit, zone)).Unwrap();
                     started.TrySetResult(held);
                     return held;
                 }
-                Task saved = save(content, temporary, path, overwrite, commit);
-                Task end = saved.ContinueWith(_ => gate).Unwrap();
+                Task<string> saved = save(content, temporary, path, overwrite, commit, zone);
+                Task<string> end = saved.ContinueWith(_ => gate.ContinueWith(__ => saved.Result)).Unwrap();
                 saved.ContinueWith(_ => started.TrySetResult(end));
                 return end;
             };
+        }
+
+        // Wraps the write of the module so that the Mark of the Web goes to a stream that no volume takes, as a volume
+        // of FAT32 or exFAT takes none; or, asFile, to a file of its own beside the temporary one, as the share of WSL
+        // writes a stream, taking the ":" for a character of the name
+        public static Func<MemoryStream, string, string, bool, TaskCompletionSource<bool>, string, Task<string>> Unmark(
+            Func<MemoryStream, string, string, bool, TaskCompletionSource<bool>, string, Task<string>> save, bool asFile)
+        {
+            return (content, temporary, path, overwrite, commit, zone) => save(content, temporary, path, overwrite, commit,
+                zone == null ? null : asFile ? temporary + "-Zone.Identifier" : zone + ":$BITMAP");
         }
     }
 }
@@ -374,7 +398,7 @@ namespace ElektoImapPoshTests
     It 'saves the attachments of a message, decoded, fetching them and nothing else, and returns the files' {
         $directory = New-TestDirectory 'saved'
         $before = $server.State.Commands.Count
-        $files = Save-ImapAttachment open -Folder All -Uid 10 -Path $directory
+        $files = Save-ImapAttachment open -Folder All -Uid 10 -Path $directory -WarningVariable warnings
 
         $files.Name | Should -Be 'report.pdf', 'photo.jpg'
         $files[0] | Should -BeOfType [IO.FileInfo]
@@ -390,6 +414,8 @@ namespace ElektoImapPoshTests
         $fetches[1] | Should -BeLike '*BODY.PEEK`[3`]*'
         Get-CommandSince $before | Where-Object { $_ -like '*BODY.PEEK`[1*' -or $_ -like '*BODY.PEEK`[`]*' } | Should -BeNullOrEmpty -Because 'the text of the message is not fetched'
         @(Get-ChildItem -LiteralPath $directory -Force).Name | Sort-Object | Should -Be 'photo.jpg', 'report.pdf' -Because 'no temporary file is left'
+        # Off Windows there is no mark to write: a stream written there would be a file of its own, taken away with a warning
+        $warnings | Should -BeNullOrEmpty
     }
 
     It 'saves only the attachments named by -Name, by pattern or by name, as the message gives it or as the file gets it' {
@@ -804,13 +830,77 @@ namespace ElektoImapPoshTests
         [IO.File]::ReadAllText($files[1].FullName) | Should -BeExactly '%PDF decomposed'
     }
 
-    It 'shows a name that carries an escape sequence without it, in its messages' {
+    It 'shows a name that carries an escape sequence without it, in its messages and in Read-ImapMessage' {
         $files = Save-ImapAttachment strict -Folder All -Uid 29 -Path (New-TestDirectory 'escape') -ErrorVariable errors -ErrorAction SilentlyContinue
+        $listed = (Read-ImapMessage open -Folder All -Uid 29).Attachments
 
         $files | Should -BeNullOrEmpty
         $errors.Count | Should -Be 1
         $errors[0].ToString().Contains([char]27) | Should -BeFalse -Because 'an escape sequence would drive the terminal'
-        $errors[0].ToString().Contains("The attachment 'report?[2J.exe' of the message 29") | Should -BeTrue -Because "the message is: $($errors[0])"
+        $errors[0].ToString().Contains("The attachment 'report`u{FFFD}[2J.exe' of the message 29") | Should -BeTrue -Because "the message is: $($errors[0])"
+        [string]::Equals($listed[0].Name, "report`u{FFFD}[2J.exe", [StringComparison]::Ordinal) | Should -BeTrue -Because "the name is shown as '$($listed[0].Name)'"
+        $listed[0].FileName | Should -BeExactly 'report_[2J.exe'
+    }
+
+    # Apple Mail sends a file it shows in the body as inline, with its name; an image so is most often a logo
+    It 'takes a part shown in the body with a name that is not an image''s for an attachment' {
+        $read = Read-ImapMessage open -Folder All -Uid 31
+        $listed = Get-ImapMessage open -Folder All -First 100 | Where-Object Uid -In 31, 22, 17
+        $without = Save-ImapAttachment open -Folder All -Uid 31 -Path (New-TestDirectory 'shown-files')
+        $with = Save-ImapAttachment open -Folder All -Uid 31 -Path (New-TestDirectory 'shown-files-inline') -Inline
+
+        $read.HasAttachments | Should -BeTrue
+        $read.Attachments.FileName | Should -Be 'contract.pdf', 'data.csv'
+        $read.InlineParts.FileName | Should -Be 'IMG_0001.jpg', 'attachment.pdf'
+        ($listed | Where-Object Uid -EQ 31).HasAttachments | Should -BeTrue
+        ($listed | Where-Object Uid -EQ 22).HasAttachments | Should -BeFalse -Because 'the logos shown in the body are no attachments'
+        ($listed | Where-Object Uid -EQ 17).HasAttachments | Should -BeFalse -Because 'nor is the photo of a camera, without a name'
+        $without.Name | Should -Be 'contract.pdf', 'data.csv'
+        $without.Inline | Should -Be $false, $false
+        [IO.File]::ReadAllText($without[1].FullName) | Should -BeExactly "a,b`r`n1,2"
+        $with.Name | Should -Be 'contract.pdf', 'data.csv', 'IMG_0001.jpg', 'attachment.pdf'
+        $with.Inline | Should -Be $false, $false, $true, $true
+    }
+
+    # SmartScreen, the macros of Office and RemoteSigned go by the Mark of the Web
+    It 'marks the files it saves as from the internet, on Windows, also one that replaces a file' -Skip:(-not $IsWindows) {
+        $directory = New-TestDirectory 'marked'
+        Set-Content -LiteralPath (Join-Path $directory 'report.pdf') -Value 'old' -NoNewline
+        $files = Save-ImapAttachment open -Folder All -Uid 10 -Path $directory -Force -WarningVariable warnings
+
+        $files.Name | Should -Be 'report.pdf', 'photo.jpg'
+        foreach ($file in $files) {
+            Get-Content -LiteralPath $file.FullName -Stream Zone.Identifier -Raw | Should -BeExactly "[ZoneTransfer]`r`nZoneId=3`r`n"
+        }
+        [IO.File]::ReadAllText($files[0].FullName) | Should -BeExactly '%PDF-1.4 report'
+        $warnings | Should -BeNullOrEmpty
+        @(Get-ChildItem -LiteralPath $directory -Force).Name | Sort-Object | Should -Be 'photo.jpg', 'report.pdf'
+    }
+
+    # A volume that keeps no streams refuses one (FAT32, exFAT), or writes it as a file of its own, taking ":" for a
+    # character of the name (the share of WSL, measured): the write of the module is wrapped to do either
+    It 'saves a file without the mark where the volume keeps none, <Case>, and says so once' -Skip:(-not $IsWindows) -TestCases @(
+        @{ Case = 'refusing it'; AsFile = $false; Why = '*' }
+        @{ Case = 'leaving no file for it'; AsFile = $true; Why = '*it wrote the mark as a file of its own, which was deleted' }
+    ) {
+        $directory = New-TestDirectory "unmarked-$AsFile"
+        $module = Get-Module ElektoImapPosh
+        $save = & $module { $script:SaveFileTask }
+        try {
+            & $module { param($Unmarked) $script:SaveFileTask = $Unmarked } ([ElektoImapPoshTests.HeldSave]::Unmark($save, $AsFile))
+            $files = Save-ImapAttachment open -Folder All -Uid 10 -Path $directory -WarningVariable warnings -WarningAction SilentlyContinue -ErrorVariable errors -ErrorAction SilentlyContinue
+        } finally {
+            & $module { param($Save) $script:SaveFileTask = $Save } $save
+        }
+
+        $errors | Should -BeNullOrEmpty
+        $files.Name | Should -Be 'report.pdf', 'photo.jpg'
+        [IO.File]::ReadAllText($files[0].FullName) | Should -BeExactly '%PDF-1.4 report'
+        @(Get-Item -LiteralPath $files.FullName -Stream * | Where-Object Stream -NE ':$DATA').Count | Should -Be 0
+        @(Get-ChildItem -LiteralPath $directory -Force).Name | Sort-Object | Should -Be 'photo.jpg', 'report.pdf' -Because 'no temporary file, nor one of the mark, is left'
+        $warnings.Count | Should -Be 1
+        "$($warnings[0])" | Should -BeLike "The files saved in '$directory' carry no Mark of the Web, which tells Windows that a file came from the internet*"
+        "$($warnings[0])" | Should -BeLike $Why
     }
 
     It 'holds names to the patterns of the policy, either written composed or decomposed' {
