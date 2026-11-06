@@ -57,6 +57,17 @@ Describe 'Matching a pattern' {
         { InModuleScope ElektoImapPosh { Assert-WildcardPattern 'report[12' } } | Should -Throw -ExpectedMessage 'The specified wildcard character pattern is not valid: report`[12'
         { InModuleScope ElektoImapPosh { Assert-WildcardPattern 'report[12]' } } | Should -Not -Throw
     }
+
+    # Composing changes some characters, U+232A among them (U+3009 composed): one range is reversed only once composed,
+    # and the other only as written (Copilot on #14)
+    It 'checks a pattern composed, as it is matched' {
+        $reversed = '*[' + [char]0x232A + '-' + [char]0x3008 + ']*'
+        $straight = '*[' + [char]0x3008 + '-' + [char]0x232A + ']*'
+
+        { InModuleScope ElektoImapPosh -Parameters @{ Pattern = $reversed } { param($Pattern) Assert-WildcardPattern $Pattern } } | Should -Throw -ExpectedMessage 'The specified wildcard character pattern is not valid: *'
+        { InModuleScope ElektoImapPosh -Parameters @{ Pattern = $straight } { param($Pattern) Assert-WildcardPattern $Pattern } } | Should -Not -Throw
+        Test-Match ([string][char]0x232A) $straight | Should -BeTrue -Because 'a pattern taken matches as it was checked'
+    }
 }
 
 Describe 'The code of the module' {
