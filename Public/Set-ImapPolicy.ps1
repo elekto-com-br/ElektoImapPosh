@@ -67,7 +67,19 @@ The largest attachment, in bytes (such as 10MB), that may be saved.
 .PARAMETER TrustAuthenticationResults
 The receiving server whose Authentication-Results headers tell an authenticated sender: mx.google.com
 on Gmail and Google Workspace. A sender is authenticated when the topmost of those headers comes from
-that server and says that DMARC passed for the domain of the sender.
+that server and says that DMARC passed for the domain of the sender, or, when it gives no DMARC result,
+as Gmail does for a message a Google Group of the same domain relays, that a DKIM signature of that very
+domain passed.
+
+.PARAMETER UseXOriginalFrom
+Makes the allow lists of senders (AllowReadFrom, AllowAttachmentsFrom) judge the sender behind a message
+that a Google Group of the mailbox's own domain relays: the group writes its own address in the From
+("'Client' via Support" <support@example.com>) and the sender's in X-Original-From. Since any sender can
+write that header too, it is taken only when the From is of the domain of the mailbox's user,
+authenticated, and when the ARC result in the Authentication-Results of TrustAuthenticationResults,
+which the group sealed when it took the message, says that DMARC passed for the domain of
+X-Original-From. Meant for those who read headers: the reason in Withheld says which of these a message
+missed. -UseXOriginalFrom:$false takes it away.
 
 .EXAMPLE
 Set-ImapPolicy agent -DenyFolders 'Finance/*', Junk -MaxAgeDays 90 -MaxMessages 200 -MaxMessageSize 25MB
@@ -91,6 +103,11 @@ Keeps executables, zip files and any attachment larger than 10 MB from being sav
 Set-ImapPolicy agent -MaxMessages 0 -DenyFolders @()
 
 Removes the limit on the number of messages and the folders denied, keeping the other settings.
+.EXAMPLE
+Set-ImapPolicy support -AllowReadFrom '*@client.example' -TrustAuthenticationResults mx.google.com -UseXOriginalFrom
+
+Lets the messages of client.example be read also when they come through a Google Group of the mailbox's
+own domain, which puts its own address in the From.
 #>
 Function Set-ImapPolicy {
     [CmdletBinding(SupportsShouldProcess)]
@@ -115,7 +132,8 @@ Function Set-ImapPolicy {
         [long]$MaxMessageSize,
         [ValidateRange('NonNegative')]
         [long]$MaxAttachmentSize,
-        [string]$TrustAuthenticationResults
+        [string]$TrustAuthenticationResults,
+        [switch]$UseXOriginalFrom
     )
 
     $file = Read-AccountFile

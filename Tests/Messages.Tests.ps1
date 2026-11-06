@@ -49,19 +49,22 @@ Describe 'What a policy withholds' {
 
         # A summary as Get-ImapMessageSummary fetches it; -From may have several addresses, and -AuthenticationResults
         # are the headers from the topmost down
-        function New-Summary([string]$From = 'client@client.example', [string[]]$AuthenticationResults = @(), [string[]]$Labels, [long]$Size = 1000, $Date = (Get-Date)) {
+        function New-Summary([string]$From = 'client@client.example', [string[]]$AuthenticationResults = @(), [string[]]$Labels, [long]$Size = 1000, $Date = (Get-Date), [string]$SenderHeader, [string]$ReplyTo, [string[]]$OriginalFrom = @()) {
             $envelope = [MailKit.Envelope]::new()
             if ($From) { $envelope.From.AddRange([MimeKit.InternetAddressList]::Parse($From)) }
+            if ($SenderHeader) { $envelope.Sender.AddRange([MimeKit.InternetAddressList]::Parse($SenderHeader)) }
+            if ($ReplyTo) { $envelope.ReplyTo.AddRange([MimeKit.InternetAddressList]::Parse($ReplyTo)) }
             $headers = [MimeKit.HeaderList]::new()
             foreach ($value in $AuthenticationResults) { $headers.Add('Authentication-Results', $value) }
+            foreach ($value in $OriginalFrom) { $headers.Add('X-Original-From', $value) }
             [PSCustomObject]@{ Envelope = $envelope; Headers = $headers; GMailLabels = $Labels; Size = $Size; InternalDate = [DateTimeOffset]$Date }
         }
 
-        function Get-Reason([hashtable]$Policy, [string]$Folder = 'INBOX', $Summary = (New-Summary -AuthenticationResults $pass)) {
+        function Get-Reason([hashtable]$Policy, [string]$Folder = 'INBOX', $Summary = (New-Summary -AuthenticationResults $pass), [string]$User = 'me@gmail.com') {
             $rules = if ($Policy) { @{ Name = 'agent' } + $Policy } else { $null }
-            InModuleScope ElektoImapPosh -Parameters @{ Policy = $rules; Folders = $gmail; Folder = $Folder; Summary = $Summary } {
-                param($Policy, $Folders, $Folder, $Summary)
-                $session = @{ Settings = @{ Policy = $Policy }; Folders = $Folders }
+            InModuleScope ElektoImapPosh -Parameters @{ Policy = $rules; Folders = $gmail; Folder = $Folder; Summary = $Summary; User = $User } {
+                param($Policy, $Folders, $Folder, $Summary, $User)
+                $session = @{ Settings = @{ Policy = $Policy; User = $User }; Folders = $Folders }
                 Get-WithheldReason $session ($Folders | Where-Object FullName -EQ $Folder) $Summary
             }
         }
@@ -166,13 +169,31 @@ Describe 'What a policy withholds' {
         @{ Case = 'the topmost is from another server'; From = 'client@client.example'; Results = @('mx.other.example; dmarc=pass header.from=client.example') }
         @{ Case = 'the topmost has dmarc=fail, and a forged one below has pass'; From = 'client@client.example'; Results = @('mx.google.com; dmarc=fail header.from=client.example', 'mx.google.com; dmarc=pass header.from=client.example') }
         @{ Case = 'DMARC passed for another domain'; From = 'client@client.example'; Results = @('mx.google.com; dmarc=pass header.from=other.example') }
-        @{ Case = 'only DKIM and SPF passed'; From = 'client@client.example'; Results = @('mx.google.com; dkim=pass header.i=@client.example; spf=pass smtp.mailfrom=client.example') }
+        @{ Case = 'only DKIM passed, for another domain'; From = 'client@client.example'; Results = @('mx.google.com; dkim=pass header.i=@other.example; spf=pass smtp.mailfrom=client.example') }
+        @{ Case = 'DKIM passed for the domain, but DMARC failed'; From = 'client@client.example'; Results = @('mx.google.com; dkim=pass header.i=@client.example; dmarc=fail header.from=client.example') }
         @{ Case = 'the From has two senders'; From = 'client@client.example, other@client.example'; Results = @('mx.google.com; dmarc=pass header.from=client.example') }
         @{ Case = 'the header cannot be read'; From = 'client@client.example'; Results = @('not ; a = header') }
     ) {
         $summary = New-Summary $From -AuthenticationResults $Results
 
-        Get-Reason $trusted -Summary $summary | Should -Be "The sender is not authenticated by mx.google.com (no DMARC pass for the domain of the From), and AllowReadFrom of the policy 'agent' passes only authenticated senders."
+        Get-Reason $trusted -Summary $summary | Should -Be "The sender is not authenticated by mx.google.com (no DMARC pass, nor a DKIM signature, for the domain of the From), and AllowReadFrom of the policy 'agent' passes only authenticated senders."
+    }
+
+    # As Gmail writes it for a message that a Google Group of the same domain relays: no DMARC result at all
+    It 'takes as authenticated a sender whose domain signed the message, when there is no DMARC result' {
+        Get-Reason $trusted -Summary (New-Summary -AuthenticationResults 'mx.google.com; dkim=pass header.i=@client.example header.s=google; spf=pass smtp.mailfrom=client.example') | Should -BeNullOrEmpty
+        Get-Reason $trusted -Summary (New-Summary -AuthenticationResults 'mx.google.com; dkim=pass header.d=client.example; spf=pass smtp.mailfrom=client.example') | Should -BeNullOrEmpty
+    }
+
+    # A deny list matches the sender wherever the message gives it, since that only withholds more
+    It 'withholds a sender of DenyReadFrom given in the <Field>' -TestCases @(
+        @{ Field = 'Sender'; Parameters = @{ SenderHeader = 'Bank <alerts@bank.example>' } }
+        @{ Field = 'Reply-To'; Parameters = @{ ReplyTo = 'Bank <alerts@bank.example>' } }
+        @{ Field = 'X-Original-From'; Parameters = @{ OriginalFrom = 'Bank <alerts@bank.example>' } }
+    ) {
+        $summary = New-Summary -AuthenticationResults $pass @Parameters
+
+        Get-Reason @{ DenyReadFrom = @('*@bank.example') } -Summary $summary | Should -Be "Its $Field, alerts@bank.example, matches '*@bank.example' in DenyReadFrom of the policy 'agent'."
     }
 
     It 'withholds an authenticated sender that AllowReadFrom does not name' {
@@ -218,6 +239,71 @@ Describe 'What a policy withholds' {
         }
 
         $milliseconds[1] | Should -BeLessThan ($milliseconds[0] * 5) -Because "with 1000 folders ($($milliseconds[1]) ms) the check should take about as long as with 10 ($($milliseconds[0]) ms)"
+    }
+
+    Context 'the sender behind a Google Group, with UseXOriginalFrom' {
+        BeforeAll {
+            # As Google writes the topmost Authentication-Results of a message its group support@elekto.example relays
+            $relayed = 'mx.google.com; dkim=pass header.i=@elekto.example header.s=google; arc=pass (i=4 spf=pass spfdomain=client.example dkim=pass dkdomain=client.example dmarc=pass fromdomain=client.example); spf=pass smtp.mailfrom=support+bnc@elekto.example'
+            $group = "'Client' via Support <support@elekto.example>"
+            $original = 'Client <client@client.example>'
+            $groups = @{ AllowReadFrom = @('*@client.example'); TrustAuthenticationResults = 'mx.google.com'; UseXOriginalFrom = $true }
+            $mailbox = 'me@elekto.example'
+        }
+
+        It 'judges the sender behind a group of the mailbox''s own domain' {
+            Get-Reason $groups -Summary (New-Summary $group -AuthenticationResults $relayed -OriginalFrom $original) -User $mailbox | Should -BeNullOrEmpty
+        }
+
+        It 'judges the group itself without UseXOriginalFrom' {
+            $policy = @{ AllowReadFrom = @('*@client.example'); TrustAuthenticationResults = 'mx.google.com' }
+
+            Get-Reason $policy -Summary (New-Summary $group -AuthenticationResults $relayed -OriginalFrom $original) -User $mailbox | Should -Be "The sender support@elekto.example is not in AllowReadFrom of the policy 'agent'."
+        }
+
+        It 'withholds a sender behind the group that the list does not name' {
+            $summary = New-Summary $group -AuthenticationResults ($relayed -replace 'client\.example', 'other.example') -OriginalFrom 'Friend <friend@other.example>'
+
+            Get-Reason $groups -Summary $summary -User $mailbox | Should -Be "The sender friend@other.example, whom a group relays (X-Original-From), is not in AllowReadFrom of the policy 'agent'."
+        }
+
+        It 'does not take X-Original-From when <Case>' -TestCases @(
+            @{ Case = 'the From is not of the mailbox''s domain'; From = 'Someone <someone@evil.example>'; Results = 'mx.google.com; dmarc=pass header.from=evil.example; arc=pass (i=1 dmarc=pass fromdomain=client.example)'; User = 'me@elekto.example'; Why = 'its From is not of elekto.example, the domain of the mailbox' }
+            @{ Case = 'the mailbox has no domain'; From = "'Client' via Support <support@elekto.example>"; Results = 'mx.google.com; dkim=pass header.i=@elekto.example; arc=pass (i=4 dmarc=pass fromdomain=client.example)'; User = 'tester'; Why = 'the user of the mailbox, tester, has no domain whose groups to trust' }
+            @{ Case = 'the group is not authenticated'; From = "'Client' via Support <support@elekto.example>"; Results = 'mx.google.com; dkim=fail header.i=@elekto.example; arc=pass (i=4 dmarc=pass fromdomain=client.example)'; User = 'me@elekto.example'; Why = 'the group that relays it is not authenticated' }
+            @{ Case = 'the ARC result is of another domain'; From = "'Client' via Support <support@elekto.example>"; Results = 'mx.google.com; dkim=pass header.i=@elekto.example; arc=pass (i=4 dmarc=pass fromdomain=evil.example)'; User = 'me@elekto.example'; Why = 'the ARC result of mx.google.com does not say that DMARC passed for client.example, the domain of its X-Original-From' }
+            @{ Case = 'the ARC result failed'; From = "'Client' via Support <support@elekto.example>"; Results = 'mx.google.com; dkim=pass header.i=@elekto.example; arc=fail (i=4 dmarc=pass fromdomain=client.example)'; User = 'me@elekto.example'; Why = 'the ARC result of mx.google.com does not say that DMARC passed for client.example, the domain of its X-Original-From' }
+        ) {
+            $reason = Get-Reason $groups -Summary (New-Summary $From -AuthenticationResults $Results -OriginalFrom $original) -User $User
+
+            $reason | Should -Not -BeNullOrEmpty
+            $reason | Should -BeLike "* Its X-Original-From is not taken: $Why."
+        }
+
+        # The names in Authentication-Results are read ignoring case (RFC 8601)
+        It 'reads the ARC result that the group sealed ignoring case' {
+            $shouting = $relayed -creplace 'dmarc=pass fromdomain=', 'DMARC=PASS FROMDOMAIN='
+
+            Get-Reason $groups -Summary (New-Summary $group -AuthenticationResults $shouting -OriginalFrom $original) -User $mailbox | Should -BeNullOrEmpty
+        }
+
+        It 'takes the topmost X-Original-From, which the group writes above one that came with the message' {
+            $summary = New-Summary $group -AuthenticationResults $relayed -OriginalFrom 'Client <client@client.example>', 'Boss <boss@bank.example>'
+
+            Get-Reason $groups -Summary $summary -User $mailbox | Should -BeNullOrEmpty
+        }
+
+        It 'judges the sender behind the group for AllowAttachmentsFrom too' {
+            $reason = InModuleScope ElektoImapPosh -Parameters @{ Summary = (New-Summary $group -AuthenticationResults $relayed -OriginalFrom $original); Folders = $gmail } {
+                param($Summary, $Folders)
+                $policy = @{ Name = 'agent'; AllowAttachmentsFrom = @('*@client.example'); TrustAuthenticationResults = 'mx.google.com'; UseXOriginalFrom = $true }
+                $session = @{ Settings = @{ Policy = $policy; User = 'me@elekto.example' }; Folders = $Folders }
+                $part = [PSCustomObject]@{ ContentType = [MimeKit.ContentType]::new('application', 'pdf'); ContentTransferEncoding = 'base64'; Octets = 100 }
+                Get-AttachmentWithheldReason $session $Folders[0] $Summary $part 'report.pdf'
+            }
+
+            $reason | Should -BeNullOrEmpty
+        }
     }
 
     It 'refuses to apply a policy before the folders are listed, rather than withhold nothing' {
@@ -762,5 +848,44 @@ Describe 'Read-ImapMessage against smtp4dev' -Skip:(-not $smtp4devInstalled) {
 
         $result.Uid | Should -Be $messages.Uid[0..1] -Because 'the messages are read in the order of -Uid'
         "$warnings" | Should -Be "The policy 'two' lets one command read 2 messages of tester: 2 more were not read."
+    }
+}
+
+# A message that a Google Group of the mailbox's domain relays, as Gmail delivers it, through a real IMAP server: the
+# headers that tell its sender (Reply-To, X-Original-From, Authentication-Results) are fetched and read
+Describe 'Policies on a message a group relays, against smtp4dev' -Skip:(-not $smtp4devInstalled) {
+    BeforeAll {
+        $server = Start-Smtp4dev -LogDirectory (Join-Path $TestDrive 'smtp4dev-relay')
+        $relayed = 'mx.google.com; dkim=pass header.i=@elekto.example header.s=google; arc=pass (i=4 spf=pass spfdomain=client.example dkim=pass dkdomain=client.example dmarc=pass fromdomain=client.example); spf=pass smtp.mailfrom=support+bnc@elekto.example'
+        Send-Smtp4devMessage $server 'Through the group' -From "'Client' via Support <support@elekto.example>" -AuthenticationResults $relayed -Headers ([ordered]@{ 'Reply-To' = 'Client <client@client.example>'; 'X-Original-From' = 'Client <client@client.example>' })
+        $allow = @{ AllowReadFrom = @('*@client.example'); TrustAuthenticationResults = 'mx.google.com' }
+        $passwords = Set-TestAccount 'config-relay' $server.ImapPort -SavedEnvironment $savedEnvironment -Policies @{
+            groups = $allow + @{ UseXOriginalFrom = $true }
+            plain  = $allow
+            deny   = @{ DenyReadFrom = @('*@client.example') }
+        } -Accounts @{
+            groups = @{ Policy = 'groups'; User = 'support@elekto.example' }
+            plain  = @{ Policy = 'plain'; User = 'support@elekto.example' }
+            deny   = @{ Policy = 'deny'; User = 'support@elekto.example' }
+        }
+    }
+
+    AfterAll {
+        Stop-Smtp4dev $server
+        foreach ($name in $passwords) { [Environment]::SetEnvironmentVariable($name, $null) }
+        $env:IMAP_CONFIG_DIR = $null
+    }
+
+    It 'lets it be read under UseXOriginalFrom, judging the client behind the group' {
+        (Get-ImapMessage groups).Withheld | Should -BeNullOrEmpty
+        (Get-ImapMessage groups | Read-ImapMessage).Text | Should -BeLike 'The body of Through the group.*'
+    }
+
+    It 'judges the group without UseXOriginalFrom, authenticated by its own signature' {
+        (Get-ImapMessage plain).Withheld | Should -Be "The sender support@elekto.example is not in AllowReadFrom of the policy 'plain'."
+    }
+
+    It 'withholds it under a deny list that names the client, which only its Reply-To and X-Original-From give' {
+        (Get-ImapMessage deny).Withheld | Should -Be "Its Reply-To, client@client.example, matches '*@client.example' in DenyReadFrom of the policy 'deny'."
     }
 }

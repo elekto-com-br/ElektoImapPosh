@@ -15,7 +15,9 @@
 # - MaxMessages, MaxMessageSize, MaxAttachmentSize: limits per command, so nothing large is downloaded by accident
 # - TrustAuthenticationResults: the receiving server whose Authentication-Results headers tell an authenticated
 #   sender. The allow lists of senders match only authenticated senders; the deny lists match the From as written,
-#   since a forged From there only withholds more.
+#   and also the Sender, Reply-To and X-Original-From, since an address there only withholds more.
+# - UseXOriginalFrom: the allow lists judge the sender behind a Google Group of the mailbox's own domain, which writes
+#   its own address in the From (Get-RelayedSender).
 # An allow list, when present, denies what it does not name; a deny list wins. Folders, senders and attachments are
 # wildcard patterns, matched by Test-Wildcard (ignoring case alike in every culture, and a name written composed or
 # decomposed alike): senders such as *@example.com, attachments a MIME type when they have a "/" (image/*) and a file
@@ -39,6 +41,7 @@ $script:PolicySettings = [ordered]@{
     MaxMessageSize             = 'Limit'
     MaxAttachmentSize          = 'Limit'
     TrustAuthenticationResults = 'Server'
+    UseXOriginalFrom           = 'Switch'
 }
 
 # Why a value cannot be the setting of a policy, to follow its name in a message; $null when it can. A list may be
@@ -55,6 +58,10 @@ function Get-PolicyValueError([string]$Setting, $Value) {
     if ($kind -eq 'Server') {
         if ($Value -is [string] -and $Value -cmatch '^[^\s@/]+$') { return $null }
         return 'must be the name of the receiving server that adds the Authentication-Results headers, such as mx.google.com'
+    }
+    if ($kind -eq 'Switch') {
+        if ($Value -is [bool] -or $Value -is [switch]) { return $null }
+        return 'must be true or false'
     }
     $items = @($Value)
     $wrong = @($items | Where-Object { $_ -isnot [string] -or -not $_.Trim() })
@@ -75,11 +82,12 @@ function Get-PolicyValueError([string]$Setting, $Value) {
     return $null
 }
 
-# A setting of a policy as it is kept: a list of strings, a number, or a string
+# A setting of a policy as it is kept: a list of strings, a number, a string, or true or false
 function ConvertTo-PolicyValue([string]$Setting, $Value) {
     switch ($script:PolicySettings[$Setting]) {
         'Limit' { return [long]$Value }
         'Server' { return [string]$Value }
+        'Switch' { return [bool]$Value }
         default { return , [string[]]@($Value) }
     }
 }
@@ -175,23 +183,89 @@ function Get-PolicyFolderSet($Session) {
     return $Session.PolicyFolders
 }
 
-# Whether the receiving server named by a policy (TrustAuthenticationResults) authenticated the sender of a message:
-# the topmost Authentication-Results header, which the receiving server adds above any that came with the message, is
-# from that server and says that DMARC passed for the domain of the From. A message with more than one sender in its
-# From, or none, has no sender to authenticate.
-function Test-AuthenticatedSender($Summary, [string]$Server) {
-    $senders = @($Summary.Envelope.From.Mailboxes)
-    if (-not $Server -or $senders.Count -ne 1) { return $false }
+# The topmost Authentication-Results of a message, parsed, when it is from the receiving server a policy trusts
+# (TrustAuthenticationResults): that server adds it above any that came with the message. $null otherwise.
+function Get-TrustedAuthenticationResult($Summary, [string]$Server) {
+    if (-not $Server) { return $null }
     $header = @($Summary.Headers | Where-Object { $_.Field -eq 'Authentication-Results' })[0]
     $results = $null
-    if (-not $header -or -not [MimeKit.Cryptography.AuthenticationResults]::TryParse($header.RawValue, [ref]$results)) { return $false }
-    if ($results.AuthenticationServiceIdentifier -ne $Server) { return $false }
-    foreach ($result in $results.Results) {
-        if ($result.Method -ne 'dmarc' -or $result.Result -ne 'pass') { continue }
-        $domains = @($result.Properties | Where-Object { $_.PropertyType -eq 'header' -and $_.Property -eq 'from' } | ForEach-Object { $_.Value })
-        if ($domains -contains $senders[0].Domain) { return $true }
+    if (-not $header -or -not [MimeKit.Cryptography.AuthenticationResults]::TryParse($header.RawValue, [ref]$results)) { return $null }
+    if ($results.AuthenticationServiceIdentifier -ne $Server) { return $null }
+    return $results
+}
+
+# The values of a property of a result in Authentication-Results, such as header.from
+function Get-ResultProperty($Result, [string]$Type, [string]$Name) {
+    return , [string[]]@($Result.Properties | Where-Object { $_.PropertyType -eq $Type -and $_.Property -eq $Name } | ForEach-Object { $_.Value })
+}
+
+# Whether the results of the trusted server authenticate a domain as the one of the From: DMARC passed for it, when
+# there is a DMARC result; when there is none (Gmail gives none for a message that a Google Group of the same domain
+# relays), a DKIM signature of that very domain passed, which is how DMARC takes an aligned signature (strictly: the
+# same domain, not a parent nor a child of it)
+function Test-DomainAuthenticated($Results, [string]$Domain) {
+    if (-not $Results -or -not $Domain) { return $false }
+    $dmarc = @($Results.Results | Where-Object { $_.Method -eq 'dmarc' })
+    if ($dmarc.Count) {
+        return [bool]@($dmarc | Where-Object { $_.Result -eq 'pass' -and (Get-ResultProperty $_ 'header' 'from') -contains $Domain }).Count
+    }
+    foreach ($result in @($Results.Results | Where-Object { $_.Method -eq 'dkim' -and $_.Result -eq 'pass' })) {
+        # The signing domain (header.d), or the domain of the signing identity (header.i), as Gmail writes it
+        $signers = [System.Collections.Generic.List[string]]::new()
+        foreach ($domain in (Get-ResultProperty $result 'header' 'd')) { $signers.Add($domain) }
+        foreach ($identity in (Get-ResultProperty $result 'header' 'i')) { $signers.Add(($identity -csplit '@')[-1]) }
+        if ($signers -contains $Domain) { return $true }
     }
     return $false
+}
+
+# Whether the receiving server named by a policy (TrustAuthenticationResults) authenticated the sender of a message:
+# the only one in its From, whose domain the topmost Authentication-Results of that server authenticates
+# (Test-DomainAuthenticated). A message with more than one sender in its From, or none, has no sender to authenticate.
+function Test-AuthenticatedSender($Summary, [string]$Server) {
+    $senders = @($Summary.Envelope.From.Mailboxes)
+    if ($senders.Count -ne 1) { return $false }
+    return Test-DomainAuthenticated (Get-TrustedAuthenticationResult $Summary $Server) $senders[0].Domain
+}
+
+# The sender behind a message that a Google Group of the mailbox's own domain relays, for the allow lists of a policy
+# with UseXOriginalFrom: a hashtable with Sender, the mailbox of the topmost X-Original-From, or $null and Why, the
+# reason it is not taken. The group writes its own address in the From and the sender's in X-Original-From, which any
+# sender can also write. So it is taken only when the From is of the domain of the mailbox's user (a group of its
+# own), authenticated (Test-DomainAuthenticated), and when the ARC result in the trusted Authentication-Results,
+# which the group sealed when it took the message ("arc=pass (... dmarc=pass fromdomain=client.example)"), says that
+# DMARC passed for the domain of X-Original-From.
+function Get-RelayedSender($Session, $Summary) {
+    $header = @($Summary.Headers | Where-Object { $_.Field -eq 'X-Original-From' })[0]
+    $original = $null
+    if (-not $header -or -not [MimeKit.MailboxAddress]::TryParse($header.Value, [ref]$original)) { return @{ Sender = $null; Why = $null } }
+    $policy = $Session.Settings.Policy
+    $own = if ($Session.Settings.User -cmatch '@([^@]+)$') { $Matches[1] } else { $null }
+    $relays = @($Summary.Envelope.From.Mailboxes)
+    if (-not $own) { return @{ Sender = $null; Why = "the user of the mailbox, $($Session.Settings.User), has no domain whose groups to trust" } }
+    if ($relays.Count -ne 1 -or $relays[0].Domain -ne $own) { return @{ Sender = $null; Why = "its From is not of $own, the domain of the mailbox" } }
+    $results = Get-TrustedAuthenticationResult $Summary $policy.TrustAuthenticationResults
+    if (-not (Test-DomainAuthenticated $results $own)) { return @{ Sender = $null; Why = "the group that relays it is not authenticated" } }
+    foreach ($arc in @($results.Results | Where-Object { $_.Method -eq 'arc' -and $_.Result -eq 'pass' })) {
+        # Ignoring case, as the names in Authentication-Results are read (RFC 8601), alike in every culture
+        $sealed = [regex]::Match([string]$arc.ResultComment, '(?:^|\s)dmarc=pass\s+fromdomain=(\S+)', 'IgnoreCase, CultureInvariant')
+        if ($sealed.Success -and $sealed.Groups[1].Value -eq $original.Domain) { return @{ Sender = $original; Why = $null } }
+    }
+    return @{ Sender = $null; Why = "the ARC result of $($policy.TrustAuthenticationResults) does not say that DMARC passed for $($original.Domain), the domain of its X-Original-From" }
+}
+
+# The addresses of a message that a deny list is matched against, each with the field it comes from: the From, as the
+# message gives it, and also its Sender, its Reply-To and its X-Original-From (where a Google Group puts the sender it
+# replaces in the From), since an address there only withholds more
+function Get-MessageAddress($Summary) {
+    $envelope = $Summary.Envelope
+    foreach ($field in ([ordered]@{ From = $envelope.From; Sender = $envelope.Sender; 'Reply-To' = $envelope.ReplyTo }).GetEnumerator()) {
+        foreach ($mailbox in $field.Value.Mailboxes) { [PSCustomObject]@{ Address = $mailbox.Address; Field = $field.Key } }
+    }
+    foreach ($header in @($Summary.Headers | Where-Object { $_.Field -eq 'X-Original-From' })) {
+        $mailbox = $null
+        if ([MimeKit.MailboxAddress]::TryParse($header.Value, [ref]$mailbox)) { [PSCustomObject]@{ Address = $mailbox.Address; Field = 'X-Original-From' } }
+    }
 }
 
 # Whether a message is the user's own: in the sent folder, or, on Gmail, with a label that stands for it
@@ -208,18 +282,29 @@ function Test-OwnMessage($Session, $Folder, $Summary) {
 
 # Why a list of senders of a policy (AllowReadFrom or AllowAttachmentsFrom, named by $Setting) does not pass the
 # sender of a message, in a sentence, or $null when it does. It passes only an authenticated sender, or the user's own
-# message ($Own), whose every sender it names.
-function Get-SenderOutsideReason($Policy, [string]$Setting, $Summary, [bool]$Own) {
-    $of = "of the policy '$($Policy.Name)'"
-    $server = $Policy.TrustAuthenticationResults
+# message ($Own), whose every sender it names. Under UseXOriginalFrom, the sender behind a group of the mailbox's own
+# domain is the one judged (Get-RelayedSender), when it can be taken; the reason says why, when it cannot.
+function Get-SenderOutsideReason($Session, [string]$Setting, $Summary, [bool]$Own) {
+    $policy = $Session.Settings.Policy
+    $of = "of the policy '$($policy.Name)'"
+    $server = $policy.TrustAuthenticationResults
+    $why = ''
+    if ($policy.UseXOriginalFrom -and -not $Own) {
+        $relayed = Get-RelayedSender $Session $Summary
+        if ($relayed.Sender) {
+            if (@($policy[$Setting] | Where-Object { Test-Wildcard $relayed.Sender.Address $_ }).Count) { return $null }
+            return "The sender $($relayed.Sender.Address), whom a group relays (X-Original-From), is not in $Setting $of."
+        }
+        if ($relayed.Why) { $why = " Its X-Original-From is not taken: $($relayed.Why)." }
+    }
     if (-not $Own -and -not (Test-AuthenticatedSender $Summary $server)) {
         if (-not $server) { return "$Setting $of passes only authenticated senders, and the policy has no TrustAuthenticationResults to authenticate them." }
-        return "The sender is not authenticated by $server (no DMARC pass for the domain of the From), and $Setting $of passes only authenticated senders."
+        return "The sender is not authenticated by $server (no DMARC pass, nor a DKIM signature, for the domain of the From), and $Setting $of passes only authenticated senders.$why"
     }
     $senders = @($Summary.Envelope.From.Mailboxes | ForEach-Object { $_.Address })
     if ($senders.Count -eq 0) { return "It has no sender, and $Setting $of passes only the senders it names." }
-    $outside = @($senders | Where-Object { $address = $_; -not @($Policy[$Setting] | Where-Object { Test-Wildcard $address $_ }).Count })
-    if ($outside.Count) { return "The sender $($outside[0]) is not in $Setting $of." }
+    $outside = @($senders | Where-Object { $address = $_; -not @($policy[$Setting] | Where-Object { Test-Wildcard $address $_ }).Count })
+    if ($outside.Count) { return "The sender $($outside[0]) is not in $Setting $of.$why" }
     return $null
 }
 
@@ -249,12 +334,14 @@ function Get-WithheldReason($Session, $Folder, $Summary) {
         return "It has $($Summary.Size) bytes, more than MaxMessageSize $of ($($policy.MaxMessageSize))."
     }
 
-    $senders = @($Summary.Envelope.From.Mailboxes | ForEach-Object { $_.Address })
+    $addresses = @(Get-MessageAddress $Summary)
     foreach ($pattern in $policy.DenyReadFrom) {
-        $match = @($senders | Where-Object { Test-Wildcard $_ $pattern })
-        if ($match.Count) { return "The sender $($match[0]) matches '$pattern' in DenyReadFrom $of." }
+        $match = @($addresses | Where-Object { Test-Wildcard $_.Address $pattern })[0]
+        if (-not $match) { continue }
+        if ($match.Field -eq 'From') { return "The sender $($match.Address) matches '$pattern' in DenyReadFrom $of." }
+        return "Its $($match.Field), $($match.Address), matches '$pattern' in DenyReadFrom $of."
     }
-    if ($policy.AllowReadFrom) { return Get-SenderOutsideReason $policy 'AllowReadFrom' $Summary (Test-OwnMessage $Session $Folder $Summary) }
+    if ($policy.AllowReadFrom) { return Get-SenderOutsideReason $Session 'AllowReadFrom' $Summary (Test-OwnMessage $Session $Folder $Summary) }
     return $null
 }
 
@@ -275,7 +362,7 @@ function Get-AttachmentWithheldReason($Session, $Folder, $Summary, $Part, [strin
     if (-not $policy) { return $null }
     $of = "of the policy '$($policy.Name)'"
     if ($policy.AllowAttachmentsFrom) {
-        $reason = Get-SenderOutsideReason $policy 'AllowAttachmentsFrom' $Summary (Test-OwnMessage $Session $Folder $Summary)
+        $reason = Get-SenderOutsideReason $Session 'AllowAttachmentsFrom' $Summary (Test-OwnMessage $Session $Folder $Summary)
         if ($reason) { return $reason }
     }
     $type = $Part.ContentType.MimeType.ToLowerInvariant()

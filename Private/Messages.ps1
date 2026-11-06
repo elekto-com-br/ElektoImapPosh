@@ -1,7 +1,8 @@
 # Messages: how a command finds them, by a SEARCH on the server, and what it fetches of each before the policy decides
 # whether its body may be read (Get-WithheldReason, in Policies.ps1). First only metadata: the envelope, the flags,
 # the size, the date the server received it, the structure of its parts (its text parts and attachments), on Gmail its
-# thread and labels, and the Authentication-Results headers that tell an authenticated sender. Then, when the policy
+# thread and labels, the Authentication-Results headers that tell an authenticated sender, and X-Original-From, where
+# a Google Group puts the sender it replaces. Then, when the policy
 # allows it, the text part alone (Get-ImapMessageText). Parts are fetched with BODY.PEEK from folders opened read-only,
 # so nothing is marked as read.
 
@@ -49,7 +50,7 @@ function Get-ImapMessageSummary($Cmdlet, $Session, $Folder, $Uids) {
     $items = [MailKit.MessageSummaryItems]'UniqueId, Envelope, Flags, InternalDate, Size, BodyStructure'
     if (Test-GMailServer $Session) { $items = $items -bor [MailKit.MessageSummaryItems]'GMailThreadId, GMailLabels' }
     $request = [MailKit.FetchRequest]::new($items)
-    $request.Headers = [MailKit.HeaderSet]::new([string[]]@('Authentication-Results'))
+    $request.Headers = [MailKit.HeaderSet]::new([string[]]@('Authentication-Results', 'X-Original-From'))
     $list = [System.Collections.Generic.List[MailKit.UniqueId]]::new()
     $wanted = [System.Collections.Generic.HashSet[uint]]::new()
     foreach ($uid in $Uids) { $list.Add($uid); $null = $wanted.Add($uid.Id) }

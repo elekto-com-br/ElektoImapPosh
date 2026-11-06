@@ -116,6 +116,19 @@ Describe 'The policy commands' {
         (Get-ImapPolicy agent).DenyAttachmentTypes | Should -Be $Value
     }
 
+    It 'keep UseXOriginalFrom as true, and take it away with -UseXOriginalFrom:$false' {
+        Set-ImapPolicy agent -AllowReadFrom '*@client.example' -TrustAuthenticationResults mx.google.com -UseXOriginalFrom
+
+        (Read-Json).Policies.agent.UseXOriginalFrom | Should -BeTrue
+        (Get-Content -Path $accountsFile -Raw) | Should -Match '"UseXOriginalFrom": true'
+        (Get-ImapPolicy agent).UseXOriginalFrom | Should -BeTrue
+
+        Set-ImapPolicy agent -UseXOriginalFrom:$false
+
+        (Read-Json).Policies.agent.Keys | Should -Not -Contain 'UseXOriginalFrom'
+        (Get-ImapPolicy agent).UseXOriginalFrom | Should -BeNullOrEmpty
+    }
+
     It 'warn that the allow lists of senders pass no sender without TrustAuthenticationResults' {
         Set-ImapPolicy agent -AllowReadFrom '*@example.com' -AllowAttachmentsFrom '*@example.com' -WarningVariable warnings -WarningAction SilentlyContinue
 
@@ -314,6 +327,8 @@ Describe 'Policies in the accounts file' {
             Policies = '{ "agent": { "AllowReadFrom": [] } }' }
         @{ Case = 'a server that is not a name'; Message = "*TrustAuthenticationResults of policy 'agent'*must be the name*"
             Policies = '{ "agent": { "TrustAuthenticationResults": true } }' }
+        @{ Case = 'a switch that is not true or false'; Message = "*UseXOriginalFrom of policy 'agent'*must be true or false*"
+            Policies = '{ "agent": { "UseXOriginalFrom": "yes" } }' }
         @{ Case = 'a policy that is not an object'; Message = "*Policy 'agent' in*must be a JSON object*"
             Policies = '{ "agent": ["Junk"] }' }
         @{ Case = 'Policies that are not an object'; Message = "*'Policies' in*must be a JSON object*"
