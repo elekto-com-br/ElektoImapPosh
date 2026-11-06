@@ -103,17 +103,34 @@ Designed before the read commands and implemented with them, in `Private/Policie
   - The MIME type is read in lower case: a part without parameters keeps the case of the server (Gmail sends BODYSTRUCTURE in upper case), one with parameters comes lowered by MimeKit. MimeKit trims trailing spaces of a file name parameter, not dots.
   - Tests: `Tests/Attachments.Tests.ps1`, against the fake Gmail, which serves several parts per message (a TEXT part needs its line count in BODYSTRUCTURE, or MailKit fails on the NIL after it; the key `Whole` makes a message whose whole body is one part) and one client at a time: a test with two accounts in one command starts a second fake server, and `Set-TestAccount` (`Tests/TestAccounts.ps1`, taking `-SavedEnvironment`) takes a `Port` for an account. The write is held by a wrapper in C# (`ElektoImapPoshTests.HeldSave`) of `$script:SaveFileTask`, in a runspace that `BeginStop` stops: stopped while it writes, the command ends at once and the file there is kept; stopped once the task renames, the command waits for the task. The task starting just before the `try` rather than inside it is a mutation no test can catch, since PowerShell notices Ctrl+C only at the call inside the `try`; it stays inside so as not to count on that.
 
+## Where the work stands
+
+On main, as of 2026-11-06, with no version published yet:
+
+- Accounts, with their passwords kept apart from those of ElektoMailPosh: `Set-ImapAccount`, `Get-ImapAccount`, `Remove-ImapAccount`, `Test-ImapAccount`. TLS always, unless `NoTls`; `SkipCertificateCheck`; `AllowWrite` by kind of change, already checked, though no command writes yet.
+- Policies (`Set-ImapPolicy`, `Get-ImapPolicy`, `Remove-ImapPolicy`), applied by every command that reads: folders; senders authenticated by the receiving server (DMARC, or a DKIM pass of the domain when there is no DMARC result); the sender behind a Google Group (`UseXOriginalFrom`); attachments by type and by name; sizes, age and counts.
+- Reading: `Get-ImapFolder`; `Get-ImapMessage` (the server's search, Gmail's labels, threads and X-GM-RAW); `Read-ImapMessage` (the text part only); `Save-ImapAttachment` (names safe on every platform, inline parts, copies saved once, a write that Ctrl+C stops cleanly).
+- Text compared alike in every culture and in every form of Unicode, which a test of the code keeps so.
+
+What is left, for the complete read-only version and then for the full one, is under Planned.
+
 ## Planned
 
-Before the first release (the manifest says 0.1.0, and no version is published yet), each in a pull request of its own:
+For the complete read-only version, the first release to the PowerShell Gallery (the manifest says 0.1.0, no version is published yet, and the number of the first is still to decide), each in a pull request of its own:
 
 - Mark of the Web: on Windows, the files saved get a `Zone.Identifier` stream (`ZoneId=3`), as Outlook and the browsers write it, so that SmartScreen, the blocking of macros in Office and `RemoteSigned` take them for files from the internet; a tool that saves attachments must not become the way in of an attack.
 - A part with a file name that is not an image counts as an attachment even when its disposition is inline, as some clients send a PDF (Apple Mail, to be checked). It changes `HasAttachments`, the lists of `Read-ImapMessage` and what `Save-ImapAttachment` saves without `-Inline`; a text part with a name (a CSV sent inline) also counts.
 - Headers as the commands return them: control characters in Subject, From, To and the other headers shown, and enormous subjects or senders, are a sign of malice (attempts to overflow a buffer or the context of an AI, or to inject a prompt), so they are filtered or replaced in what the commands return, and long ones cut, not only in the views.
 - `Save-ImapMessage`, an .eml: one and only one raw message (by `-Uid`, a number, or `-MessageId` matched exactly; more than one from the pipeline or by Message-ID saves nothing), and only when the policy lets the message be read and every part be saved; it is not the normal use of the module. The name of the .eml goes through the same rules as attachments, and the final path is checked to be inside the directory, whatever a server gives as a UID (`../../../CLAUDE.md`).
+- `Get-ImapThread` (X-GM-THRID): the messages of a Gmail thread, under the same check of the policy as every other path. In the read-only version, since it is very useful on Gmail.
 - Documentation, thorough, with examples and situations, probably more than the README can hold (where it goes is still to decide): above all a full section on careful use with AI agents (see Policies), and perhaps a published skill for very careful use of the module.
+- The release itself: a round of review in Claude Code with Fable first, then the version, its `ReleaseNotes` and the tag (see Workflow).
 
-Later: `Get-ImapThread` (X-GM-THRID), `Wait-ImapMessage` (IDLE), OAuth2 (XOAUTH2), and an optional log directory per account (an account setting) recording what was read, whose cleaning up is the user's business.
+For the full version, after it:
+
+- The commands that change the mailbox, each behind the account's `AllowWrite` for its kind of change (`Flags`, `Move`, `Labels`) and with ShouldProcess and ConfirmImpact, as in ElektoMailPosh's `Remove-MailAccount`: flags (read, unread, flagged), moving to another folder or to the trash, never deleting, and Gmail's labels.
+- `Wait-ImapMessage` (IDLE), OAuth2 (XOAUTH2) for Microsoft 365, and an optional log directory per account (an account setting) recording what was read, whose cleaning up is the user's business.
+- Integration tests against a real Gmail account, run locally only, from environment variables, and never in the public CI; perhaps GreenMail or Dovecot in CI, for a BODYSTRUCTURE with attachments.
 
 ## Testing against servers
 
@@ -127,7 +144,7 @@ Later: `Get-ImapThread` (X-GM-THRID), `Wait-ImapMessage` (IDLE), OAuth2 (XOAUTH2
 
 - Claude asks before each commit, each push and each merge, and before anything else that others see (a comment, a review request, a release).
 - One change at a time: a branch and a pull request for each (`feat/...`, `fix/...`, `docs/...`), merged with a merge commit; the branches stay on GitHub. Work that must outlive a machine goes to GitHub as a branch, not into a stash.
-- Copilot is not asked to review pull requests, since each review is billed to whoever requests it. When it reviews on its own, address what is pertinent in the same pull request, and reply in each thread how it was resolved, or why it was declined (in a comment of the pull request when its review opened no thread).
+- Copilot is not asked to review pull requests, since each review is billed to whoever requests it. When it reviews on its own, address what is pertinent in the same pull request, and reply in each thread how it was resolved, or why it was declined (in a comment of the pull request when its review opened no thread). A review can still be requested on its own when a pull request is opened, by a setting of the account that opens it, and billed to that account; once its quota is spent, the review only says so. So before saying that a pull request has no review, or merging it, read its timeline (`gh api repos/<owner>/<repo>/issues/<n>/timeline`): a `review_requested` for Copilot followed by `copilot_work_started` is a review on its way.
 - When GitHub takes the push of a branch but leaves its pull request on the old head, with no CI run (an incident with Actions, 2026-11-05, on #13), an empty commit may not move it either; closing and reopening the pull request did (`gh pr close`, never with `--delete-branch`, then `gh pr reopen`), and ran the CI. Reviews, threads, comments and the description were the same before and after (compared from a copy taken first).
 - Commit messages as in ElektoMailPosh: `feat:`, `fix:`, `ci:`, `docs:`, `test:`, `deps:`, with the new version at the end when it changes (`...; 0.1.1`).
 - A release: first a round of review in Claude Code with Fable, then the version in the manifest, its `## <version>` section in `ReleaseNotes`, and the tag `v<version>`, which runs `publish.yml` (build with `-ExpectedVersion`, PowerShell Gallery, GitHub release with the zip).
