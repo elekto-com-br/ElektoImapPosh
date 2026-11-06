@@ -58,8 +58,9 @@ function Stop-Smtp4dev($Server) {
 # login is needed when smtp4dev was started with --authenticationrequired, which applies to SMTP as well.
 # smtp4dev adds no header: those of a receiving server (-AuthenticationResults, the topmost first) go on top
 # of the message as given. -Padding adds about that many characters to the body, in lines of 80. -Body is a body
-# of its own, in place of that text (made with MimeKit: other charsets, encodings, parts).
-function Send-Smtp4devMessage($Server, [string]$Subject, [Net.NetworkCredential]$Login, [string]$From = 'Sender <sender@example.com>', [string[]]$AuthenticationResults = @(), [int]$Padding, [MimeKit.MimeEntity]$Body) {
+# of its own, in place of that text (made with MimeKit: other charsets, encodings, parts). -Headers are added after
+# the others (Reply-To, X-Original-From...).
+function Send-Smtp4devMessage($Server, [string]$Subject, [Net.NetworkCredential]$Login, [string]$From = 'Sender <sender@example.com>', [string[]]$AuthenticationResults = @(), [int]$Padding, [MimeKit.MimeEntity]$Body, [System.Collections.IDictionary]$Headers) {
     $message = [MimeKit.MimeMessage]::new()
     $message.From.AddRange([MimeKit.InternetAddressList]::Parse($From))
     $message.To.Add([MimeKit.MailboxAddress]::new('Tester', 'tester@example.com'))
@@ -67,6 +68,7 @@ function Send-Smtp4devMessage($Server, [string]$Subject, [Net.NetworkCredential]
     for ($i = 0; $i -lt $AuthenticationResults.Count; $i++) {
         $message.Headers.Insert($i, [MimeKit.Header]::new('Authentication-Results', $AuthenticationResults[$i]))
     }
+    if ($Headers) { foreach ($entry in $Headers.GetEnumerator()) { $message.Headers.Add($entry.Key, $entry.Value) } }
     if ($Body) { $message.Body = $Body }
     else {
         $message.Body = [MimeKit.TextPart]::new('plain')

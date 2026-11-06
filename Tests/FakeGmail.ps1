@@ -9,7 +9,8 @@
 # its commands. It proves the module's reading of those answers, not Gmail's: what an Authentication-Results header of
 # Gmail says, for one, comes from a real message.
 # Each message is a hashtable: Uid, Folders (the full names of those it is in), Labels, ThreadId, From, Subject, Date,
-# Size, Seen, AuthenticationResults (the value of the topmost header), Text (of its text/plain part, the only one, or
+# Size, Seen, AuthenticationResults (the value of each Authentication-Results, the topmost first), XOriginalFrom,
+# Text (of its text/plain part, the only one, or
 # the first of a multipart/mixed when it has attachments), Attachments (each a hashtable: Name, Type, Data, its content
 # as text, sent in base64, or as it is with Encoding 7bit, as a message attached comes, Octets, a size to declare in
 # place of the real one, Disposition, attachment by default, or inline, or none, and ContentId) or Attachment (the name
@@ -159,7 +160,18 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                 }
                 $labels = @($Message.Labels | ForEach-Object { Format-Quoted $_ }) -join ' '
                 $thread = if ($Message.ThreadId) { $Message.ThreadId } else { $Message.Uid }
-                $header = if ($Message.AuthenticationResults) { "Authentication-Results: $($Message.AuthenticationResults)`r`n`r`n" } else { "`r`n" }
+                # The headers asked for by name, each as many times as the message has it, the topmost first
+                $header = ''
+                if ($Items -match 'BODY\.PEEK\[HEADER\.FIELDS \(([^)]*)\)\]') {
+                    $fields = $Matches[1]
+                    $lines = foreach ($field in $fields -split ' ') {
+                        switch ($field) {
+                            'AUTHENTICATION-RESULTS' { foreach ($value in @($Message.AuthenticationResults | Where-Object { $_ })) { "Authentication-Results: $value" } }
+                            'X-ORIGINAL-FROM' { if ($Message.XOriginalFrom) { "X-Original-From: $($Message.XOriginalFrom)" } }
+                        }
+                    }
+                    $header = (@($lines) -join "`r`n") + $(if (@($lines).Count) { "`r`n`r`n" } else { "`r`n" })
+                }
                 $answer = @(
                     "UID $($Message.Uid)"
                     if ($Items -match '\bFLAGS\b') { "FLAGS ($(if ($Message.Seen) { '\Seen' }))" }
@@ -169,7 +181,7 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                     if ($Items -match '\bBODYSTRUCTURE\b') { "BODYSTRUCTURE $structure" }
                     if ($Items -match '\bX-GM-THRID\b') { "X-GM-THRID $thread" }
                     if ($Items -match '\bX-GM-LABELS\b') { "X-GM-LABELS ($labels)" }
-                    if ($Items -match 'HEADER\.FIELDS \(AUTHENTICATION-RESULTS\)') { "BODY[HEADER.FIELDS (AUTHENTICATION-RESULTS)] {$([Text.Encoding]::UTF8.GetByteCount($header))}`r`n$header" }
+                    if ($fields) { "BODY[HEADER.FIELDS ($fields)] {$([Text.Encoding]::UTF8.GetByteCount($header))}`r`n$header" }
                     foreach ($match in [regex]::Matches($Items, 'BODY\.PEEK\[([^\]]*)\]')) {
                         $section = $match.Groups[1].Value
                         if ($section -like 'HEADER.FIELDS*') { continue }
