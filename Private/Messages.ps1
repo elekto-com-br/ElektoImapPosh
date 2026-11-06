@@ -64,13 +64,24 @@ function Get-ImapMessageSummary($Cmdlet, $Session, $Folder, $Uids) {
     return , @($task.Result | Where-Object { $_.UniqueId.IsValid -and $wanted.Contains($_.UniqueId.Id) } | Sort-Object { $_.UniqueId.Id } -Descending)
 }
 
-# The addresses of a list as text, each as "Name <address>", or the address alone when it has no name; none for no list
+# The addresses of a list as text, each as "Name <address>", or the address alone when it has no name, as
+# Format-ShownText shows a text; none for no list. At most the first $script:ShownAddressCount, and then how many more
+# there were ("... and 9900 more"), so that thousands of them do not flood the context of an AI, and a script that
+# answers them all fails on that line rather than leave some out unsaid.
 function Format-ImapAddress($List) {
-    return , [string[]]@(foreach ($address in $List) {
-            if ($address -is [MimeKit.MailboxAddress] -and $address.Name) { "$($address.Name) <$($address.Address)>" }
-            elseif ($address -is [MimeKit.MailboxAddress]) { $address.Address }
-            else { "$address" }
-        })
+    $all = @(foreach ($address in $List) { $address })
+    $count = [Math]::Min($all.Count, $script:ShownAddressCount)
+    $texts = [string[]]::new($count)
+    for ($index = 0; $index -lt $count; $index++) {
+        $address = $all[$index]
+        $texts[$index] = if ($address -is [MimeKit.MailboxAddress] -and $address.Name) { "$($address.Name) <$($address.Address)>" }
+        elseif ($address -is [MimeKit.MailboxAddress]) { $address.Address }
+        else { "$address" }
+    }
+    # All of them in one call
+    $shown = [string[]]@(Format-ShownText $texts)
+    if ($all.Count -gt $count) { $shown += "`u{2026} and $($all.Count - $count) more" }
+    return , $shown
 }
 
 # The messages with the UIDs given in a folder, named as -Folder of Read-ImapMessage takes it (a single folder; with
@@ -105,11 +116,13 @@ function Get-ImapMessageByUid($Cmdlet, $Session, [string]$FolderName, [switch]$L
 
 # A message as the commands return it: its metadata, and why the policy withholds its body, if it does, as the check of
 # the caller found (Get-WithheldReason). The properties are the same on every server (ThreadId and Labels are $null
-# off Gmail), so that the objects export alike.
+# off Gmail), so that the objects export alike. What the sender writes (subject, addresses, Message-IDs) as
+# Format-ShownText shows it; the labels and the folder are the user's own.
 function ConvertTo-ImapMessage($Session, $Folder, $Summary, [string]$Withheld) {
     $envelope = $Summary.Envelope
     $gmail = Test-GMailServer $Session
     $labels = if ($gmail) { , [string[]]@($Summary.GMailLabels) }
+    $subject, $messageId, $inReplyTo = Format-ShownText $envelope.Subject, $envelope.MessageId, $envelope.InReplyTo
     [PSCustomObject]@{
         PSTypeName     = 'ElektoImapPosh.Message'
         Account        = $Session.Settings.Account
@@ -120,12 +133,12 @@ function ConvertTo-ImapMessage($Session, $Folder, $Summary, [string]$Withheld) {
         From           = (Format-ImapAddress $envelope.From) -join ', '
         To             = Format-ImapAddress $envelope.To
         Cc             = Format-ImapAddress $envelope.Cc
-        Subject        = $envelope.Subject
+        Subject        = $subject
         Size           = [long]$Summary.Size
         Flags          = $Summary.Flags
-        HasAttachments = @($Summary.Attachments).Count -gt 0
-        MessageId      = $envelope.MessageId
-        InReplyTo      = $envelope.InReplyTo
+        HasAttachments = (Get-ImapFilePart $Summary).Attachments.Count -gt 0
+        MessageId      = $messageId
+        InReplyTo      = $inReplyTo
         ThreadId       = if ($gmail) { $Summary.GMailThreadId } else { $null }
         Labels         = $labels
         Withheld       = if ($Withheld) { $Withheld } else { $null }

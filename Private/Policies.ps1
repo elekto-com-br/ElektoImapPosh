@@ -190,7 +190,7 @@ function Get-TrustedAuthenticationResult($Summary, [string]$Server) {
     $header = @($Summary.Headers | Where-Object { $_.Field -eq 'Authentication-Results' })[0]
     $results = $null
     if (-not $header -or -not [MimeKit.Cryptography.AuthenticationResults]::TryParse($header.RawValue, [ref]$results)) { return $null }
-    if ($results.AuthenticationServiceIdentifier -ne $Server) { return $null }
+    if (-not (Test-SameText $results.AuthenticationServiceIdentifier $Server)) { return $null }
     return $results
 }
 
@@ -207,14 +207,14 @@ function Test-DomainAuthenticated($Results, [string]$Domain) {
     if (-not $Results -or -not $Domain) { return $false }
     $dmarc = @($Results.Results | Where-Object { $_.Method -eq 'dmarc' })
     if ($dmarc.Count) {
-        return [bool]@($dmarc | Where-Object { $_.Result -eq 'pass' -and (Get-ResultProperty $_ 'header' 'from') -contains $Domain }).Count
+        return [bool]@($dmarc | Where-Object { $_.Result -eq 'pass' -and @(Get-ResultProperty $_ 'header' 'from' | Where-Object { Test-SameText $_ $Domain }).Count }).Count
     }
     foreach ($result in @($Results.Results | Where-Object { $_.Method -eq 'dkim' -and $_.Result -eq 'pass' })) {
         # The signing domain (header.d), or the domain of the signing identity (header.i), as Gmail writes it
         $signers = [System.Collections.Generic.List[string]]::new()
         foreach ($domain in (Get-ResultProperty $result 'header' 'd')) { $signers.Add($domain) }
         foreach ($identity in (Get-ResultProperty $result 'header' 'i')) { $signers.Add(($identity -csplit '@')[-1]) }
-        if ($signers -contains $Domain) { return $true }
+        if (@($signers | Where-Object { Test-SameText $_ $Domain }).Count) { return $true }
     }
     return $false
 }
@@ -243,15 +243,15 @@ function Get-RelayedSender($Session, $Summary) {
     $own = if ($Session.Settings.User -cmatch '@([^@]+)$') { $Matches[1] } else { $null }
     $relays = @($Summary.Envelope.From.Mailboxes)
     if (-not $own) { return @{ Sender = $null; Why = "the user of the mailbox, $($Session.Settings.User), has no domain whose groups to trust" } }
-    if ($relays.Count -ne 1 -or $relays[0].Domain -ne $own) { return @{ Sender = $null; Why = "its From is not of $own, the domain of the mailbox" } }
+    if ($relays.Count -ne 1 -or -not (Test-SameText $relays[0].Domain $own)) { return @{ Sender = $null; Why = "its From is not of $own, the domain of the mailbox" } }
     $results = Get-TrustedAuthenticationResult $Summary $policy.TrustAuthenticationResults
     if (-not (Test-DomainAuthenticated $results $own)) { return @{ Sender = $null; Why = "the group that relays it is not authenticated" } }
     foreach ($arc in @($results.Results | Where-Object { $_.Method -eq 'arc' -and $_.Result -eq 'pass' })) {
         # Ignoring case, as the names in Authentication-Results are read (RFC 8601), alike in every culture
         $sealed = [regex]::Match([string]$arc.ResultComment, '(?:^|\s)dmarc=pass\s+fromdomain=(\S+)', 'IgnoreCase, CultureInvariant')
-        if ($sealed.Success -and $sealed.Groups[1].Value -eq $original.Domain) { return @{ Sender = $original; Why = $null } }
+        if ($sealed.Success -and (Test-SameText $sealed.Groups[1].Value $original.Domain)) { return @{ Sender = $original; Why = $null } }
     }
-    return @{ Sender = $null; Why = "the ARC result of $($policy.TrustAuthenticationResults) does not say that DMARC passed for $($original.Domain), the domain of its X-Original-From" }
+    return @{ Sender = $null; Why = "the ARC result of $($policy.TrustAuthenticationResults) does not say that DMARC passed for $(Format-ShownText $original.Domain), the domain of its X-Original-From" }
 }
 
 # The addresses of a message that a deny list is matched against, each with the field it comes from: the From, as the
@@ -293,7 +293,7 @@ function Get-SenderOutsideReason($Session, [string]$Setting, $Summary, [bool]$Ow
         $relayed = Get-RelayedSender $Session $Summary
         if ($relayed.Sender) {
             if (@($policy[$Setting] | Where-Object { Test-Wildcard $relayed.Sender.Address $_ }).Count) { return $null }
-            return "The sender $($relayed.Sender.Address), whom a group relays (X-Original-From), is not in $Setting $of."
+            return "The sender $(Format-ShownText $relayed.Sender.Address), whom a group relays (X-Original-From), is not in $Setting $of."
         }
         if ($relayed.Why) { $why = " Its X-Original-From is not taken: $($relayed.Why)." }
     }
@@ -304,7 +304,7 @@ function Get-SenderOutsideReason($Session, [string]$Setting, $Summary, [bool]$Ow
     $senders = @($Summary.Envelope.From.Mailboxes | ForEach-Object { $_.Address })
     if ($senders.Count -eq 0) { return "It has no sender, and $Setting $of passes only the senders it names." }
     $outside = @($senders | Where-Object { $address = $_; -not @($policy[$Setting] | Where-Object { Test-Wildcard $address $_ }).Count })
-    if ($outside.Count) { return "The sender $($outside[0]) is not in $Setting $of.$why" }
+    if ($outside.Count) { return "The sender $(Format-ShownText $outside[0]) is not in $Setting $of.$why" }
     return $null
 }
 
@@ -338,8 +338,9 @@ function Get-WithheldReason($Session, $Folder, $Summary) {
     foreach ($pattern in $policy.DenyReadFrom) {
         $match = @($addresses | Where-Object { Test-Wildcard $_.Address $pattern })[0]
         if (-not $match) { continue }
-        if ($match.Field -eq 'From') { return "The sender $($match.Address) matches '$pattern' in DenyReadFrom $of." }
-        return "Its $($match.Field), $($match.Address), matches '$pattern' in DenyReadFrom $of."
+        # The address as a text from the message is shown: the sender writes it
+        if ($match.Field -eq 'From') { return "The sender $(Format-ShownText $match.Address) matches '$pattern' in DenyReadFrom $of." }
+        return "Its $($match.Field), $(Format-ShownText $match.Address), matches '$pattern' in DenyReadFrom $of."
     }
     if ($policy.AllowReadFrom) { return Get-SenderOutsideReason $Session 'AllowReadFrom' $Summary (Test-OwnMessage $Session $Folder $Summary) }
     return $null
