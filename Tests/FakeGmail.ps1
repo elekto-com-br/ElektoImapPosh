@@ -17,8 +17,10 @@
 # place of the real one, Disposition, attachment by default, or inline, or none, and ContentId) or Attachment (the name
 # of a PDF), or Whole (one such hashtable, the whole body of the message, as a message that forwards another as all it
 # carries), Raw (the X-GM-RAW
-# searches it matches; any other search matches every message of the folder), and ChangedElsewhere: as if another
-# client had changed its flags, a FETCH of them comes, unasked, with every UID FETCH that does not ask for it.
+# searches it matches), and ChangedElsewhere: as if another client had changed its flags, a FETCH of them comes,
+# unasked, with every UID FETCH that does not ask for it. A search takes the messages of the folder that match each of
+# its terms it knows: X-GM-RAW, X-GM-THRID (the ThreadId, or the Uid of a message without one, as X-GM-THRID gives),
+# HEADER Message-ID (a part of it, ignoring case, as IMAP searches a header) and SINCE; it ignores any other term.
 
 # The folders of the mailbox, with their attributes: Gmail's in English, and labels of the user, one named Sent
 $script:FakeGmailFolders = [ordered]@{
@@ -55,6 +57,16 @@ function Start-FakeGmail([hashtable[]]$Messages) {
             }
             function Get-FolderMessage($Messages, [string]$Folder) {
                 return , @($Messages | Where-Object { $_.Folders -contains $Folder } | Sort-Object { $_.Uid })
+            }
+            # The Message-ID of a message, with its angle brackets, as its header and its envelope give it
+            function Get-MessageId($Message) {
+                if ($Message.MessageId) { return $Message.MessageId }
+                return "<$($Message.Uid)@fake.example>"
+            }
+            # The thread of a message: its ThreadId, or its Uid when it has none, as a message that starts a thread
+            function Get-ThreadId($Message) {
+                if ($Message.ThreadId) { return [uint64]$Message.ThreadId }
+                return [uint64]$Message.Uid
             }
             function Expand-UidSet([string]$Set, $InFolder) {
                 $uids = foreach ($part in $Set -split ',') {
@@ -96,7 +108,7 @@ function Start-FakeGmail([hashtable[]]$Messages) {
             # attachments), or the headers of a part ("1.MIME"); of a message whose whole body is one part (Whole), its
             # body ("TEXT", or "1")
             function Get-Section($Message, [string]$Section) {
-                $top = "From: $($Message.From)`r`nTo: Me <me@gmail.com>`r`nSubject: $($Message.Subject)`r`nMessage-ID: <$($Message.Uid)@fake.example>`r`nMIME-Version: 1.0`r`n"
+                $top = "From: $($Message.From)`r`nTo: Me <me@gmail.com>`r`nSubject: $($Message.Subject)`r`nMessage-ID: $(Get-MessageId $Message)`r`nMIME-Version: 1.0`r`n"
                 if ($Message.Whole) {
                     if ($Section -eq '') { return $top + (Get-AttachmentHeader $Message.Whole) + (Get-PartBody $Message.Whole) }
                     if ($Section -in 'TEXT', '1') { return Get-PartBody $Message.Whole }
@@ -147,7 +159,7 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                 $culture = [Globalization.CultureInfo]::InvariantCulture
                 $date = ([DateTimeOffset]$Message.Date).ToUniversalTime()
                 $to = if ($Message.To) { $Message.To } else { 'Me <me@gmail.com>' }
-                $id = if ($Message.MessageId) { $Message.MessageId } else { "<$($Message.Uid)@fake.example>" }
+                $id = Get-MessageId $Message
                 $envelope = '(' + (@(
                         Format-Quoted $date.ToString('ddd, dd MMM yyyy HH:mm:ss +0000', $culture)
                         Format-Quoted $Message.Subject
@@ -169,7 +181,7 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                     "($text$($parts -join '') `"MIXED`" (`"BOUNDARY`" `"b1`") NIL NIL NIL)"
                 }
                 $labels = @($Message.Labels | ForEach-Object { Format-Quoted $_ }) -join ' '
-                $thread = if ($Message.ThreadId) { $Message.ThreadId } else { $Message.Uid }
+                $thread = Get-ThreadId $Message
                 # The headers asked for by name, each as many times as the message has it, the topmost first
                 $header = ''
                 if ($Items -match 'BODY\.PEEK\[HEADER\.FIELDS \(([^)]*)\)\]') {
@@ -243,12 +255,24 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                                 $answer = "$tag OK [READ-ONLY] $selected selected. (Success)"
                             }
                             'UID SEARCH' {
-                                $inFolder = Get-FolderMessage $Messages $selected
-                                # MailKit sends the search as an atom when it can, and quoted otherwise
-                                $found = if ($arguments -match 'X-GM-RAW (?:"((?:[^"\\]|\\.)*)"|(\S+))') {
+                                $found = Get-FolderMessage $Messages $selected
+                                # MailKit sends a text as an atom when it can, and quoted otherwise
+                                if ($arguments -match 'X-GM-RAW (?:"((?:[^"\\]|\\.)*)"|(\S+))') {
                                     $raw = if ($null -ne $Matches[1]) { $Matches[1] -replace '\\(.)', '$1' } else { $Matches[2] }
-                                    $inFolder | Where-Object { $_.Raw -contains $raw }
-                                } else { $inFolder }
+                                    $found = @($found | Where-Object { $_.Raw -contains $raw })
+                                }
+                                if ($arguments -match 'X-GM-THRID (\d+)') {
+                                    $thread = [uint64]$Matches[1]
+                                    $found = @($found | Where-Object { (Get-ThreadId $_) -eq $thread })
+                                }
+                                if ($arguments -match 'HEADER "?Message-ID"? (?:"((?:[^"\\]|\\.)*)"|(\S+))') {
+                                    $text = if ($null -ne $Matches[1]) { $Matches[1] -replace '\\(.)', '$1' } else { $Matches[2] }
+                                    $found = @($found | Where-Object { (Get-MessageId $_).IndexOf($text, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+                                }
+                                if ($arguments -match 'SINCE (\d{1,2}-[A-Za-z]{3}-\d{4})') {
+                                    $since = [datetime]::ParseExact($Matches[1], 'd-MMM-yyyy', [Globalization.CultureInfo]::InvariantCulture)
+                                    $found = @($found | Where-Object { ([DateTimeOffset]$_.Date).UtcDateTime.Date -ge $since })
+                                }
                                 $writer.WriteLine("* SEARCH $(@($found | ForEach-Object { $_.Uid }) -join ' ')".TrimEnd())
                             }
                             'UID FETCH' {

@@ -1,7 +1,9 @@
 # Attachments, and the parts shown in the body of a message rather than attached (inline: images pasted or embedded):
 # the name a file is saved under, its size before it is fetched, and the saving. The name of a part comes from whoever
 # sent the message, so it is never taken as a path, and the policy checks the name the file gets, not the one the
-# message gives (Get-AttachmentWithheldReason, in Policies.ps1).
+# message gives (Get-AttachmentWithheldReason, in Policies.ps1). A message saved whole (Save-ImapMessage) is named by
+# the same rules, and written the same way: every file the module writes goes through Test-FileTarget, which holds it
+# to its directory, and Write-ImapFile.
 
 # The name an attachment is saved under. Only the last part of the name the message gives, so that it cannot be
 # written elsewhere ("../../x", "C:\x"); composed (ConvertTo-ComposedText), since macOS takes a name and its decomposed
@@ -43,6 +45,17 @@ function Get-AttachmentFileName([string]$Name, [string]$ContentType) {
         return 'attachment'
     }
     return $leaf
+}
+
+# The name a message saved whole is written under (Save-ImapMessage): its UID, then its subject, by the rules of the
+# name of an attachment (Get-AttachmentFileName), since the sender writes the subject: "12045-Proposal for 2027.eml",
+# or "12045.eml" for a message without one. A subject is no path, so a slash in it is a character of the name, as "_",
+# rather than the end of a folder ("Invoice 11/2026" would be "2026.eml"), and a run of its tabs and line breaks is a
+# space, as Format-ShownText shows them.
+function Get-MessageFileName([uint32]$Uid, [string]$Subject) {
+    $text = (($Subject -creplace $script:LineBreak, ' ') -creplace '[\\/]', '_').Trim()
+    $name = if ($text) { "$Uid-$text.eml" } else { "$Uid.eml" }
+    return Get-AttachmentFileName $name 'message/rfc822'
 }
 
 # A file name that $Used does not have yet, which it then gets: the name itself, or, for a name already given to
@@ -212,24 +225,36 @@ $script:SaveFileTask = & {
     $E::Lambda([Func[IO.MemoryStream, string, string, bool, System.Threading.Tasks.TaskCompletionSource[bool], string, System.Threading.Tasks.Task[string]]], $run, [System.Linq.Expressions.ParameterExpression[]]@($content, $temporary, $path, $overwrite, $commit, $zone)).Compile()
 }
 
-# Saves an attachment of a message in a directory, under $FileName, and returns the file; or $null after reporting why
-# not, naming the part $Shown (as Format-ShownText shows it). Fetches that part alone (BODY.PEEK), and writes it under
-# a temporary name in the same directory, which it then renames ($script:SaveFileTask): whoever watches the directory
-# never sees half a file under its name. On Windows the file carries the Mark of the Web; where the volume keeps none,
-# it is saved without it, and a warning says so once for each directory in $Unmarked. An existing file is replaced
-# only with -Force, and never one the user may not write (read-only: Windows would refuse to replace it, and Linux and
-# macOS replace it all the same), nor a directory, told before the part is fetched. When the file cannot be written,
-# the one that was there is not returned as if it were the attachment.
-# A part that is the same file as one saved before from the same message, by the SHA-256 of its content, is not
-# written again: a message forwarded by Gmail carries an image both shown and attached (JP's NVR, 2026-11-05), and
-# Outlook repeats the logos of a signature. $Saved keeps, for each content, the file that has it. A file that exists
-# counts as saved, so that running again gives the same, with a warning, since it may have come from another message;
-# one that could not be written does not (Copilot on #13), nor one that exists but cannot be read, of unknown content.
-function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [string]$Directory, [string]$FileName, [string]$Shown, [System.Collections.Generic.Dictionary[string, object]]$Saved, [System.Collections.Generic.HashSet[string]]$Unmarked, [switch]$Force) {
-    $where = "the message $($Summary.UniqueId.Id) in the folder '$($Folder.FullName)' of $($Session.Settings.User)"
-    $path = [IO.Path]::Combine($Directory, $FileName)
+# The full path of a file named $FileName in $Directory, or $null when it would not be a file of that very directory.
+# The module makes every name it writes safe first (Get-AttachmentFileName), so this refuses none of them: it holds
+# whatever a sender or a server may give ("../../x", "C:\x", or "x:y", a stream of another file on Windows) to the
+# directory, should a name ever come here otherwise. The directory is resolved the way the path is, from a name that
+# is surely of it, so that a root ("C:\", "/") or a share ("\\server\share") is no special case.
+function Get-ContainedPath([string]$Directory, [string]$FileName) {
+    if (-not $FileName -or $FileName.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0) { return $null }
+    $path = [IO.Path]::GetFullPath([IO.Path]::Combine($Directory, $FileName))
+    $own = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([IO.Path]::Combine($Directory, 'x')))
+    # Ordinal: -ceq takes texts that differ in a format character for the same
+    if (-not [string]::Equals([IO.Path]::GetDirectoryName($path), $own, [StringComparison]::Ordinal)) { return $null }
+    # Also a name that the system writes otherwise ("a. " is written "a" on Windows), or that names the directory itself
+    if (-not [string]::Equals([IO.Path]::GetFileName($path), $FileName, [StringComparison]::Ordinal)) { return $null }
+    return $path
+}
+
+# The full path where a file named $FileName may be written in $Directory (Get-ContainedPath); or $null after reporting
+# why not, naming $What would have been saved ("the part 'x.pdf' of the message 12 in the folder..."), with ErrorIds of
+# its $Kind ("Attachment" gives AttachmentFileExists): a directory of that name is never replaced, and a file only with
+# -Force, and never one the user may not write (read-only: Windows would refuse to replace it, and Linux and macOS
+# replace it all the same), all told before anything is fetched. A file there that is not replaced counts, in $Saved
+# when given, for the copies of the same message (see Save-AttachmentFile).
+function Test-FileTarget($Cmdlet, [string]$Directory, [string]$FileName, [string]$What, [string]$Kind, [System.Collections.Generic.Dictionary[string, object]]$Saved, [switch]$Force) {
+    $path = Get-ContainedPath $Directory $FileName
+    if (-not $path) {
+        Write-ImapError $Cmdlet "'$(Format-ShownText $FileName)' is not the name of a file in '$Directory', so $What was not saved." 'PathOutsideDirectory' SecurityError $FileName
+        return $null
+    }
     if ([IO.Directory]::Exists($path)) {
-        Write-ImapError $Cmdlet "'$path' is a directory, so the part '$Shown' of $where was not saved." 'AttachmentFileExists' ResourceExists $path
+        Write-ImapError $Cmdlet "'$path' is a directory, so $What was not saved." "${Kind}FileExists" ResourceExists $path
         return $null
     }
     # One look at the file, so that one taken away meanwhile raises no exception
@@ -237,12 +262,68 @@ function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [strin
     if ($existing.Exists -and ($existing.IsReadOnly -or -not $Force)) {
         # A file that cannot be read, such as one another program keeps open with no sharing, counts for no part, and
         # Get-FileHash adds no error of its own to the one refusal
-        $hash = Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Ignore
-        if ($hash -and -not $Saved.ContainsKey($hash.Hash)) { $Saved[$hash.Hash] = @{ Path = $path; Before = $true } }
+        if ($null -ne $Saved) {
+            $hash = Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Ignore
+            if ($hash -and -not $Saved.ContainsKey($hash.Hash)) { $Saved[$hash.Hash] = @{ Path = $path; Before = $true } }
+        }
         $how = if ($existing.IsReadOnly) { 'it is read-only, and not even -Force replaces such a file' } else { 'give -Force to replace the file' }
-        Write-ImapError $Cmdlet "'$path' already exists, so the part '$Shown' of $where was not saved: $how." 'AttachmentFileExists' ResourceExists $path
+        Write-ImapError $Cmdlet "'$path' already exists, so $What was not saved: $how." "${Kind}FileExists" ResourceExists $path
         return $null
     }
+    return $path
+}
+
+# Writes $Content to a file at $Path (from Test-FileTarget), in its directory $Directory, and returns the file; or $null
+# after reporting why not, naming $What would have been saved, with the ErrorId of its $Kind (AttachmentWriteFailed).
+# Under a temporary name in the same directory, which it then renames ($script:SaveFileTask): whoever watches the
+# directory never sees half a file under its name. On Windows the file carries the Mark of the Web; where the volume
+# keeps none, it is saved without it, and a warning says so once for each directory in $Unmarked. A file there is
+# replaced only with -Force. When the file cannot be written, the one that was there is not returned as if written.
+function Write-ImapFile($Cmdlet, [IO.MemoryStream]$Content, [string]$Path, [string]$Directory, [string]$What, [string]$Kind, [System.Collections.Generic.HashSet[string]]$Unmarked, [switch]$Force) {
+    $temporary = "$Path.$([guid]::NewGuid().ToString('N').Substring(0, 8)).part"
+    # The Mark of the Web goes into the stream Zone.Identifier of the temporary file, on Windows only
+    $zone = if ($IsWindows) { "${temporary}:Zone.Identifier" } else { $null }
+    # Ctrl+C stops the wait, not the task, which went on and renamed the file after the command had ended, replacing the
+    # one there with -Force (Copilot on #13). Stopped, the command takes $commit before the task can: the task then
+    # renames nothing, and deletes the temporary file once written. If the task took it first, it is renaming the file,
+    # and the command waits for that, as a finally entered by Ctrl+C runs to its end (measured). The task starts inside
+    # the try, so as not to count on where PowerShell notices Ctrl+C
+    $commit = [System.Threading.Tasks.TaskCompletionSource[bool]]::new()
+    try {
+        $task = $script:SaveFileTask.Invoke($Content, $temporary, $Path, [bool]$Force, $commit, $zone)
+        $failure = Wait-ImapTask $task
+    } finally {
+        if (-not $commit.TrySetResult($false)) { $null = [System.Threading.Tasks.Task]::WaitAny([System.Threading.Tasks.Task[]]@($task)) }
+    }
+    if ($failure) {
+        Write-ImapError $Cmdlet "Could not write '$Path', so $What was not saved: $failure" "${Kind}WriteFailed" WriteError $Path
+        return $null
+    }
+    # Saved without the mark, where the volume keeps none: said once for each directory, not for each file
+    if ($task.Result -and $Unmarked.Add($Directory)) {
+        Write-Warning "The files saved in '$Directory' carry no Mark of the Web, which tells Windows that a file came from the internet, since its volume does not keep one (FAT32, exFAT and some network shares do not): $($task.Result)"
+    }
+    # As PowerShell gives a file, with the PSPath the commands it goes to read; -Force for a name that starts with a dot,
+    # hidden on Linux. A program that takes the file away at once, as one that watches the directory may, leaves the
+    # FileInfo alone, rather than a second error
+    $file = Get-Item -LiteralPath $Path -Force -ErrorAction Ignore
+    if (-not $file) { $file = [IO.FileInfo]::new($Path) }
+    return $file
+}
+
+# Saves an attachment of a message in a directory, under $FileName, and returns the file; or $null after reporting why
+# not, naming the part $Shown (as Format-ShownText shows it). Told before the part is fetched when the file cannot go
+# there (Test-FileTarget); then fetches that part alone (BODY.PEEK), and writes it (Write-ImapFile).
+# A part that is the same file as one saved before from the same message, by the SHA-256 of its content, is not
+# written again: a message forwarded by Gmail carries an image both shown and attached (JP's NVR, 2026-11-05), and
+# Outlook repeats the logos of a signature. $Saved keeps, for each content, the file that has it. A file that exists
+# counts as saved, so that running again gives the same, with a warning, since it may have come from another message;
+# one that could not be written does not (Copilot on #13), nor one that exists but cannot be read, of unknown content.
+function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [string]$Directory, [string]$FileName, [string]$Shown, [System.Collections.Generic.Dictionary[string, object]]$Saved, [System.Collections.Generic.HashSet[string]]$Unmarked, [switch]$Force) {
+    $where = "the message $($Summary.UniqueId.Id) in the folder '$($Folder.FullName)' of $($Session.Settings.User)"
+    $what = "the part '$Shown' of $where"
+    $path = Test-FileTarget $Cmdlet $Directory $FileName $what 'Attachment' $Saved -Force:$Force
+    if (-not $path) { return $null }
     # A message attached (message/rfc822, or another message/*) is fetched as the server keeps it, an .eml byte for
     # byte: MimeKit, parsing it, would write its lines with the line ends of the platform, and what is not a message as
     # nothing. Unless it comes encoded (base64, quoted-printable), which MimeKit gives as a file, decoded as any other.
@@ -277,34 +358,34 @@ function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [strin
         else { Write-Verbose "The part '$Shown' of $where is the same file as '$($same.Path)', saved from it, and was not saved again." }
         return $null
     }
-    $temporary = "$path.$([guid]::NewGuid().ToString('N').Substring(0, 8)).part"
-    # The Mark of the Web goes into the stream Zone.Identifier of the temporary file, on Windows only
-    $zone = if ($IsWindows) { "${temporary}:Zone.Identifier" } else { $null }
-    # Ctrl+C stops the wait, not the task, which went on and renamed the file after the command had ended, replacing the
-    # one there with -Force (Copilot on #13). Stopped, the command takes $commit before the task can: the task then
-    # renames nothing, and deletes the temporary file once written. If the task took it first, it is renaming the file,
-    # and the command waits for that, as a finally entered by Ctrl+C runs to its end (measured). The task starts inside
-    # the try, so as not to count on where PowerShell notices Ctrl+C
-    $commit = [System.Threading.Tasks.TaskCompletionSource[bool]]::new()
-    try {
-        $task = $script:SaveFileTask.Invoke($content, $temporary, $path, [bool]$Force, $commit, $zone)
-        $failure = Wait-ImapTask $task
-    } finally {
-        if (-not $commit.TrySetResult($false)) { $null = [System.Threading.Tasks.Task]::WaitAny([System.Threading.Tasks.Task[]]@($task)) }
-    }
+    $file = Write-ImapFile $Cmdlet $content $path $Directory $what 'Attachment' $Unmarked -Force:$Force
+    if ($null -ne $file) { $Saved[$hash] = @{ Path = $path; Before = $false } }
+    return $file
+}
+
+# Saves a message whole in a directory, under $FileName (Get-MessageFileName), and returns the file; or $null after
+# reporting why not. The message as the server keeps it, byte for byte, by BODY.PEEK[] (nothing is marked as read):
+# its headers, its text and its attachments, as an .eml, which mail clients open. Told before it is fetched when the
+# file cannot go there (Test-FileTarget), and written as an attachment is (Write-ImapFile), with the Mark of the Web on
+# Windows. MaxMessageSize was held to the size the server told before the fetch (Get-WithheldReason); this is the
+# size of the file itself.
+function Save-MessageFile($Cmdlet, $Session, $Folder, $Summary, [string]$Directory, [string]$FileName, [System.Collections.Generic.HashSet[string]]$Unmarked, [switch]$Force) {
+    $where = "the message $($Summary.UniqueId.Id) in the folder '$($Folder.FullName)' of $($Session.Settings.User)"
+    $path = Test-FileTarget $Cmdlet $Directory $FileName $where 'Message' $null -Force:$Force
+    if (-not $path) { return $null }
+    $task = $Folder.GetStreamAsync($Summary.UniqueId, [System.Threading.CancellationToken]::None, $null)
+    $failure = Wait-ImapTask $task
     if ($failure) {
-        Write-ImapError $Cmdlet "Could not write '$path', so the part '$Shown' of $where was not saved: $failure" 'AttachmentWriteFailed' WriteError $path
+        Write-ImapError $Cmdlet "Could not fetch ${where}: $failure" 'MessageFetchFailed' ReadError $Summary.UniqueId.Id
         return $null
     }
-    # Saved without the mark, where the volume keeps none: said once for each directory, not for each file
-    if ($task.Result -and $Unmarked.Add($Directory)) {
-        Write-Warning "The files saved in '$Directory' carry no Mark of the Web, which tells Windows that a file came from the internet, since its volume does not keep one (FAT32, exFAT and some network shares do not): $($task.Result)"
+    $content = [IO.MemoryStream]::new()
+    $task.Result.CopyTo($content)
+    $task.Result.Dispose()
+    $policy = $Session.Settings.Policy
+    if ($policy -and $policy.MaxMessageSize -and $content.Length -gt $policy.MaxMessageSize) {
+        Write-ImapError $Cmdlet "The message $($Summary.UniqueId.Id) in the folder '$($Folder.FullName)' of $($Session.Settings.User) was not saved: it has $($content.Length) bytes, more than MaxMessageSize of the policy '$($policy.Name)' ($($policy.MaxMessageSize)), though the server told of fewer." 'MessageWithheld' PermissionDenied $Summary.UniqueId.Id
+        return $null
     }
-    $Saved[$hash] = @{ Path = $path; Before = $false }
-    # As PowerShell gives a file, with the PSPath the commands it goes to read; -Force for a name that starts with a dot,
-    # hidden on Linux. A program that takes the file away at once, as one that watches the directory may, leaves the
-    # FileInfo alone, rather than a second error
-    $file = Get-Item -LiteralPath $path -Force -ErrorAction Ignore
-    if (-not $file) { $file = [IO.FileInfo]::new($path) }
-    return $file
+    return Write-ImapFile $Cmdlet $content $path $Directory $where 'Message' $Unmarked -Force:$Force
 }

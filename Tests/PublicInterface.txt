@@ -25,6 +25,11 @@ Get-ImapPolicy
   __AllParameterSets
     -Name String, position 0, SupportsWildcards, default '*'
 
+Get-ImapThread
+  __AllParameterSets
+    -Account String, position 0, from the pipeline by property name
+    -ThreadId UInt64[], position 1, mandatory, from the pipeline by property name, AllowNull
+
 Read-ImapMessage
   __AllParameterSets
     -Account String, position 0, from the pipeline by property name
@@ -59,6 +64,25 @@ Save-ImapAttachment
     -Path String, mandatory
     -UidValidity UInt32, from the pipeline by property name
     -UniqueName SwitchParameter
+    -WhatIf SwitchParameter, alias wi
+
+Save-ImapMessage
+  Uid (default)
+    -Account String, position 0, from the pipeline by property name
+    -Folder String, position 1, from the pipeline by property name
+    -Uid UInt32, position 2, mandatory, from the pipeline by property name
+    -Confirm SwitchParameter, alias cf, ConfirmImpact Medium
+    -Force SwitchParameter
+    -Path String, mandatory
+    -UidValidity UInt32, from the pipeline by property name
+    -WhatIf SwitchParameter, alias wi
+  MessageId
+    -Account String, position 0, from the pipeline by property name
+    -Folder String, position 1, from the pipeline by property name
+    -Confirm SwitchParameter, alias cf, ConfirmImpact Medium
+    -Force SwitchParameter
+    -MessageId String, mandatory, ValidatePattern('[^<>\s]', Options = 'None')
+    -Path String, mandatory
     -WhatIf SwitchParameter, alias wi
 
 Set-ImapAccount

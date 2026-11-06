@@ -30,7 +30,7 @@ CompanyName = 'Elekto Produtos Financeiros'
 Copyright = '(c) 2026 Elekto Produtos Financeiros. Licensed under the MIT License.'
 
 # Description of the functionality provided by this module
-Description = 'Read email by IMAP from PowerShell, from several accounts (Gmail and Google Workspace first): list folders, search messages, read them as text and save attachments, without marking anything as read. Passwords in the Windows Credential Manager or an owner-only file, or configuration by environment variables. Built on MailKitLite and MimeKitLite.'
+Description = 'Read email by IMAP from PowerShell, from several accounts (Gmail and Google Workspace first): list folders, search messages and Gmail threads, read them as text, save attachments or a message whole, without marking anything as read. Passwords in the Windows Credential Manager or an owner-only file, or configuration by environment variables. Built on MailKitLite and MimeKitLite.'
 
 # Minimum version of the PowerShell engine required by this module (7.6 runs on .NET 10, the target of the mail libraries shipped)
 PowerShellVersion = '7.6'
@@ -39,7 +39,7 @@ PowerShellVersion = '7.6'
 FormatsToProcess = @('ElektoImapPosh.Format.ps1xml')
 
 # Functions to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no functions to export.
-FunctionsToExport = @('Get-ImapAccount', 'Set-ImapAccount', 'Remove-ImapAccount', 'Test-ImapAccount', 'Get-ImapPolicy', 'Set-ImapPolicy', 'Remove-ImapPolicy', 'Get-ImapFolder', 'Get-ImapMessage', 'Read-ImapMessage', 'Save-ImapAttachment')
+FunctionsToExport = @('Get-ImapAccount', 'Set-ImapAccount', 'Remove-ImapAccount', 'Test-ImapAccount', 'Get-ImapPolicy', 'Set-ImapPolicy', 'Remove-ImapPolicy', 'Get-ImapFolder', 'Get-ImapMessage', 'Get-ImapThread', 'Read-ImapMessage', 'Save-ImapAttachment', 'Save-ImapMessage')
 
 # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no cmdlets to export.
 CmdletsToExport = @()

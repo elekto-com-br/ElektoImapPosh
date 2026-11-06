@@ -84,22 +84,30 @@ function Format-ImapAddress($List) {
     return , $shown
 }
 
-# The messages with the UIDs given in a folder, named as -Folder of Read-ImapMessage takes it (a single folder; with
-# -Literal, as from the pipeline, its exact name), opened read-only: a hashtable with the Folder and the summaries
-# ByUid; or $null after reporting why not. A UidValidity that is not the folder's (0 is none given: UIDVALIDITY never
-# is) means that its messages were numbered anew since they were listed, so that the UIDs may be of other messages:
-# each one is reported, and none is read.
-function Get-ImapMessageByUid($Cmdlet, $Session, [string]$FolderName, [switch]$Literal, [uint32[]]$Uid, [uint32]$UidValidity) {
-    $user = $Session.Settings.User
-    $chosen = Find-ImapFolder $Cmdlet $Session $FolderName -Literal:$Literal
+# The one folder a name given to -Folder stands for, as Read-ImapMessage takes it (with -Literal, as from the pipeline,
+# the folder of that exact name; see Find-ImapFolder), opened read-only, for a command that reads its messages by UID,
+# by Message-ID or by thread; or $null after reporting why not: no such folder, or a pattern that names more than one.
+# In an array of one: a folder written to the pipeline on its own would be enumerated (see Folders.ps1).
+function Open-NamedImapFolder($Cmdlet, $Session, [string]$Name, [switch]$Literal) {
+    $chosen = Find-ImapFolder $Cmdlet $Session $Name -Literal:$Literal
     if ($null -eq $chosen) { return $null }
     if ($chosen.Count -gt 1) {
-        Write-ImapError $Cmdlet "'$FolderName' names $($chosen.Count) folders of $user ($($chosen.FullName -join ', ')), and a UID is of one: give its full name." 'FolderAmbiguous' InvalidArgument $FolderName
+        Write-ImapError $Cmdlet "'$Name' names $($chosen.Count) folders of $($Session.Settings.User) ($($chosen.FullName -join ', ')), and the messages are read from one: give its full name." 'FolderAmbiguous' InvalidArgument $Name
         return $null
     }
     if ($chosen.Count -eq 0) { return $null }
-    $folder = $chosen[0]
-    if (-not (Open-ImapFolder $Cmdlet $Session $folder)) { return $null }
+    if (-not (Open-ImapFolder $Cmdlet $Session $chosen[0])) { return $null }
+    return , $chosen[0]
+}
+
+# The messages with the UIDs given in a folder, named as -Folder of Read-ImapMessage takes it (Open-NamedImapFolder),
+# opened read-only: a hashtable with the Folder and the summaries ByUid; or $null after reporting why not. A
+# UidValidity that is not the folder's (0 is none given: UIDVALIDITY never is) means that its messages were numbered
+# anew since they were listed, so that the UIDs may be of other messages: each one is reported, and none is read.
+function Get-ImapMessageByUid($Cmdlet, $Session, [string]$FolderName, [switch]$Literal, [uint32[]]$Uid, [uint32]$UidValidity) {
+    $user = $Session.Settings.User
+    $folder = Open-NamedImapFolder $Cmdlet $Session $FolderName -Literal:$Literal
+    if ($null -eq $folder) { return $null }
     if ($UidValidity -and $UidValidity -ne $folder.UidValidity) {
         foreach ($id in $Uid) {
             Write-ImapError $Cmdlet "The folder '$($folder.FullName)' of $user was numbered anew since its messages were listed (UIDVALIDITY $UidValidity, now $($folder.UidValidity)), so the UID $id may be another message: list them again with Get-ImapMessage." 'UidValidityChanged' InvalidData $id
@@ -112,6 +120,72 @@ function Get-ImapMessageByUid($Cmdlet, $Session, [string]$FolderName, [switch]$L
     $byUid = @{}
     foreach ($summary in $summaries) { $byUid[$summary.UniqueId.Id] = $summary }
     return @{ Folder = $folder; ByUid = $byUid }
+}
+
+# The most messages a search by Message-ID may find before their envelopes are fetched to tell the one. A whole
+# Message-ID is part of the Message-ID of a few at most; a short text ("gmail.com") is part of those of thousands, whose
+# envelopes would all be downloaded, and held to the text one by one (some 50 us a message, measured).
+$script:MessageIdCandidates = 100
+
+# The one message of a folder (Open-NamedImapFolder) whose Message-ID is $MessageId exactly, given with or without its
+# angle brackets: a hashtable with its Folder and its Summary; or $null after reporting why not, when no message has
+# it (MessageNotFound) or more than one has (MoreThanOneMessage). The server finds the messages whose Message-ID has
+# the text, ignoring case, as IMAP searches a header; each is then held to the whole of it, as its envelope gives it
+# (MailKit takes the brackets off), before the summary of the one is fetched: unless the server finds more than
+# MessageIdCandidates, which only a part of a Message-ID does. Narrowed to the days of MaxAgeDays of the policy, as
+# every search is.
+function Find-ImapMessageById($Cmdlet, $Session, [string]$FolderName, [switch]$Literal, [string]$MessageId) {
+    $user = $Session.Settings.User
+    $folder = Open-NamedImapFolder $Cmdlet $Session $FolderName -Literal:$Literal
+    if ($null -eq $folder) { return $null }
+    $id = $MessageId.Trim()
+    if ($id.StartsWith('<', [StringComparison]::Ordinal) -and $id.EndsWith('>', [StringComparison]::Ordinal)) { $id = $id.Substring(1, $id.Length - 2) }
+    $search = [MailKit.Search.SearchQuery]::HeaderContains('Message-ID', $id)
+    $start = Get-PolicyStartDate $Session.Settings.Policy
+    if ($start) { $search = $search.And([MailKit.Search.SearchQuery]::DeliveredAfter($start)) }
+    $found = Find-ImapMessage $Cmdlet $Session $folder $search
+    if ($null -eq $found) { return $null }
+    $shown = Format-ShownText $MessageId
+    if ($found.Count -gt $script:MessageIdCandidates) {
+        Write-ImapError $Cmdlet "$($found.Count) messages in the folder '$($folder.FullName)' of $user have '$shown' in their Message-ID, so none was saved: give the whole Message-ID of one, or its -Uid." 'MoreThanOneMessage' InvalidArgument $MessageId
+        return $null
+    }
+
+    # Their envelopes alone, to tell the one: a short text can be part of the Message-ID of many messages
+    $matching = [System.Collections.Generic.List[MailKit.UniqueId]]::new()
+    if ($found.Count) {
+        $wanted = [System.Collections.Generic.HashSet[uint]]::new()
+        foreach ($uid in $found) { $null = $wanted.Add($uid.Id) }
+        $request = [MailKit.FetchRequest]::new([MailKit.MessageSummaryItems]'UniqueId, Envelope')
+        $task = $folder.FetchAsync([System.Collections.Generic.IList[MailKit.UniqueId]]$found, [MailKit.IFetchRequest]$request, [System.Threading.CancellationToken]::None)
+        $failure = Wait-ImapTask $task
+        if ($failure) {
+            Write-ImapError $Cmdlet "Could not read the messages of the folder '$($folder.FullName)' of ${user}: $failure" 'MessageFetchFailed' ReadError $folder.FullName
+            return $null
+        }
+        foreach ($summary in $task.Result) {
+            # Only those asked for: the server may add what another client changed in other messages
+            if ($summary.UniqueId.IsValid -and $wanted.Contains($summary.UniqueId.Id) -and [string]::Equals($summary.Envelope.MessageId, $id, [StringComparison]::Ordinal)) { $matching.Add($summary.UniqueId) }
+        }
+    }
+    if ($matching.Count -gt 1) {
+        $uids = @($matching | ForEach-Object { $_.Id } | Sort-Object) -join ', '
+        Write-ImapError $Cmdlet "$($matching.Count) messages in the folder '$($folder.FullName)' of $user have the Message-ID '$shown' (the UIDs $uids), so none was saved: give the -Uid of one." 'MoreThanOneMessage' InvalidArgument $MessageId
+        return $null
+    }
+    $summary = $null
+    if ($matching.Count -eq 1) {
+        $summaries = Get-ImapMessageSummary $Cmdlet $Session $folder @($matching[0])
+        if ($null -eq $summaries) { return $null }
+        # None when the message went away since the search
+        $summary = @($summaries)[0]
+    }
+    if (-not $summary) {
+        $since = if ($start) { " received since $($start.ToString('yyyy-MM-dd')), the first day that MaxAgeDays of the policy '$($Session.Settings.Policy.Name)' allows" }
+        Write-ImapError $Cmdlet "There is no message with the Message-ID '$shown' in the folder '$($folder.FullName)' of $user$since." 'MessageNotFound' ObjectNotFound $MessageId
+        return $null
+    }
+    return @{ Folder = $folder; Summary = $summary }
 }
 
 # A message as the commands return it: its metadata, and why the policy withholds its body, if it does, as the check of

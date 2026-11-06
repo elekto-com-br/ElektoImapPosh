@@ -532,6 +532,21 @@ Describe 'Get-ImapMessage against smtp4dev' -Skip:(-not $smtp4devInstalled) {
         $errors[0].FullyQualifiedErrorId | Should -BeLike 'QueryNotSupported,*'
     }
 
+    # Off Gmail, the messages carry no ThreadId, and the error says why rather than that it is null
+    It 'refuses threads on a server without the Gmail extensions, once for each account' {
+        $listed = Get-ImapMessage local -First 3
+        $typed = Get-ImapThread local -ThreadId 1 -ErrorVariable typedErrors -ErrorAction SilentlyContinue
+        $piped = $listed | Get-ImapThread -ErrorVariable pipedErrors -ErrorAction SilentlyContinue
+
+        $typed | Should -BeNullOrEmpty
+        $typedErrors.Count | Should -Be 1
+        $typedErrors[0].FullyQualifiedErrorId | Should -BeLike 'ThreadNotSupported,*'
+        "$($typedErrors[0])" | Should -Be "Threads are Gmail's (X-GM-THRID), and 127.0.0.1 does not offer them (X-GM-EXT-1): find the messages of a conversation with Get-ImapMessage -Subject or -From."
+        $piped | Should -BeNullOrEmpty
+        $pipedErrors.Count | Should -Be 1 -Because 'the three messages are of one account'
+        $pipedErrors[0].FullyQualifiedErrorId | Should -BeLike 'ThreadNotSupported,*'
+    }
+
     It 'reads every account given, reporting the one that fails' {
         $result = Get-ImapMessage -Account closed, local -First 1 -ErrorVariable errors -ErrorAction SilentlyContinue
 
@@ -807,6 +822,120 @@ Describe 'Get-ImapMessage on Gmail' {
 
         $result.Subject | Should -Be 'Labelled Sent'
         $result.Folder | Should -Be 'Sent'
+    }
+}
+
+# The conversations of Gmail, against a fake one: a thread spans the inbox, the sent messages and the labels, which All
+# Mail holds, but not the trash
+Describe 'Get-ImapThread on Gmail' {
+    BeforeAll {
+        $now = [DateTimeOffset]::Now
+        $client = 'mx.google.com; dmarc=pass header.from=client.example'
+        $server = Start-FakeGmail @(
+            @{ Uid = 1; Folders = @('[Gmail]/All Mail'); Labels = @(); ThreadId = 500; From = 'Client <client@client.example>'; Subject = 'Before'; Date = $now.AddDays(-40); Size = 1000; AuthenticationResults = $client }
+            @{ Uid = 2; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); ThreadId = 500; From = 'Client <client@client.example>'; Subject = 'Proposal'; Date = $now.AddHours(-6); Size = 3000; AuthenticationResults = $client; Text = 'Here is the proposal.' }
+            @{ Uid = 3; Folders = '[Gmail]/All Mail', '[Gmail]/Sent Mail'; Labels = @('\Sent'); ThreadId = 500; From = 'Me <me@gmail.com>'; Subject = 'Re: Proposal'; Date = $now.AddHours(-5); Size = 2000 }
+            @{ Uid = 4; Folders = 'INBOX', '[Gmail]/All Mail', 'Finance/Bank'; Labels = '\Inbox', 'Finance/Bank'; ThreadId = 500; From = 'Client <client@client.example>'; Subject = 'Re: Re: Proposal'; Date = $now.AddHours(-4); Size = 3000; AuthenticationResults = $client }
+            @{ Uid = 5; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); ThreadId = 600; From = 'Other <other@other.example>'; Subject = 'Hello'; Date = $now.AddHours(-3); Size = 1000 }
+            @{ Uid = 6; Folders = @('[Gmail]/Trash'); Labels = @('\Trash'); ThreadId = 500; From = 'Client <client@client.example>'; Subject = 'Deleted'; Date = $now.AddHours(-2); Size = 1000; AuthenticationResults = $client }
+        )
+        $passwords = Set-TestAccount 'gmail-threads' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; agent = @{ Policy = 'agent' }; recent = @{ Policy = 'recent' }; two = @{ Policy = 'two' } } -Policies @{
+            agent  = @{ DenyFolders = @('Finance/*') }
+            recent = @{ MaxAgeDays = 30 }
+            two    = @{ MaxMessages = 2 }
+        }
+
+        function Get-CommandSince([int]$Count) { @($server.State.Commands.ToArray() | Select-Object -Skip $Count) }
+    }
+
+    AfterAll {
+        Stop-FakeGmail $server
+        foreach ($name in $passwords) { [Environment]::SetEnvironmentVariable($name, $null) }
+        $env:IMAP_CONFIG_DIR = $null
+    }
+
+    It 'lists the messages of a thread from All Mail, the oldest first, as Get-ImapMessage lists messages' {
+        $before = $server.State.Commands.Count
+        $result = Get-ImapThread open -ThreadId 500
+
+        $result.Uid | Should -Be 1, 2, 3, 4
+        $result.Subject | Should -Be 'Before', 'Proposal', 'Re: Proposal', 'Re: Re: Proposal'
+        $result[0].PSObject.TypeNames[0] | Should -Be 'ElektoImapPosh.Message'
+        $result.Account | Sort-Object -Unique | Should -Be 'open'
+        $result.Folder | Sort-Object -Unique | Should -Be '[Gmail]/All Mail'
+        $result.ThreadId | Sort-Object -Unique | Should -Be 500
+        $result[2].Labels | Should -Be '\Sent'
+        @($result | Where-Object Withheld).Count | Should -Be 0
+        $commands = Get-CommandSince $before
+        $commands | Where-Object { $_ -like '* EXAMINE "`[Gmail`]/All Mail"' } | Should -Not -BeNullOrEmpty
+        @($commands | Where-Object { $_ -like '* UID SEARCH X-GM-THRID 500' }).Count | Should -Be 1
+        $commands | Where-Object { $_ -like '*BODY.PEEK`[`]*' -or $_ -like '*BODY.PEEK`[1*' } | Should -BeNullOrEmpty -Because 'no body is downloaded'
+    }
+
+    # Listed first: the fake serves one connection at a time, and in a pipeline both commands are connected at once
+    It 'takes the threads of the messages listed by Get-ImapMessage, each once' {
+        $listed = Get-ImapMessage open
+        $output = $listed | Get-ImapThread -Verbose 4>&1
+
+        $listed.ThreadId | Should -Be 600, 500, 500
+        @($output | Where-Object { $_ -isnot [System.Management.Automation.VerboseRecord] }).Uid | Should -Be 5, 1, 2, 3, 4
+        @($output | Where-Object { $_ -is [System.Management.Automation.VerboseRecord] -and $_.Message -eq 'The thread 500 of tester was given more than once: its messages are listed once.' }).Count | Should -Be 1
+    }
+
+    It 'lists every message of a thread under a policy, saying why it withholds each' {
+        $result = Get-ImapThread agent -ThreadId 500
+
+        $result.Uid | Should -Be 1, 2, 3, 4
+        $result[3].Withheld | Should -Be "It has the label 'Finance/Bank', and the folder 'Finance/Bank' is in DenyFolders of the policy 'agent'."
+        @($result[0..2] | Where-Object Withheld).Count | Should -Be 0
+    }
+
+    It 'narrows the search to the days of MaxAgeDays' {
+        $start = [datetime]::Today.AddDays(-30)
+        $before = $server.State.Commands.Count
+        $result = Get-ImapThread recent -ThreadId 500
+
+        $result.Uid | Should -Be 2, 3, 4
+        @(Get-CommandSince $before | Where-Object { $_ -like "* UID SEARCH X-GM-THRID 500 SINCE $($start.ToString('d-MMM-yyyy', [Globalization.CultureInfo]::InvariantCulture))" }).Count | Should -Be 1
+    }
+
+    It 'lists no more than MaxMessages in a command, the newest of a thread, saying once how many it left out' {
+        $threads = [PSCustomObject]@{ Account = 'two'; ThreadId = 500 }, [PSCustomObject]@{ Account = 'two'; ThreadId = 600 }
+        $result = $threads | Get-ImapThread -WarningVariable warnings -WarningAction SilentlyContinue
+
+        $result.Uid | Should -Be 3, 4
+        $warnings.Count | Should -Be 1
+        "$($warnings[0])" | Should -Be "The policy 'two' lets one command handle 2 messages of tester: of the threads asked for, 3 more were left out."
+    }
+
+    It 'reports a thread with no message in All Mail, and a message without a thread' {
+        $none = Get-ImapThread open -ThreadId 999 -ErrorVariable noneErrors -ErrorAction SilentlyContinue
+        $threadless = [PSCustomObject]@{ Account = 'open'; ThreadId = $null } | Get-ImapThread -ErrorVariable threadlessErrors -ErrorAction SilentlyContinue
+
+        $none | Should -BeNullOrEmpty
+        $noneErrors.Count | Should -Be 1
+        $noneErrors[0].FullyQualifiedErrorId | Should -BeLike 'ThreadNotFound,*'
+        "$($noneErrors[0])" | Should -Be "There is no message of the thread 999 in the folder '[Gmail]/All Mail' of tester."
+        $threadless | Should -BeNullOrEmpty
+        $threadlessErrors.Count | Should -Be 1
+        $threadlessErrors[0].FullyQualifiedErrorId | Should -BeLike 'ThreadNotFound,*'
+        "$($threadlessErrors[0])" | Should -Be 'No ThreadId was given, so no thread of tester was listed: Get-ImapMessage gives the ThreadId of each message.'
+    }
+
+    It 'says when MaxAgeDays may be why a thread has no message' {
+        $result = Get-ImapThread recent -ThreadId 999 -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $result | Should -BeNullOrEmpty
+        "$($errors[0])" | Should -Be "There is no message of the thread 999 in the folder '[Gmail]/All Mail' of tester received since $([datetime]::Today.AddDays(-30).ToString('yyyy-MM-dd')), the first day that MaxAgeDays of the policy 'recent' allows."
+    }
+
+    It 'gives messages that Read-ImapMessage reads' {
+        $thread = Get-ImapThread open -ThreadId 500
+        $read = $thread | Read-ImapMessage
+
+        $read.Uid | Should -Be 1, 2, 3, 4
+        $read[1].Text | Should -Be 'Here is the proposal.'
+        $read.Folder | Sort-Object -Unique | Should -Be '[Gmail]/All Mail'
     }
 }
 

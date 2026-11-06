@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/github/license/elekto-com-br/ElektoImapPosh)](LICENSE)
 
-A PowerShell module for reading email by IMAP, from several accounts on the same machine: list folders, search messages, read their text and save their attachments, without marking anything as read. Gmail and Google Workspace come first. It is the reading companion of [ElektoMailPosh](https://github.com/elekto-com-br/ElektoMailPosh), which sends.
+A PowerShell module for reading email by IMAP, from several accounts on the same machine: list folders, search messages and Gmail conversations, read their text, save their attachments or a message whole, without marking anything as read. Gmail and Google Workspace come first. It is the reading companion of [ElektoMailPosh](https://github.com/elekto-com-br/ElektoMailPosh), which sends.
 
 > [!NOTE]
 > Under development: the first version, 0.1.0, is not on the PowerShell Gallery yet.
@@ -107,7 +107,7 @@ Gmail has no read-only IMAP password, so ElektoImapPosh guards the mailbox itsel
 
 ### Policies
 
-A policy says what the commands may read from the accounts that follow it. It is meant above all for mailboxes read by AI agents: it keeps the full text of some messages, and some attachments, from being read by accident, limits how much one command downloads, and makes your intent explicit. The commands that read messages follow it: `Get-ImapMessage` says of each message whether its body may be read, and why not, and `Read-ImapMessage` refuses to read one it withholds.
+A policy says what the commands may read from the accounts that follow it. It is meant above all for mailboxes read by AI agents: it keeps the full text of some messages, and some attachments, from being read by accident, limits how much one command downloads, and makes your intent explicit. The commands that read messages follow it: `Get-ImapMessage` and `Get-ImapThread` say of each message whether its body may be read, and why not, `Read-ImapMessage` refuses to read one it withholds, and `Save-ImapAttachment` and `Save-ImapMessage` refuse to save it.
 
 ```powershell
 Set-ImapPolicy agent -DenyFolders 'Finance/*', Junk -DenyReadFrom '*@bank.example' -MaxAgeDays 90 -MaxMessages 200 -MaxMessageSize 25MB
@@ -136,6 +136,7 @@ Get-ImapPolicy                  # the policies, and the accounts that follow eac
 - A Google Group writes its own address in the From of each message it relays (`'Client' via Support <support@example.com>`), and the sender's in `Reply-To` and `X-Original-From`. To an allow list, the sender is then the group. With `UseXOriginalFrom` (`Set-ImapPolicy support -UseXOriginalFrom`), the allow lists judge the sender behind the group instead, but only when all of this holds, since anyone can write that header: the From is of the domain of the mailbox's user (a group of your own), it is authenticated, and the ARC result in the topmost `Authentication-Results`, which the group sealed when it took the message (`arc=pass (... dmarc=pass fromdomain=client.example)`), says that DMARC passed for the domain of `X-Original-From`. When a message misses any of it, `Withheld` says which. It takes reading headers to set up; `Read-ImapMessage` does not show them, but Gmail's "Show original" does.
 - An allow list, when given, withholds what it does not name, and a deny list wins over it. An account without a policy allows all reading.
 - Patterns ignore case the same way in every culture, Turkish included, where `I` is not the capital of `i` (`*@client.example` matches `X@CLIENT.EXAMPLE` there too), and take a name written decomposed in Unicode, as macOS writes names, for the same name written composed. So do `-Folder`, `-Name`, `-ContentType` and `-Account`, and the names of accounts and policies.
+- A message is saved whole (`Save-ImapMessage`) only when its body may be read and every one of its parts may be saved, by the rules below: the `.eml` carries them all.
 - An attachment is saved only from a message whose body may be read, and only when the rules on attachments let it. So `MaxMessageSize` bounds the attachments too: a message larger than it has none saved, whatever `MaxAttachmentSize` says. They take the name the file is saved under, not the one the message gives: an attachment named `x.exe.` would be saved as `x.exe` (Windows drops the dot), and `*.exe` denies it. The MIME type is the one the sender declares, and clients name the same kind of file differently (Outlook sends a zip as `application/x-zip-compressed`, not `application/zip`), so a name says more of what a file is: `-AllowAttachmentTypes '*.pdf'` rather than `application/pdf` alone.
 - What a policy withholds is the body and the attachments. The metadata of every message (sender, recipients, subject, date, labels, the names and sizes of its attachments) can always be read, and a message withheld says so, rather than missing without a word: `Get-ImapMessage` lists it, with the reason in its property `Withheld`, and `Read-ImapMessage` refuses it with a `MessageWithheld` error that gives the reason, having downloaded nothing of it but its metadata.
 - On Gmail, a label is a folder, a message is in the folder of each of its labels, and All Mail holds them all. A message with the label of a denied folder is therefore withheld wherever it is read from: All Mail (where `-Query` searches), the inbox or another label. The system labels (`\Inbox`, `\Sent`, `\Important`...) stand for their special folders.
@@ -218,6 +219,20 @@ Get-ImapFolder work -Folder 'Clients/*' | Get-ImapMessage -From client.example
 - Under a policy, `Withheld` says why the body of a message may not be read: `Get-ImapMessage | Where-Object Withheld | Select-Object From, Subject, Withheld`.
 - What the sender writes (the subject, the senders and recipients, the Message-IDs, the names of attachments) comes without what would drive a terminal, reorder the text or hide it from whoever reads it. Control characters (an escape sequence can clear the screen, or write to the clipboard), overrides of direction (which show `fdp.exe` as `exe.pdf`) and the tags of Unicode (text that an AI reads and a person does not see) show as U+FFFD, the replacement character, one for each run of them; a tab or line break shows as a space; the invisible characters that only change how a text is shown (soft hyphen, zero-width space, marks of direction) are removed. Each of those texts is cut to 1000 characters, ending in an ellipsis, and `From`, `To` and `Cc` keep their first 100 addresses, then an entry that says how many more there were (`... and 9900 more`, with the ellipsis U+2026), so that a message does not flood the context of an agent, and a script that answers everyone fails on that entry rather than leave people out unsaid. The whole message, as the server keeps it, stays in the mailbox.
 
+### Following Gmail Conversations
+
+On Gmail and Google Workspace, `Get-ImapThread` lists the messages of a conversation, as Gmail groups them (the `ThreadId` of each message `Get-ImapMessage` lists): from All Mail, since a conversation spans the inbox, the messages you sent and the labels, the oldest first, as Gmail shows it. Each message comes as `Get-ImapMessage` lists it, so it goes on to `Read-ImapMessage` or `Save-ImapAttachment`. It downloads no body and marks nothing as read:
+
+```powershell
+Get-ImapMessage work -Subject proposal -First 1 | Get-ImapThread         # the whole conversation, the replies sent included
+Get-ImapThread work -ThreadId 1849112309876543210 | Read-ImapMessage     # its text, the oldest first
+Get-ImapMessage work -Unread | Get-ImapThread | Where-Object Labels -Contains '\Sent'
+```
+
+- A conversation that comes more than once, as from several of its messages, is listed once. One with no message in All Mail is a `ThreadNotFound` error. The messages in the trash or the spam are not in All Mail, so they are not listed, and Gmail keeps a conversation to 100 messages.
+- Under a policy, every message of the conversation is listed, with `Withheld` saying why its body may not be read, as `Get-ImapMessage` says it. `MaxAgeDays` narrows the search, and `MaxMessages` keeps the newest messages of a conversation, with a warning that says how many were left out.
+- Conversations are Gmail's: on any other server, `Get-ImapThread` is a `ThreadNotSupported` error, once for each account.
+
 ### Reading Messages
 
 `Read-ImapMessage` returns the text of messages, with their metadata and the list of their attachments. The messages usually come from `Get-ImapMessage`, which says where each one is:
@@ -255,6 +270,22 @@ Get-ImapMessage work -From client.example | Save-ImapAttachment -Path ./Prints -
 - `-Name` takes names or patterns, matched against the name the message gives and the name of the file. `-WhatIf` shows what would be saved, and where, without fetching any attachment.
 - Each file carries the `Account`, `Folder` and `Uid` of its message, the name of the `Attachment` in the message, and whether it was `Inline`.
 - Under a policy, the attachments of a message it withholds are not saved (`MessageWithheld`), and an attachment or inline part that the rules on attachments keep is an `AttachmentWithheld` error that says why; neither is downloaded. The rules on names take the name the file gets and, when a number or `-UniqueName` changes it, the name written too: both must pass, so a second `secret.pdf`, written as `secret (2).pdf`, is still a `secret.pdf`. The rules see each file as a whole: a message attached (`.eml`) carries the body and the attachments of another message, whatever its sender, and a zip file other files.
+- Whatever name a file gets, it is written in `-Path` and nowhere else: the names are made safe first, and the final path is checked once more (`PathOutsideDirectory`).
+
+### Saving a Message Whole
+
+`Save-ImapMessage` saves one message as the server keeps it, byte for byte (its headers, its text and its attachments), as an `.eml` file that mail clients open, and returns the file. It is not the usual way to read mail, which `Read-ImapMessage` and `Save-ImapAttachment` are: it is for keeping a message as evidence, opening it in a mail client, or reading the headers that tell how it came (`Received`, `Authentication-Results`, `DKIM-Signature`). Nothing is marked as read.
+
+```powershell
+Save-ImapMessage work -Uid 12045 -Path .                                         # 12045-<its subject>.eml
+Get-ImapMessage work -From bank.example -First 1 | Save-ImapMessage -Path ~/Evidence
+Save-ImapMessage work -Folder All -MessageId '<CAF8kLm1x@mail.gmail.com>' -Path ./Messages
+```
+
+- It saves one message, and only one: by `-Uid`, or by `-MessageId`, with or without its angle brackets, matched exactly (the server finds the messages whose Message-ID has the text in it, and only the one whose Message-ID is that text is saved). When more than one message comes from the pipeline, or more than one message of the folder has the Message-ID, nothing is saved, nor downloaded: a `MoreThanOneMessage` error says so. So it is when the server finds more than 100 messages with the text in their Message-ID, as it would for a part of one (`gmail.com`): give it whole. To save the attachments of many messages, there is `Save-ImapAttachment`.
+- `-Folder` is the inbox by default. On Gmail, `-Folder All` finds a message wherever it is, unless it is in the trash or the spam.
+- The file is named after the UID and the subject (`12045-Proposal for 2027.eml`, or `12045.eml` without a subject), made safe as the name of an attachment is, since the sender writes the subject; a `/` in it is `_`. It is written as attachments are: under a temporary name, then renamed; on Windows with the Mark of the Web, as every file saved from a message, which tells Windows and the programs that read it that the file came from the internet; in place of another file only with `-Force` (`MessageFileExists`), and never in place of a directory or a read-only file. Ctrl+C while it is written saves nothing. `-WhatIf` shows the file it would be, without downloading the message.
+- Under a policy, the message is saved only when the policy lets it be read, and lets every one of its parts be saved, attachments and inline parts alike, as `Save-ImapAttachment -Inline` would save them: the file carries them all. Otherwise a `MessageWithheld` error says why, and nothing is downloaded. `MaxMessageSize` holds the message by the size the server tells, before it is downloaded, and by its own after. A search by Message-ID, as every search, finds only the messages of the days that `MaxAgeDays` allows.
 
 ## Building from Source
 
