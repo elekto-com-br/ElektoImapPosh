@@ -368,6 +368,20 @@ Describe 'The account commands' {
         $completed | Should -Be 'billing'
         @((Get-Content -Path $accountsFile -Raw | ConvertFrom-Json -AsHashtable).Accounts.Keys) | Should -Be 'work'
     }
+
+    # Each command registers its parameters with the completer: one left out completes file names
+    It 'completes the name of an account for -Account of every command that takes one' {
+        Set-Content -Path $accountsFile -Value '{ "Accounts": { "billing": { "Server": "imap.example.com", "User": "b@example.com" }, "work": { "Server": "imap.example.com", "User": "me@example.com" } } }'
+        $commands = @(Get-Command -Module ElektoImapPosh | Where-Object { $_.Parameters.ContainsKey('Account') }).Name
+
+        $commands.Count | Should -BeGreaterThan 6
+        foreach ($command in $commands) {
+            $line = "$command -Account bil"
+            @((TabExpansion2 -inputScript $line -cursorColumn $line.Length).CompletionMatches.CompletionText) | Should -Be 'billing' -Because "-Account of $command should complete"
+        }
+        Remove-ImapAccount billing
+        @((Get-Content -Path $accountsFile -Raw | ConvertFrom-Json -AsHashtable).Accounts.Keys) | Should -Be 'work'
+    }
 }
 
 Describe 'The configuration folder' {

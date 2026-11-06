@@ -1,6 +1,7 @@
 # Attachments and inline parts: the name a file gets, the size told before the fetch, and Save-ImapAttachment against the fake Gmail,
 # since the BODYSTRUCTURE of smtp4dev leaves attachments out. The fake serves each part on its own, and keeps the
-# commands it got, so the tests see what was fetched.
+# commands it got, so the tests see what was fetched. Also Save-ImapMessage, which saves a message whole, named and
+# written as an attachment is, and the file the module writes, held to its directory.
 
 BeforeDiscovery {
     # Root writes in a directory whatever its permissions
@@ -17,6 +18,72 @@ BeforeAll {
     foreach ($name in $variableNames) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
         [Environment]::SetEnvironmentVariable($name, $null)
+    }
+
+    # The write of the module held until the gate opens: all of it, or with after only the end of its task, the file
+    # written and renamed already; started gives the task the command waits for, once it is held. In C#, since the
+    # task runs on threads where a script block has no runspace
+    if (-not ('ElektoImapPoshTests.HeldSave' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Threading.Tasks;
+
+namespace ElektoImapPoshTests
+{
+    public static class HeldSave
+    {
+        // Wraps the write of the module: (content, temporary, path, overwrite, commit, zone) => task of the message
+        // of a mark refused
+        public static Func<MemoryStream, string, string, bool, TaskCompletionSource<bool>, string, Task<string>> Hold(
+            Func<MemoryStream, string, string, bool, TaskCompletionSource<bool>, string, Task<string>> save, Task gate, TaskCompletionSource<Task> started, bool after)
+        {
+            return (content, temporary, path, overwrite, commit, zone) =>
+            {
+                if (!after)
+                {
+                    Task<string> held = gate.ContinueWith(_ => save(content, temporary, path, overwrite, commit, zone)).Unwrap();
+                    started.TrySetResult(held);
+                    return held;
+                }
+                Task<string> saved = save(content, temporary, path, overwrite, commit, zone);
+                Task<string> end = saved.ContinueWith(_ => gate.ContinueWith(__ => saved.Result)).Unwrap();
+                saved.ContinueWith(_ => started.TrySetResult(end));
+                return end;
+            };
+        }
+
+        // Wraps the write of the module so that the Mark of the Web goes to a stream that no volume takes, as a volume
+        // of FAT32 or exFAT takes none; or, asFile, to a file of its own beside the temporary one, as the share of WSL
+        // writes a stream, taking the ":" for a character of the name
+        public static Func<MemoryStream, string, string, bool, TaskCompletionSource<bool>, string, Task<string>> Unmark(
+            Func<MemoryStream, string, string, bool, TaskCompletionSource<bool>, string, Task<string>> save, bool asFile)
+        {
+            return (content, temporary, path, overwrite, commit, zone) => save(content, temporary, path, overwrite, commit,
+                zone == null ? null : asFile ? temporary + "-Zone.Identifier" : zone + ":$BITMAP");
+        }
+    }
+}
+'@
+    }
+
+    # A command that saves a file in a runspace of its own, which Ctrl+C stops (BeginStop), its write held until Gate
+    # opens (HeldSave): by default Save-ImapAttachment, saving report.pdf of the message 10 with -Force. The command is a
+    # text, which finds the directory in $Directory, since a script block keeps to the runspace it was made in
+    function Start-HeldSave([string]$Directory, [switch]$After, [string]$Command = 'Save-ImapAttachment open -Folder All -Uid 10 -Path $Directory -Name report.pdf -Force') {
+        $held = [pscustomobject]@{
+            PowerShell = [powershell]::Create()
+            Gate       = [System.Threading.Tasks.TaskCompletionSource[object]]::new()
+            Started    = [System.Threading.Tasks.TaskCompletionSource[System.Threading.Tasks.Task]]::new()
+        }
+        $null = $held.PowerShell.AddScript({
+                param($Manifest, $Gate, $Started, $After, $Directory, $Command)
+                Import-Module $Manifest
+                & (Get-Module ElektoImapPosh) { param($Gate, $Started, $After) $script:SaveFileTask = [ElektoImapPoshTests.HeldSave]::Hold($script:SaveFileTask, $Gate, $Started, $After) } $Gate $Started $After
+                & ([scriptblock]::Create('param($Directory) ' + $Command)) $Directory
+            }).AddArgument((Join-Path (Split-Path $PSScriptRoot) 'ElektoImapPosh.psd1')).AddArgument($held.Gate.Task).AddArgument($held.Started).AddArgument([bool]$After).AddArgument($Directory).AddArgument($Command)
+        $null = $held.PowerShell.BeginInvoke()
+        return $held
     }
 }
 
@@ -176,6 +243,45 @@ Describe 'The file of an attachment' {
     }
 }
 
+Describe 'The file of a message, and the directory of every file' {
+    It 'names the file of a message <Expected> for <Case>' -TestCases @(
+        @{ Case = 'a subject'; Uid = 12045; Subject = 'Proposal for 2027'; Expected = '12045-Proposal for 2027.eml' }
+        @{ Case = 'no subject'; Uid = 7; Subject = ''; Expected = '7.eml' }
+        @{ Case = 'a subject of spaces'; Uid = 7; Subject = '   '; Expected = '7.eml' }
+        @{ Case = 'a slash in the subject, which is no folder'; Uid = 8; Subject = 'Invoice 11/2026'; Expected = '8-Invoice 11_2026.eml' }
+        @{ Case = 'a path up the tree as the subject'; Uid = 9; Subject = '../../../CLAUDE.md'; Expected = '9-.._.._.._CLAUDE.md.eml' }
+        @{ Case = 'characters Windows refuses'; Uid = 10; Subject = 'Re: a <b> "c"?'; Expected = '10-Re_ a _b_ _c__.eml' }
+        @{ Case = 'a line break and a tab, as one space'; Uid = 11; Subject = "Re:`r`n`tthe plan"; Expected = '11-Re_ the plan.eml' }
+        @{ Case = 'an escape sequence'; Uid = 12; Subject = "Hi`e[2J"; Expected = '12-Hi_[2J.eml' }
+        @{ Case = 'a device name of Windows'; Uid = 13; Subject = 'CON'; Expected = '13-CON.eml' }
+        @{ Case = 'a long subject, cut to 200 bytes before the extension'; Uid = 14; Subject = 'x' * 300; Expected = '14-' + ('x' * 193) + '.eml' }
+    ) {
+        $fileName = InModuleScope ElektoImapPosh -Parameters @{ Uid = $Uid; Subject = $Subject } { param($Uid, $Subject) Get-MessageFileName $Uid $Subject }
+
+        [string]::Equals($fileName, $Expected, [StringComparison]::Ordinal) | Should -BeTrue -Because "'$fileName' should be '$Expected'"
+    }
+
+    # Every name the module writes is made safe before (Get-AttachmentFileName): this holds whatever else could come
+    It 'holds a file to its directory, whatever name it is given' {
+        $directory = (New-Item -ItemType Directory -Path (Join-Path $TestDrive 'contained') -Force).FullName
+        $root = [IO.Path]::GetPathRoot($directory)
+        $names = @('../../../CLAUDE.md', '..', '.', 'a/b.eml', '')
+        # Names that Windows refuses, writes otherwise ("a. " as "a") or takes for a stream of another file
+        if ($IsWindows) { $names += 'C:\x.eml', 'a\b.eml', 'x.eml:Zone.Identifier', 'a. ', 'a.' }
+        $paths = InModuleScope ElektoImapPosh -Parameters @{ Directory = $directory; Root = $root; Names = $names } {
+            param($Directory, $Root, $Names)
+            foreach ($name in $Names) { , (Get-ContainedPath $Directory $name) }
+            Get-ContainedPath $Directory 'x.eml'
+            Get-ContainedPath $Root 'x.eml'
+        }
+
+        $paths.Count | Should -Be ($names.Count + 2)
+        for ($index = 0; $index -lt $names.Count; $index++) { $paths[$index] | Should -BeNullOrEmpty -Because "'$($names[$index])' is no file of the directory" }
+        $paths[-2] | Should -Be (Join-Path $directory 'x.eml')
+        $paths[-1] | Should -Be ($root + 'x.eml')
+    }
+}
+
 Describe 'Save-ImapAttachment on Gmail' {
     BeforeAll {
         $now = [DateTimeOffset]::Now
@@ -321,71 +427,6 @@ Describe 'Save-ImapAttachment on Gmail' {
         # A new directory of the test drive for each test, and the commands the server got since the test began
         function New-TestDirectory([string]$Name) { (New-Item -ItemType Directory -Path (Join-Path $TestDrive $Name) -Force).FullName }
         function Get-CommandSince([int]$Count) { @($server.State.Commands.ToArray() | Select-Object -Skip $Count) }
-
-        # The write of the module held until the gate opens: all of it, or with after only the end of its task, the file
-        # written and renamed already; started gives the task the command waits for, once it is held. In C#, since the
-        # task runs on threads where a script block has no runspace
-        if (-not ('ElektoImapPoshTests.HeldSave' -as [type])) {
-            Add-Type -TypeDefinition @'
-using System;
-using System.IO;
-using System.Threading.Tasks;
-
-namespace ElektoImapPoshTests
-{
-    public static class HeldSave
-    {
-        // Wraps the write of the module: (content, temporary, path, overwrite, commit, zone) => task of the message
-        // of a mark refused
-        public static Func<MemoryStream, string, string, bool, TaskCompletionSource<bool>, string, Task<string>> Hold(
-            Func<MemoryStream, string, string, bool, TaskCompletionSource<bool>, string, Task<string>> save, Task gate, TaskCompletionSource<Task> started, bool after)
-        {
-            return (content, temporary, path, overwrite, commit, zone) =>
-            {
-                if (!after)
-                {
-                    Task<string> held = gate.ContinueWith(_ => save(content, temporary, path, overwrite, commit, zone)).Unwrap();
-                    started.TrySetResult(held);
-                    return held;
-                }
-                Task<string> saved = save(content, temporary, path, overwrite, commit, zone);
-                Task<string> end = saved.ContinueWith(_ => gate.ContinueWith(__ => saved.Result)).Unwrap();
-                saved.ContinueWith(_ => started.TrySetResult(end));
-                return end;
-            };
-        }
-
-        // Wraps the write of the module so that the Mark of the Web goes to a stream that no volume takes, as a volume
-        // of FAT32 or exFAT takes none; or, asFile, to a file of its own beside the temporary one, as the share of WSL
-        // writes a stream, taking the ":" for a character of the name
-        public static Func<MemoryStream, string, string, bool, TaskCompletionSource<bool>, string, Task<string>> Unmark(
-            Func<MemoryStream, string, string, bool, TaskCompletionSource<bool>, string, Task<string>> save, bool asFile)
-        {
-            return (content, temporary, path, overwrite, commit, zone) => save(content, temporary, path, overwrite, commit,
-                zone == null ? null : asFile ? temporary + "-Zone.Identifier" : zone + ":$BITMAP");
-        }
-    }
-}
-'@
-        }
-
-        # Save-ImapAttachment in a runspace of its own, which Ctrl+C stops (BeginStop), saving report.pdf of the message 10
-        # with -Force, its write held until Gate opens (HeldSave)
-        function Start-HeldSave([string]$Directory, [switch]$After) {
-            $held = [pscustomobject]@{
-                PowerShell = [powershell]::Create()
-                Gate       = [System.Threading.Tasks.TaskCompletionSource[object]]::new()
-                Started    = [System.Threading.Tasks.TaskCompletionSource[System.Threading.Tasks.Task]]::new()
-            }
-            $null = $held.PowerShell.AddScript({
-                    param($Manifest, $Gate, $Started, $After, $Directory)
-                    Import-Module $Manifest
-                    & (Get-Module ElektoImapPosh) { param($Gate, $Started, $After) $script:SaveFileTask = [ElektoImapPoshTests.HeldSave]::Hold($script:SaveFileTask, $Gate, $Started, $After) } $Gate $Started $After
-                    Save-ImapAttachment open -Folder All -Uid 10 -Path $Directory -Name report.pdf -Force
-                }).AddArgument((Join-Path (Split-Path $PSScriptRoot) 'ElektoImapPosh.psd1')).AddArgument($held.Gate.Task).AddArgument($held.Started).AddArgument([bool]$After).AddArgument($Directory)
-            $null = $held.PowerShell.BeginInvoke()
-            return $held
-        }
     }
 
     AfterAll {
@@ -1033,6 +1074,323 @@ namespace ElektoImapPoshTests
 
         { Save-ImapAttachment open -Folder All -Uid 10 -Path (New-TestDirectory 'bad-pattern') -Name 'image[0' } | Should -Throw "Cannot validate argument on parameter 'Name'. The specified wildcard character pattern is not valid: image``[0"
         { Save-ImapAttachment open -Folder All -Uid 10 -Path (New-TestDirectory 'bad-type') -ContentType 'image/[' } | Should -Throw "Cannot validate argument on parameter 'ContentType'. The specified wildcard character pattern is not valid: image/``["
+        $server.State.Commands.Count | Should -Be $before
+    }
+}
+
+Describe 'Save-ImapMessage on Gmail' {
+    BeforeAll {
+        # A text as a header carries it, encoded (RFC 2047), so that it may hold anything
+        function ConvertTo-EncodedWord([string]$Text) { '=?utf-8?B?' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Text)) + '?=' }
+        $now = [DateTimeOffset]::Now
+        $client = 'mx.google.com; dmarc=pass header.from=client.example'
+        $server = Start-FakeGmail @(
+            # A file attached, a slash in the subject, and a Message-ID that is part of the next one's
+            @{ Uid = 40; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Proposal 11/2026'; Date = $now.AddHours(-6); Size = 3000; AuthenticationResults = $client; MessageId = '<abc@client.example>'
+                Attachments = @(@{ Name = 'spec.pdf'; Type = 'application/pdf'; Data = '%PDF spec' })
+            }
+            @{ Uid = 41; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Another'; Date = $now.AddHours(-5); Size = 3000; AuthenticationResults = $client; MessageId = '<xabc@client.example>' }
+            # A message delivered twice, with one Message-ID
+            @{ Uid = 42; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Twice'; Date = $now.AddHours(-4); Size = 3000; AuthenticationResults = $client; MessageId = '<twice@client.example>' }
+            @{ Uid = 43; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Twice'; Date = $now.AddHours(-4); Size = 3000; AuthenticationResults = $client; MessageId = '<twice@client.example>' }
+            # No subject, and a print pasted in the body
+            @{ Uid = 44; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = ''; Date = $now.AddHours(-3); Size = 3000; AuthenticationResults = $client
+                Attachments = @(@{ Name = 'image.png'; Type = 'image/png'; Data = 'PNG print'; Disposition = 'inline'; ContentId = 'ii_1' })
+            }
+            @{ Uid = 45; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Tools'; Date = $now.AddHours(-2); Size = 3000; AuthenticationResults = $client
+                Attachments = @(@{ Name = 'tool.exe'; Type = 'application/octet-stream'; Data = 'MZ tool' }, @{ Name = 'setup.exe'; Type = 'application/octet-stream'; Data = 'MZ setup' })
+            }
+            # The label of a denied folder
+            @{ Uid = 46; Folders = 'INBOX', '[Gmail]/All Mail', 'Finance/Bank'; Labels = '\Inbox', 'Finance/Bank'; From = 'Bank <alerts@bank.example>'; Subject = 'Statement'; Date = $now.AddHours(-1); Size = 3000; AuthenticationResults = 'mx.google.com; dmarc=pass header.from=bank.example' }
+            # Larger than the server tells
+            @{ Uid = 47; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Understated'; Date = $now.AddMinutes(-30); Size = 100; AuthenticationResults = $client; Text = 'x' * 3000 }
+            # An escape sequence in the subject, which would clear the screen of a terminal
+            @{ Uid = 48; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = ConvertTo-EncodedWord "Hi`e[2J there"; Date = $now.AddMinutes(-20); Size = 3000; AuthenticationResults = $client }
+            # Received before the days a policy allows
+            @{ Uid = 49; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Old'; Date = $now.AddDays(-40); Size = 3000; AuthenticationResults = $client; MessageId = '<old@client.example>' }
+            # In a label of the user named Sent, which is not the sent folder
+            @{ Uid = 50; Folders = '[Gmail]/All Mail', 'Sent'; Labels = @('Sent'); From = 'Me <me@gmail.com>'; Subject = 'Labelled'; Date = $now.AddMinutes(-10); Size = 1000 }
+        )
+        # Another server, whose 101 messages have one text in their Message-IDs
+        $crowd = Start-FakeGmail @(foreach ($uid in 1..101) { @{ Uid = $uid; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = "Message $uid"; Date = $now.AddHours(-1); Size = 1000; MessageId = "<$uid.common@client.example>" } })
+        $passwords = Set-TestAccount 'gmail-messages' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; deny = @{ Policy = 'deny' }; pdf = @{ Policy = 'pdf' }; small = @{ Policy = 'small' }; recent = @{ Policy = 'recent' }; crowd = @{ Port = $crowd.Port } } -Policies @{
+            deny   = @{ DenyFolders = @('Finance/*'); DenyAttachmentTypes = @('*.exe') }
+            pdf    = @{ AllowAttachmentTypes = @('*.pdf') }
+            small  = @{ MaxMessageSize = 2000 }
+            recent = @{ MaxAgeDays = 30 }
+        }
+
+        function New-TestDirectory([string]$Name) { (New-Item -ItemType Directory -Path (Join-Path $TestDrive $Name) -Force).FullName }
+        function Get-CommandSince([int]$Count) { @($server.State.Commands.ToArray() | Select-Object -Skip $Count) }
+        # The fetches of a message whole
+        function Get-WholeFetch([int]$Count) { @(Get-CommandSince $Count | Where-Object { $_ -like '*BODY.PEEK`[`]*' }) }
+    }
+
+    AfterAll {
+        Stop-FakeGmail $server
+        Stop-FakeGmail $crowd
+        foreach ($name in $passwords) { [Environment]::SetEnvironmentVariable($name, $null) }
+        $env:IMAP_CONFIG_DIR = $null
+    }
+
+    It 'saves a message as the server keeps it, fetching it whole and nothing else, and returns the file' {
+        $directory = New-TestDirectory 'message'
+        $before = $server.State.Commands.Count
+        $file = Save-ImapMessage open -Uid 40 -Path $directory -WarningVariable warnings
+
+        $file.Name | Should -Be '40-Proposal 11_2026.eml'
+        $file | Should -BeOfType [IO.FileInfo]
+        $file.Account | Should -Be 'open'
+        $file.Folder | Should -Be 'INBOX'
+        $file.Uid | Should -Be 40
+        $text = [IO.File]::ReadAllText($file.FullName)
+        $text | Should -BeLikeExactly "From: Client <client@client.example>`r`nTo: Me <me@gmail.com>`r`nSubject: Proposal 11/2026`r`nMessage-ID: <abc@client.example>`r`n*"
+        $text | Should -BeLikeExactly "*Content-Disposition: attachment; filename=`"spec.pdf`"`r`nContent-Transfer-Encoding: base64`r`n`r`n$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('%PDF spec')))`r`n--b1--`r`n"
+        # Byte for byte, with the line ends the server gives, on every platform
+        $text -cmatch '(?<!\r)\n' | Should -BeFalse
+        $fetches = @(Get-CommandSince $before | Where-Object { $_ -like '* UID FETCH *BODY.PEEK`[*' -and $_ -notlike '*HEADER.FIELDS*' })
+        $fetches.Count | Should -Be 1
+        $fetches[0] | Should -BeLike '* UID FETCH 40 (BODY.PEEK`[`])'
+        @(Get-ChildItem -LiteralPath $directory -Force).Name | Should -Be '40-Proposal 11_2026.eml' -Because 'no temporary file is left'
+        $warnings | Should -BeNullOrEmpty
+    }
+
+    It 'takes the message listed by Get-ImapMessage, and saves nothing, asking nothing of the server, when more than one comes' {
+        $listed = Get-ImapMessage open -Folder All
+        $one = $listed | Where-Object Uid -EQ 40 | Save-ImapMessage -Path (New-TestDirectory 'piped')
+        $directory = New-TestDirectory 'piped-many'
+        $before = $server.State.Commands.Count
+        $many = $listed | Save-ImapMessage -Path $directory -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $one.Name | Should -Be '40-Proposal 11_2026.eml'
+        $one.Folder | Should -Be '[Gmail]/All Mail'
+        $many | Should -BeNullOrEmpty
+        $errors.Count | Should -Be 1
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'MoreThanOneMessage,*'
+        "$($errors[0])" | Should -Be "Save-ImapMessage saves one message, and $($listed.Count) came, so none was saved: Save-ImapAttachment saves the attachments of many, and Read-ImapMessage reads their text."
+        @(Get-ChildItem -LiteralPath $directory -Force).Count | Should -Be 0
+        $server.State.Commands.Count | Should -Be $before
+    }
+
+    # The server finds the message 41 too, whose Message-ID has that one in it
+    It 'saves the one message whose Message-ID is the one given, with or without its angle brackets' {
+        $before = $server.State.Commands.Count
+        $bare = Save-ImapMessage open -Folder All -MessageId 'abc@client.example' -Path (New-TestDirectory 'by-id')
+        $bracketed = Save-ImapMessage open -Folder All -MessageId ' <abc@client.example> ' -Path (New-TestDirectory 'by-id-brackets')
+
+        $bare.Uid | Should -Be 40
+        $bare.Folder | Should -Be '[Gmail]/All Mail'
+        $bracketed.Uid | Should -Be 40
+        @(Get-CommandSince $before | Where-Object { $_ -like '* UID SEARCH HEADER Message-ID abc@client.example' }).Count | Should -Be 2
+    }
+
+    It 'saves nothing when more than one message of the folder has the Message-ID, or none has' {
+        $directory = New-TestDirectory 'by-id-not-one'
+        $before = $server.State.Commands.Count
+        $twice = Save-ImapMessage open -Folder All -MessageId '<twice@client.example>' -Path $directory -ErrorVariable twiceErrors -ErrorAction SilentlyContinue
+        $none = Save-ImapMessage open -Folder All -MessageId '<nobody@client.example>' -Path $directory -ErrorVariable noneErrors -ErrorAction SilentlyContinue
+
+        $twice | Should -BeNullOrEmpty
+        $twiceErrors.Count | Should -Be 1
+        $twiceErrors[0].FullyQualifiedErrorId | Should -BeLike 'MoreThanOneMessage,*'
+        "$($twiceErrors[0])" | Should -Be "2 messages in the folder '[Gmail]/All Mail' of tester have the Message-ID '<twice@client.example>' (the UIDs 42, 43), so none was saved: give the -Uid of one."
+        $none | Should -BeNullOrEmpty
+        $noneErrors.Count | Should -Be 1
+        $noneErrors[0].FullyQualifiedErrorId | Should -BeLike 'MessageNotFound,*'
+        "$($noneErrors[0])" | Should -Be "There is no message with the Message-ID '<nobody@client.example>' in the folder '[Gmail]/All Mail' of tester."
+        Get-WholeFetch $before | Should -BeNullOrEmpty
+        @(Get-ChildItem -LiteralPath $directory -Force).Count | Should -Be 0
+    }
+
+    It 'takes a folder from the pipeline by its exact name, so a label "Sent" stays that label' {
+        $file = [PSCustomObject]@{ Account = 'open'; Folder = 'Sent'; Uid = 50 } | Save-ImapMessage -Path (New-TestDirectory 'label')
+
+        $file.Name | Should -Be '50-Labelled.eml'
+        $file.Folder | Should -Be 'Sent'
+    }
+
+    # A short text is part of the Message-ID of many messages, whose envelopes would all be downloaded; a whole one, of
+    # few ("7.common" is part of "17.common")
+    It 'saves nothing, fetching no envelope, when a search by Message-ID finds more than 100 messages' {
+        $before = $crowd.State.Commands.Count
+        $file = Save-ImapMessage crowd -MessageId 'common' -Path (New-TestDirectory 'crowd') -ErrorVariable errors -ErrorAction SilentlyContinue
+        $one = Save-ImapMessage crowd -MessageId '<7.common@client.example>' -Path (New-TestDirectory 'crowd-one')
+
+        $file | Should -BeNullOrEmpty
+        $errors.Count | Should -Be 1
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'MoreThanOneMessage,*'
+        "$($errors[0])" | Should -Be "101 messages in the folder 'INBOX' of tester have 'common' in their Message-ID, so none was saved: give the whole Message-ID of one, or its -Uid."
+        @($crowd.State.Commands.ToArray() | Select-Object -Skip $before | Where-Object { $_ -like '* UID FETCH * (UID ENVELOPE)' }).Count | Should -Be 1 -Because 'only the search for the whole Message-ID fetches envelopes'
+        $one.Uid | Should -Be 7
+    }
+
+    It 'reports a UID that is not in the folder, and a folder numbered anew since the message was listed' {
+        $missing = Save-ImapMessage open -Uid 999 -Path (New-TestDirectory 'missing-uid') -ErrorVariable missingErrors -ErrorAction SilentlyContinue
+        $renumbered = [PSCustomObject]@{ Account = 'open'; Folder = 'INBOX'; Uid = 40; UidValidity = 99 } | Save-ImapMessage -Path (New-TestDirectory 'renumbered') -ErrorVariable renumberedErrors -ErrorAction SilentlyContinue
+
+        $missing | Should -BeNullOrEmpty
+        $missingErrors[0].FullyQualifiedErrorId | Should -BeLike 'MessageNotFound,*'
+        $renumbered | Should -BeNullOrEmpty
+        $renumberedErrors[0].FullyQualifiedErrorId | Should -BeLike 'UidValidityChanged,*'
+    }
+
+    It 'refuses a message the policy withholds, or one with a part it keeps from being saved, downloading none' {
+        $directory = New-TestDirectory 'withheld'
+        $before = $server.State.Commands.Count
+        $null = Save-ImapMessage deny -Uid 46 -Path $directory -ErrorVariable labelErrors -ErrorAction SilentlyContinue
+        $null = Save-ImapMessage deny -Uid 45 -Path $directory -ErrorVariable programErrors -ErrorAction SilentlyContinue
+        $null = Save-ImapMessage pdf -Uid 44 -Path $directory -ErrorVariable printErrors -ErrorAction SilentlyContinue
+        $saved = Save-ImapMessage pdf -Uid 40 -Path $directory
+
+        "$($labelErrors[0])" | Should -Be "The message 46 in the folder 'INBOX' of tester was not saved: It has the label 'Finance/Bank', and the folder 'Finance/Bank' is in DenyFolders of the policy 'deny'."
+        "$($programErrors[0])" | Should -Be "The message 45 in the folder 'INBOX' of tester was not saved, since its attachment 'tool.exe' may not be saved: The attachment tool.exe (application/octet-stream) matches '*.exe' in DenyAttachmentTypes of the policy 'deny'. Of its other parts, 1 may not be saved either."
+        "$($printErrors[0])" | Should -Be "The message 44 in the folder 'INBOX' of tester was not saved, since its inline part 'image.png' may not be saved: The attachment image.png (image/png) matches nothing in AllowAttachmentTypes of the policy 'pdf'."
+        foreach ($record in @($labelErrors) + @($programErrors) + @($printErrors)) { $record.FullyQualifiedErrorId | Should -BeLike 'MessageWithheld,*' }
+        (Get-WholeFetch $before).Count | Should -Be 1 -Because 'only the message the policy lets be saved is downloaded'
+        $saved.Uid | Should -Be 40
+        @(Get-ChildItem -LiteralPath $directory -Force).Name | Should -Be '40-Proposal 11_2026.eml'
+    }
+
+    It 'refuses, once downloaded, a message larger than the server told and than MaxMessageSize' {
+        $directory = New-TestDirectory 'understated'
+        $file = Save-ImapMessage small -Uid 47 -Path $directory -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $file | Should -BeNullOrEmpty
+        $errors.Count | Should -Be 1
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'MessageWithheld,*'
+        "$($errors[0])" | Should -BeLike "The message 47 in the folder 'INBOX' of tester was not saved: it has * bytes, more than MaxMessageSize of the policy 'small' (2000), though the server told of fewer."
+        @(Get-ChildItem -LiteralPath $directory -Force).Count | Should -Be 0
+    }
+
+    It 'finds by Message-ID only the messages of the days that MaxAgeDays allows' {
+        $start = [datetime]::Today.AddDays(-30)
+        $before = $server.State.Commands.Count
+        $null = Save-ImapMessage recent -Folder All -MessageId '<old@client.example>' -Path (New-TestDirectory 'old-by-id') -ErrorVariable idErrors -ErrorAction SilentlyContinue
+        $null = Save-ImapMessage recent -Folder All -Uid 49 -Path (New-TestDirectory 'old-by-uid') -ErrorVariable uidErrors -ErrorAction SilentlyContinue
+
+        "$($idErrors[0])" | Should -Be "There is no message with the Message-ID '<old@client.example>' in the folder '[Gmail]/All Mail' of tester received since $($start.ToString('yyyy-MM-dd')), the first day that MaxAgeDays of the policy 'recent' allows."
+        @(Get-CommandSince $before | Where-Object { $_ -like "* UID SEARCH HEADER Message-ID old@client.example SINCE $($start.ToString('d-MMM-yyyy', [Globalization.CultureInfo]::InvariantCulture))" }).Count | Should -Be 1
+        $uidErrors[0].FullyQualifiedErrorId | Should -BeLike 'MessageWithheld,*'
+        "$($uidErrors[0])" | Should -Be "The message 49 in the folder '[Gmail]/All Mail' of tester was not saved: It was received before $($start.ToString('yyyy-MM-dd')), and MaxAgeDays of the policy 'recent' is 30."
+        Get-WholeFetch $before | Should -BeNullOrEmpty
+    }
+
+    It 'names the file after the UID and the subject, made safe as the names of attachments' {
+        $directory = New-TestDirectory 'names'
+        $escape = Save-ImapMessage open -Uid 48 -Path $directory
+        $nameless = Save-ImapMessage open -Uid 44 -Path $directory
+
+        $escape.Name | Should -BeExactly '48-Hi_[2J there.eml'
+        $nameless.Name | Should -BeExactly '44.eml'
+    }
+
+    It 'replaces a file that exists only with -Force, telling so before downloading the message' {
+        $directory = New-TestDirectory 'replace'
+        $existing = Join-Path $directory '40-Proposal 11_2026.eml'
+        Set-Content -LiteralPath $existing -Value 'kept' -NoNewline
+        $before = $server.State.Commands.Count
+        $refused = Save-ImapMessage open -Uid 40 -Path $directory -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $refused | Should -BeNullOrEmpty
+        $errors.Count | Should -Be 1
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'MessageFileExists,*'
+        "$($errors[0])" | Should -BeLike "'*40-Proposal 11_2026.eml' already exists, so the message 40 in the folder 'INBOX' of tester was not saved: give -Force to replace the file."
+        Get-WholeFetch $before | Should -BeNullOrEmpty
+        Get-Content -LiteralPath $existing -Raw | Should -BeExactly 'kept'
+
+        $replaced = Save-ImapMessage open -Uid 40 -Path $directory -Force
+        $replaced.FullName | Should -Be $existing
+        [IO.File]::ReadAllText($existing) | Should -BeLikeExactly 'From: Client*'
+    }
+
+    # A file another program keeps open, on Windows, or a directory that cannot be written, elsewhere
+    It 'reports a file it could not write once, and does not return the file that was there' -Skip:$isRoot {
+        $directory = New-TestDirectory 'cannot-write'
+        $existing = Join-Path $directory '40-Proposal 11_2026.eml'
+        Set-Content -LiteralPath $existing -Value 'kept' -NoNewline
+        $lock = $null
+        if ($IsWindows) { $lock = [IO.File]::Open($existing, 'Open', 'Read', 'None') }
+        else { [IO.File]::SetUnixFileMode($directory, 'UserRead, UserExecute') }
+        try {
+            $file = Save-ImapMessage open -Uid 40 -Path $directory -Force -ErrorVariable errors -ErrorAction SilentlyContinue
+        } finally {
+            if ($lock) { $lock.Dispose() } else { [IO.File]::SetUnixFileMode($directory, 'UserRead, UserWrite, UserExecute') }
+        }
+
+        $file | Should -BeNullOrEmpty
+        $errors.Count | Should -Be 1
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'MessageWriteFailed,*'
+        "$($errors[0])" | Should -BeLike "Could not write '*40-Proposal 11_2026.eml', so the message 40 in the folder 'INBOX' of tester was not saved: ?*"
+        Get-Content -LiteralPath $existing -Raw | Should -BeExactly 'kept'
+        @(Get-ChildItem -LiteralPath $directory -Force).Name | Should -Be '40-Proposal 11_2026.eml' -Because 'no temporary file is left'
+    }
+
+    It 'saves nothing, and downloads nothing of the message, with -WhatIf' {
+        $directory = New-TestDirectory 'what-if'
+        $before = $server.State.Commands.Count
+        $result = Save-ImapMessage open -Uid 40 -Path $directory -WhatIf
+
+        $result | Should -BeNullOrEmpty
+        @(Get-ChildItem -LiteralPath $directory -Force).Count | Should -Be 0
+        Get-WholeFetch $before | Should -BeNullOrEmpty
+    }
+
+    # As every file saved from a message: it came from the internet
+    It 'marks the file as from the internet, on Windows' -Skip:(-not $IsWindows) {
+        $file = Save-ImapMessage open -Uid 40 -Path (New-TestDirectory 'marked')
+
+        Get-Content -LiteralPath $file.FullName -Stream Zone.Identifier -Raw | Should -BeExactly "[ZoneTransfer]`r`nZoneId=3`r`n"
+    }
+
+    It 'stops at once on Ctrl+C while writing the file, without saving it later or replacing the file there' {
+        $directory = New-TestDirectory 'stopped'
+        $existing = Join-Path $directory '40-Proposal 11_2026.eml'
+        Set-Content -LiteralPath $existing -Value 'kept' -NoNewline
+        $held = Start-HeldSave $directory -Command 'Save-ImapMessage open -Uid 40 -Path $Directory -Force'
+        try {
+            $held.Started.Task.Wait(30000) | Should -BeTrue -Because 'the command should be writing the file by now'
+
+            $stopping = $held.PowerShell.BeginStop($null, $null)
+            $stopped = $stopping.AsyncWaitHandle.WaitOne(2000)
+            $held.Gate.SetResult($null)
+            $written = [System.Threading.Tasks.Task]::WaitAny([System.Threading.Tasks.Task[]]@($held.Started.Task.Result), 10000)
+
+            $stopped | Should -BeTrue -Because 'Ctrl+C should not wait for the file being written'
+            $written | Should -Be 0 -Because 'the write should have ended'
+            Get-Content -LiteralPath $existing -Raw | Should -BeExactly 'kept'
+            @(Get-ChildItem -LiteralPath $directory -Force).Name | Should -Be '40-Proposal 11_2026.eml' -Because 'no temporary file is left'
+        } finally {
+            $null = $held.Gate.TrySetResult($null)
+            $held.PowerShell.Dispose()
+        }
+    }
+
+    # Every name the module writes is made safe first; this is what holds whatever else could come
+    It 'writes no file outside its directory, whatever name a file would get' {
+        Mock -ModuleName ElektoImapPosh Get-MessageFileName { '../escaped.eml' }
+        Mock -ModuleName ElektoImapPosh Get-AttachmentFileName { '../escaped.pdf' }
+        $directory = New-TestDirectory 'held/inner'
+        $before = $server.State.Commands.Count
+        $message = Save-ImapMessage open -Uid 40 -Path $directory -ErrorVariable messageErrors -ErrorAction SilentlyContinue
+        $attachment = Save-ImapAttachment open -Uid 40 -Path $directory -ErrorVariable attachmentErrors -ErrorAction SilentlyContinue
+
+        $message | Should -BeNullOrEmpty
+        $messageErrors.Count | Should -Be 1
+        $messageErrors[0].FullyQualifiedErrorId | Should -BeLike 'PathOutsideDirectory,*'
+        "$($messageErrors[0])" | Should -Be "'../escaped.eml' is not the name of a file in '$directory', so the message 40 in the folder 'INBOX' of tester was not saved."
+        $attachment | Should -BeNullOrEmpty
+        $attachmentErrors.Count | Should -Be 1
+        $attachmentErrors[0].FullyQualifiedErrorId | Should -BeLike 'PathOutsideDirectory,*'
+        Get-CommandSince $before | Where-Object { $_ -like '*BODY.PEEK`[`]*' -or $_ -like '*BODY.PEEK`[2`]*' } | Should -BeNullOrEmpty
+        @(Get-ChildItem -LiteralPath (Join-Path $TestDrive 'held') -Force).Name | Should -Be 'inner'
+    }
+
+    It 'refuses a Message-ID of nothing but angle brackets, and a directory that is not there, before anything' {
+        $before = $server.State.Commands.Count
+
+        { Save-ImapMessage open -MessageId '<>' -Path $TestDrive } | Should -Throw "Cannot validate argument on parameter 'MessageId'*"
+        { Save-ImapMessage open -Uid 40 -Path (Join-Path $TestDrive 'missing') } | Should -Throw 'There is no directory*'
+        { Save-ImapMessage open -Uid 40 -Path Env:\ } | Should -Throw "'Env:\' is not a directory of the file system, so no message can be saved in it."
         $server.State.Commands.Count | Should -Be $before
     }
 }

@@ -148,6 +148,17 @@ Describe 'Special uses' {
         $completed | Should -Be 'Inbox', 'Important'
     }
 
+    # Each command registers its parameters with the completer: one left out completes file names
+    It 'completes the special uses for -Folder of every command that takes one' {
+        $commands = @(Get-Command -Module ElektoImapPosh | Where-Object { $_.Parameters.ContainsKey('Folder') }).Name
+
+        $commands.Count | Should -BeGreaterThan 4
+        foreach ($command in $commands) {
+            $line = "$command -Folder Se"
+            @((TabExpansion2 -inputScript $line -cursorColumn $line.Length).CompletionMatches.CompletionText) | Should -Be 'Sent' -Because "-Folder of $command should complete"
+        }
+    }
+
     # As a name from the pipeline is taken: the full name of a folder the server listed
     It 'takes a name as the exact full name of a folder with -Literal, neither a special use nor a pattern' {
         Select-Folder 'Sent' -Literal | Should -Be 'Sent'
@@ -157,13 +168,16 @@ Describe 'Special uses' {
     }
 
     # Each message of a pipeline comes with the name of its folder, and a mailbox may have hundreds of labels: the folder
-    # is found once for each name. Compared with itself on few folders, so that a slow machine does not fail it.
+    # is found once for each name. Compared with itself on few folders, so that a slow machine does not fail it. The one
+    # search of the name comes before the measure: on a slow runner it took 40 ms of 1000 folders, which made the ratio
+    # fail (5.4 on the CI of 9f9418d), while the messages that follow it, what this measures, take no longer.
     It 'finds the folder of messages from the pipeline in a time that does not grow with the number of folders' {
         $milliseconds = InModuleScope ElektoImapPosh {
             foreach ($count in 10, 1000) {
                 $folders = @(foreach ($i in 1..$count) { [PSCustomObject]@{ FullName = "Label $i"; Attributes = [MailKit.FolderAttributes]'None' } })
                 $session = @{ Settings = @{ User = 'me@gmail.com' }; Folders = $folders }
-                (Measure-Command { foreach ($i in 1..300) { $null = Find-ImapFolder $null $session "Label $count" -Literal } }).TotalMilliseconds
+                $null = Find-ImapFolder $null $session "Label $count" -Literal
+                (Measure-Command { foreach ($i in 1..1000) { $null = Find-ImapFolder $null $session "Label $count" -Literal } }).TotalMilliseconds
             }
         }
 
