@@ -94,6 +94,8 @@ Describe 'The policy commands' {
         @{ Setting = 'DenyAttachmentTypes'; Value = '.exe'; Message = "*-DenyAttachmentTypes must be a list of MIME types or file names, such as application/pdf, image/* or *.pdf, and '.exe' would match only a file of that very name: for the extension, write *.exe." }
         @{ Setting = 'AllowAttachmentTypes'; Value = 'pdf'; Message = "*'pdf' would match only a file of that very name: for the extension, write *.pdf." }
         @{ Setting = 'DenyFolders'; Value = 'Finance/[2026'; Message = '*-DenyFolders has ''Finance/`[2026'', which is not a valid wildcard pattern.' }
+        # A range reversed only once composed, as it would be matched (U+232A is U+3009 composed)
+        @{ Setting = 'DenyAttachmentTypes'; Value = '*[' + [char]0x232A + '-' + [char]0x3008 + ']*'; Message = '*-DenyAttachmentTypes has *, which is not a valid wildcard pattern.' }
         @{ Setting = 'DenyFolders'; Value = 'Junk', ''; Message = '*-DenyFolders must be a non-empty list of folder names or patterns, with no empty entries*' }
         @{ Setting = 'TrustAuthenticationResults'; Value = 'mx.google.com; dmarc=pass'; Message = '*-TrustAuthenticationResults must be the name of the receiving server*such as mx.google.com*' }
     ) {

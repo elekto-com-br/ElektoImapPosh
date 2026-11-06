@@ -22,7 +22,9 @@ function Test-Wildcard([string]$Text, [string]$Pattern) {
 
 # Throws when a pattern is not a valid wildcard pattern ("report[12"), so that it is refused where it is given rather
 # than where it is applied, with the message of PowerShell itself: -like only reads the pattern here, matching nothing,
-# where a method of .NET would wrap the message ('Exception calling "IsMatch"...', measured).
+# where a method of .NET would wrap the message ('Exception calling "IsMatch"...', measured). Checked composed, as
+# Test-Wildcard matches it: composing changes some characters (U+232A is U+3009 composed), so a range taken here as
+# written failed once composed when applied, and another refused here would have matched (Copilot on #14, measured).
 function Assert-WildcardPattern([string]$Pattern) {
-    $null = '' -like $Pattern
+    $null = '' -like (ConvertTo-ComposedText $Pattern)
 }
