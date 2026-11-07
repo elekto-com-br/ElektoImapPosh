@@ -77,6 +77,25 @@ Describe 'Matching a pattern' {
         $same | Should -Be $true, $true, $false, $false, $false
     }
 
+    # The results of a receiving server name the domain whose DMARC record it applied, a parent of the sender's on Gmail
+    It 'tells a domain within another, alike in every culture and form, from one that only ends as it does' {
+        $within = Invoke-InCulture 'tr-TR' {
+            InModuleScope ElektoImapPosh {
+                Test-WithinDomain 'EMAIL.CLIENT.EXAMPLE' 'client.example'
+                Test-WithinDomain 'client.example' 'CLIENT.EXAMPLE'
+                Test-WithinDomain "news.relat`u{F3}rio.example" "relato`u{301}rio.example"
+                Test-WithinDomain "news.relato`u{301}rio.example" "relat`u{F3}rio.example"
+                Test-WithinDomain 'evilclient.example' 'client.example'
+                Test-WithinDomain 'client.example' 'news.client.example'
+                Test-WithinDomain "news.cli`u{200B}ent.example" 'client.example'
+                Test-WithinDomain 'client.example' ''
+                Test-WithinDomain '' ''
+            }
+        }
+
+        $within | Should -Be $true, $true, $true, $true, $false, $false, $false, $false, $false
+    }
+
     It 'refuses a pattern that is not valid with the message of PowerShell, and takes one that is' {
         { InModuleScope ElektoImapPosh { Assert-WildcardPattern 'report[12' } } | Should -Throw -ExpectedMessage 'The specified wildcard character pattern is not valid: report`[12'
         { InModuleScope ElektoImapPosh { Assert-WildcardPattern 'report[12]' } } | Should -Not -Throw

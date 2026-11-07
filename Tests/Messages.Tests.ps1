@@ -44,6 +44,8 @@ Describe 'What a policy withholds' {
             New-Folder 'Clients'
             New-Folder '[Gmail]/All Mail' 'HasNoChildren, All'
             New-Folder '[Gmail]/Sent Mail' 'HasNoChildren, Sent'
+            # Not marked Important, as Gmail lists it (measured on a real Gmail)
+            New-Folder '[Gmail]/Important'
         )
         $pass = 'mx.google.com; dkim=pass header.i=@client.example; spf=pass smtp.mailfrom=client@client.example; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=client.example'
 
@@ -104,6 +106,75 @@ Describe 'What a policy withholds' {
 
     It 'lets through a message whose labels name no denied folder' {
         Get-Reason @{ DenyFolders = @('Finance/*') } '[Gmail]/All Mail' (New-Summary -Labels '\Inbox', 'Clients', 'Sent') | Should -BeNullOrEmpty
+    }
+
+    # Gmail marks no folder \Important, so the label stands for no folder: the special use named is what withholds it
+    It 'withholds the messages with the label \Important when DenyFolders names Important, though no folder is marked so' {
+        $important = New-Summary -AuthenticationResults $pass -Labels '\Inbox', '\Important'
+        $reason = "It has the label '\Important', and Important is in DenyFolders of the policy 'agent'."
+
+        Get-Reason @{ DenyFolders = @('Important') } '[Gmail]/All Mail' $important | Should -Be $reason
+        Get-Reason @{ DenyFolders = @('important') } 'INBOX' $important | Should -Be $reason -Because 'a special use is named ignoring case'
+        Get-Reason @{ DenyFolders = @('Important') } '[Gmail]/All Mail' (New-Summary -AuthenticationResults $pass -Labels '\Inbox') | Should -BeNullOrEmpty
+    }
+
+    # Read from the folder of \Important, Gmail gives its messages no such label, as it leaves out the label of any folder
+    # open (measured): in a folder without a special use, the messages with it are found by a search, once a folder
+    It 'searches the label that no folder is marked with, once in each folder without a special use, and withholds what it cannot tell' {
+        $result = InModuleScope ElektoImapPosh -Parameters @{ Folders = $gmail } {
+            param($Folders)
+            # Folders that answer a search with the UIDs given, or fail, and count the searches
+            function New-SearchedFolder([string]$FullName, [System.Threading.Tasks.Task]$Answer) {
+                $folder = [PSCustomObject]@{ FullName = $FullName; Attributes = [MailKit.FolderAttributes]'HasNoChildren'; Searches = 0; Answer = $Answer }
+                $folder | Add-Member ScriptMethod SearchAsync { param($Query, $Token) $this.Searches++; $this.Answer }
+                $folder
+            }
+            function Get-Answer([uint32[]]$Uids) {
+                $list = [System.Collections.Generic.List[MailKit.UniqueId]]::new()
+                foreach ($uid in $Uids) { $list.Add([MailKit.UniqueId]::new($uid)) }
+                [System.Threading.Tasks.Task]::FromResult([System.Collections.Generic.IList[MailKit.UniqueId]]$list)
+            }
+            function New-Message([uint32]$Uid) {
+                [PSCustomObject]@{ UniqueId = [MailKit.UniqueId]::new($Uid); GMailLabels = @(); Envelope = [MailKit.Envelope]::new(); Headers = [MimeKit.HeaderList]::new(); Size = 1000; InternalDate = [DateTimeOffset]::Now }
+            }
+            function New-Session([MailKit.Net.Imap.ImapCapabilities]$Capabilities, $Mailbox) {
+                @{ Settings = @{ Policy = @{ Name = 'agent'; DenyFolders = @('Important', 'Sent') } }; Folders = $Mailbox; Client = [PSCustomObject]@{ Capabilities = $Capabilities } }
+            }
+            $important = New-SearchedFolder '[Gmail]/Important' (Get-Answer 7)
+            $empty = New-SearchedFolder 'Clients' (Get-Answer @())
+            $broken = New-SearchedFolder 'Finance/Cards' ([System.Threading.Tasks.Task]::FromException[System.Collections.Generic.IList[MailKit.UniqueId]]([Exception]::new('The server said no.')))
+            $mailbox = @($Folders | Where-Object FullName -NotIn '[Gmail]/Important', 'Clients', 'Finance/Cards') + $important, $empty, $broken
+            $gmail = New-Session 'GMailExt1' $mailbox
+            $plain = New-Session 'None' $mailbox
+            $allMail = $mailbox | Where-Object FullName -EQ '[Gmail]/All Mail'
+
+            [PSCustomObject]@{
+                Labelled = Get-WithheldReason $gmail $important (New-Message 7)
+                Other    = Get-WithheldReason $gmail $important (New-Message 8)
+                Searches = $important.Searches
+                Empty    = Get-WithheldReason $gmail $empty (New-Message 7)
+                Broken   = Get-WithheldReason $gmail $broken (New-Message 7)
+                AllMail  = Get-WithheldReason $gmail $allMail (New-Message 7)
+                Plain    = Get-WithheldReason $plain $important (New-Message 7)
+                After    = $important.Searches
+            }
+        }
+
+        $result.Labelled | Should -Be "It has the label '\Important', and Important is in DenyFolders of the policy 'agent'."
+        $result.Other | Should -BeNullOrEmpty
+        $result.Searches | Should -Be 1 -Because 'the label is searched once in a folder, and only \Important, whose use no folder is marked with'
+        $result.Empty | Should -BeNullOrEmpty
+        $result.Broken | Should -Be "It could not be told whether it has the label '\Important', and Important is in DenyFolders of the policy 'agent'."
+        $result.AllMail | Should -BeNullOrEmpty -Because 'a folder with a special use gives every label of its messages, and is not searched'
+        $result.Plain | Should -BeNullOrEmpty -Because 'a server without labels is not searched for one'
+        $result.After | Should -Be 1
+    }
+
+    It 'withholds by the name of the folder of \Important only what is read from that folder' {
+        $important = New-Summary -AuthenticationResults $pass -Labels '\Inbox', '\Important'
+
+        Get-Reason @{ DenyFolders = @('[Gmail]/Important') } '[Gmail]/Important' $important | Should -Be "The folder '[Gmail]/Important' is in DenyFolders of the policy 'agent'."
+        Get-Reason @{ DenyFolders = @('[Gmail]/Important') } '[Gmail]/All Mail' $important | Should -BeNullOrEmpty -Because 'nothing tells that the label stands for that folder'
     }
 
     It 'withholds a message received before the days of MaxAgeDays' {
@@ -174,6 +245,8 @@ Describe 'What a policy withholds' {
         @{ Case = 'the topmost is from another server'; From = 'client@client.example'; Results = @('mx.other.example; dmarc=pass header.from=client.example') }
         @{ Case = 'the topmost has dmarc=fail, and a forged one below has pass'; From = 'client@client.example'; Results = @('mx.google.com; dmarc=fail header.from=client.example', 'mx.google.com; dmarc=pass header.from=client.example') }
         @{ Case = 'DMARC passed for another domain'; From = 'client@client.example'; Results = @('mx.google.com; dmarc=pass header.from=other.example') }
+        @{ Case = 'DMARC passed for a subdomain of the domain'; From = 'client@client.example'; Results = @('mx.google.com; dmarc=pass header.from=news.client.example') }
+        @{ Case = 'DMARC passed for a domain that the domain only ends as'; From = 'evil@evilclient.example'; Results = @('mx.google.com; dmarc=pass header.from=client.example') }
         @{ Case = 'only DKIM passed, for another domain'; From = 'client@client.example'; Results = @('mx.google.com; dkim=pass header.i=@other.example; spf=pass smtp.mailfrom=client.example') }
         @{ Case = 'DKIM passed for the domain, but DMARC failed'; From = 'client@client.example'; Results = @('mx.google.com; dkim=pass header.i=@client.example; dmarc=fail header.from=client.example') }
         @{ Case = 'the From has two senders'; From = 'client@client.example, other@client.example'; Results = @('mx.google.com; dmarc=pass header.from=client.example') }
@@ -182,6 +255,15 @@ Describe 'What a policy withholds' {
         $summary = New-Summary $From -AuthenticationResults $Results
 
         Get-Reason $trusted -Summary $summary | Should -Be "The sender is not authenticated by mx.google.com (no DMARC pass, nor a DKIM signature, for the domain of the From), and AllowReadFrom of the policy 'agent' passes only authenticated senders."
+    }
+
+    # Gmail names the domain whose DMARC record it applied: header.from=claude.com for a sender at email.claude.com
+    # (measured on a real Gmail)
+    It 'takes as authenticated a sender of a subdomain when DMARC passed for a parent of it, as Gmail writes it' {
+        $news = New-Summary 'Client News <news@email.client.example>' -AuthenticationResults 'mx.google.com; dkim=pass header.i=@email.client.example header.s=s1; spf=pass smtp.mailfrom=bounce@email.client.example; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=client.example'
+
+        Get-Reason @{ AllowReadFrom = @('*@*.client.example'); TrustAuthenticationResults = 'mx.google.com' } -Summary $news | Should -BeNullOrEmpty
+        Get-Reason $trusted -Summary $news | Should -Be "The sender news@email.client.example is not in AllowReadFrom of the policy 'agent'." -Because 'the list names the addresses it passes'
     }
 
     # As Gmail writes it for a message that a Google Group of the same domain relays: no DMARC result at all
@@ -326,6 +408,15 @@ Describe 'What a policy withholds' {
 
             $reason | Should -Not -BeNullOrEmpty
             $reason | Should -BeLike "* Its X-Original-From is not taken: $Why."
+        }
+
+        # As header.from, the domain that DMARC passed for may be a parent of the sender's (Test-DomainAuthenticated)
+        It 'takes the sender behind the group at a subdomain of the domain the ARC result names, and not at one that only ends as it' {
+            $policy = @{ AllowReadFrom = @('*@*.client.example', '*@evilclient.example'); TrustAuthenticationResults = 'mx.google.com'; UseXOriginalFrom = $true }
+
+            Get-Reason $policy -Summary (New-Summary $group -AuthenticationResults $relayed -OriginalFrom 'Client <client@mail.client.example>') -User $mailbox | Should -BeNullOrEmpty
+            Get-Reason $policy -Summary (New-Summary $group -AuthenticationResults $relayed -OriginalFrom 'Evil <evil@evilclient.example>') -User $mailbox |
+                Should -BeLike '* Its X-Original-From is not taken: the ARC result of mx.google.com does not say that DMARC passed for evilclient.example, the domain of its X-Original-From.'
         }
 
         # The names in Authentication-Results are read ignoring case (RFC 8601)
@@ -664,14 +755,17 @@ Describe 'Get-ImapMessage on Gmail' {
         $now = [DateTimeOffset]::Now
         $server = Start-FakeGmail @(
             @{ Uid = 1; ChangedElsewhere = $true; Text = 'Your statement is attached: total R$ 1.234,56.'; Folders = 'INBOX', '[Gmail]/All Mail', 'Finance/Bank'; Labels = '\Inbox', 'Finance/Bank'; ThreadId = 111; From = 'Bank <alerts@bank.example>'; Subject = 'Statement'; Date = $now.AddHours(-4); Size = 5000; Attachments = @(@{ Name = 'statement.pdf'; Type = 'application/pdf'; Data = "%PDF-1.4`n"; Octets = 1000 }); AuthenticationResults = 'mx.google.com; dmarc=pass header.from=bank.example'; Raw = 'has:attachment', 'from:bank.example' }
-            @{ Uid = 2; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = '\Inbox', '\Important'; ThreadId = 222; From = 'Client <client@client.example>'; Subject = 'Proposal'; Date = $now.AddHours(-3); Size = 3000; Seen = $true; AuthenticationResults = 'mx.google.com; dmarc=pass header.from=client.example' }
+            @{ Uid = 2; Folders = 'INBOX', '[Gmail]/All Mail', '[Gmail]/Important'; Labels = '\Inbox', '\Important'; ThreadId = 222; From = 'Client <client@client.example>'; Subject = 'Proposal'; Date = $now.AddHours(-3); Size = 3000; Seen = $true; AuthenticationResults = 'mx.google.com; dmarc=pass header.from=client.example' }
             @{ Uid = 3; Folders = '[Gmail]/All Mail', '[Gmail]/Sent Mail'; Labels = '\Sent'; ThreadId = 222; From = 'Me <me@gmail.com>'; Subject = 'Re: Proposal'; Date = $now.AddHours(-2); Size = 2000; Seen = $true; Raw = 'in:sent proposal' }
             @{ Uid = 4; Folders = '[Gmail]/All Mail', 'Sent'; Labels = @('Sent'); ThreadId = 444; From = 'Me <me@gmail.com>'; Subject = 'Labelled Sent'; Date = $now.AddHours(-1); Size = 1000; Text = "Fine `u{1F600} thanks" }
+            # Only in the folder of important messages, so that the others list the same
+            @{ Uid = 5; Folders = '[Gmail]/Important'; Labels = @('\Important'); ThreadId = 555; From = 'Airline <news@airline.example>'; Subject = 'Flight'; Date = $now.AddMinutes(-30); Size = 1000 }
         )
-        $passwords = Set-TestAccount 'gmail' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; agent = @{ Policy = 'agent' }; recent = @{ Policy = 'recent' }; one = @{ Policy = 'one' } } -Policies @{
-            agent  = @{ DenyFolders = @('Finance/*'); AllowReadFrom = @('*@client.example', 'me@gmail.com'); TrustAuthenticationResults = 'mx.google.com' }
-            recent = @{ MaxAgeDays = 30 }
-            one    = @{ MaxMessages = 1 }
+        $passwords = Set-TestAccount 'gmail' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; agent = @{ Policy = 'agent' }; recent = @{ Policy = 'recent' }; one = @{ Policy = 'one' }; important = @{ Policy = 'important' } } -Policies @{
+            agent     = @{ DenyFolders = @('Finance/*'); AllowReadFrom = @('*@client.example', 'me@gmail.com'); TrustAuthenticationResults = 'mx.google.com' }
+            recent    = @{ MaxAgeDays = 30 }
+            one       = @{ MaxMessages = 1 }
+            important = @{ DenyFolders = @('Important') }
         }
 
         # The SINCE of the last search the server got, as a date
@@ -723,6 +817,29 @@ Describe 'Get-ImapMessage on Gmail' {
         (Get-ImapMessage agent | Where-Object Subject -EQ 'Statement').Withheld | Should -Be $denied
         (Get-ImapMessage agent -Folder All | Where-Object Subject -EQ 'Statement').Withheld | Should -Be $denied
         (Get-ImapMessage agent -Folder 'Finance/Bank').Withheld | Should -Be "The folder 'Finance/Bank' is in DenyFolders of the policy 'agent'."
+    }
+
+    # Gmail lists its folder of \Important without that mark, and leaves the label of the folder open out of the labels
+    # of its messages (both measured), and so does the fake
+    It 'withholds the messages with the label \Important, from every folder, when DenyFolders names Important' {
+        $reason = "It has the label '\Important', and Important is in DenyFolders of the policy 'important'."
+        function Get-LabelSearch([int]$Since) { @($server.State.Commands.ToArray() | Select-Object -Skip $Since | Where-Object { $_ -like '* UID SEARCH *X-GM-LABELS*' }) }
+
+        $before = $server.State.Commands.Count
+        $all = Get-ImapMessage important -Folder All
+        ($all | Where-Object Subject -EQ 'Proposal').Withheld | Should -Be $reason
+        @($all | Where-Object Withheld).Count | Should -Be 1
+        Get-LabelSearch $before | Should -BeNullOrEmpty -Because 'All Mail gives every label of its messages'
+
+        $before = $server.State.Commands.Count
+        $important = Get-ImapMessage important -Folder '[Gmail]/Important'
+        $important.Subject | Should -Be 'Flight', 'Proposal'
+        @($important.Labels | Where-Object { $_ -eq '\Important' }).Count | Should -Be 0 -Because 'Gmail leaves the label of the folder open out'
+        $important.Withheld | Should -Be $reason, $reason
+        @(Get-LabelSearch $before).Count | Should -Be 1 -Because 'the label is searched once in the folder'
+
+        Get-ImapMessage important -Folder Important -ErrorVariable errors -ErrorAction SilentlyContinue | Should -BeNullOrEmpty -Because 'no folder is marked so'
+        $errors.FullyQualifiedErrorId | Should -BeLike 'FolderNotFound,*'
     }
 
     It 'takes a folder from the pipeline by its exact name, so a label "Sent" stays that label' {
