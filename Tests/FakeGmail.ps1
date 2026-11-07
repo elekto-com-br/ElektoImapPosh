@@ -19,8 +19,9 @@
 # carries), Raw (the X-GM-RAW
 # searches it matches), and ChangedElsewhere: as if another client had changed its flags, a FETCH of them comes,
 # unasked, with every UID FETCH that does not ask for it. A search takes the messages of the folder that match each of
-# its terms it knows: X-GM-RAW, X-GM-THRID (the ThreadId, or the Uid of a message without one, as X-GM-THRID gives),
-# HEADER Message-ID (a part of it, ignoring case, as IMAP searches a header) and SINCE; it ignores any other term.
+# its terms it knows: X-GM-RAW, X-GM-LABELS, X-GM-THRID (the ThreadId, or the Uid of a message without one, as X-GM-THRID
+# gives), HEADER Message-ID (a part of it, ignoring case, as IMAP searches a header) and SINCE; it ignores any other term.
+# As Gmail, the X-GM-LABELS of a FETCH leave out the label of the folder open (\Inbox in INBOX), which a search still finds.
 
 # The folders of the mailbox, with their attributes: Gmail's in English, and labels of the user, one named Sent
 $script:FakeGmailFolders = [ordered]@{
@@ -29,6 +30,8 @@ $script:FakeGmailFolders = [ordered]@{
     '[Gmail]/All Mail'  = '\All \HasNoChildren'
     '[Gmail]/Sent Mail' = '\HasNoChildren \Sent'
     '[Gmail]/Trash'     = '\HasNoChildren \Trash'
+    # Not marked \Important, as Gmail lists it (measured on a real Gmail, 2026-11-07)
+    '[Gmail]/Important' = '\HasNoChildren'
     'Finance'           = '\HasChildren'
     'Finance/Bank'      = '\HasNoChildren'
     'Sent'              = '\HasNoChildren'
@@ -57,6 +60,18 @@ function Start-FakeGmail([hashtable[]]$Messages) {
             }
             function Get-FolderMessage($Messages, [string]$Folder) {
                 return , @($Messages | Where-Object { $_.Folders -contains $Folder } | Sort-Object { $_.Uid })
+            }
+            # The label that a folder stands for, which Gmail leaves out of the X-GM-LABELS of the messages read from it
+            # (measured: \Inbox in INBOX, a label in its folder, \Important in the folder of important messages)
+            function Get-FolderLabel([string]$Folder) {
+                switch -CaseSensitive ($Folder) {
+                    'INBOX' { return '\Inbox' }
+                    '[Gmail]/Sent Mail' { return '\Sent' }
+                    '[Gmail]/Trash' { return '\Trash' }
+                    '[Gmail]/Important' { return '\Important' }
+                    '[Gmail]/All Mail' { return $null }
+                    default { return $Folder }
+                }
             }
             # The Message-ID of a message, with its angle brackets, as its header and its envelope give it
             function Get-MessageId($Message) {
@@ -155,7 +170,7 @@ function Start-FakeGmail([hashtable[]]$Messages) {
             }
 
             # The items asked for, and only those, as Gmail answers; literals counted in the bytes of UTF-8
-            function Write-Fetch($Writer, [int]$Sequence, $Message, [string]$Items) {
+            function Write-Fetch($Writer, [int]$Sequence, $Message, [string]$Items, [string]$Folder) {
                 $culture = [Globalization.CultureInfo]::InvariantCulture
                 $date = ([DateTimeOffset]$Message.Date).ToUniversalTime()
                 $to = if ($Message.To) { $Message.To } else { 'Me <me@gmail.com>' }
@@ -180,7 +195,8 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                     $parts = foreach ($attachment in $attachments) { Format-PartStructure $attachment }
                     "($text$($parts -join '') `"MIXED`" (`"BOUNDARY`" `"b1`") NIL NIL NIL)"
                 }
-                $labels = @($Message.Labels | ForEach-Object { Format-Quoted $_ }) -join ' '
+                $own = Get-FolderLabel $Folder
+                $labels = @($Message.Labels | Where-Object { $_ -cne $own } | ForEach-Object { Format-Quoted $_ }) -join ' '
                 $thread = Get-ThreadId $Message
                 # The headers asked for by name, each as many times as the message has it, the topmost first
                 $header = ''
@@ -261,6 +277,11 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                                     $raw = if ($null -ne $Matches[1]) { $Matches[1] -replace '\\(.)', '$1' } else { $Matches[2] }
                                     $found = @($found | Where-Object { $_.Raw -contains $raw })
                                 }
+                                # Every label of the message, that of the folder open too, as Gmail searches them (measured)
+                                if ($arguments -match 'X-GM-LABELS (?:"((?:[^"\\]|\\.)*)"|(\S+))') {
+                                    $label = if ($null -ne $Matches[1]) { $Matches[1] -replace '\\(.)', '$1' } else { $Matches[2] }
+                                    $found = @($found | Where-Object { $_.Labels -contains $label })
+                                }
                                 if ($arguments -match 'X-GM-THRID (\d+)') {
                                     $thread = [uint64]$Matches[1]
                                     $found = @($found | Where-Object { (Get-ThreadId $_) -eq $thread })
@@ -280,7 +301,7 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                                 $set, $items = $arguments -split ' ', 2
                                 foreach ($uid in (Expand-UidSet $set $inFolder)) {
                                     $index = [array]::IndexOf(@($inFolder | ForEach-Object { $_.Uid }), $uid)
-                                    Write-Fetch $writer ($index + 1) $inFolder[$index] $items
+                                    Write-Fetch $writer ($index + 1) $inFolder[$index] $items $selected
                                 }
                                 $asked = Expand-UidSet $set $inFolder
                                 for ($index = 0; $index -lt $inFolder.Count; $index++) {

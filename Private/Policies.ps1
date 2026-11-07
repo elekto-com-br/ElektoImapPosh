@@ -157,16 +157,43 @@ function Get-LabelFolder($Places, [string]$Label) {
     return , [string[]]@()
 }
 
+# The UIDs of the messages of an open folder that have a label, in a HashSet, found by a search (SEARCH X-GM-LABELS)
+# once for each folder and label in the session; or $null when the search failed, and the policy withholds what it
+# cannot tell. Gmail finds the label of the folder open too, which it leaves out of the labels a FETCH gives (measured).
+function Get-LabelledUidSet($Session, $Folder, [string]$Label) {
+    if (-not $Session.ContainsKey('LabelledUids')) { $Session.LabelledUids = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal) }
+    $key = "$($Folder.FullName)`n$Label"
+    $found = $null
+    if (-not $Session.LabelledUids.TryGetValue($key, [ref]$found)) {
+        $task = $Folder.SearchAsync([MailKit.Search.SearchQuery]::HasGMailLabel($Label), [System.Threading.CancellationToken]::None)
+        $failure = Wait-ImapTask $task
+        if ($failure) { Write-Verbose "Searching the label $Label in the folder '$($Folder.FullName)': $failure" }
+        else {
+            $found = [System.Collections.Generic.HashSet[uint32]]::new()
+            foreach ($uid in $task.Result) { $null = $found.Add($uid.Id) }
+        }
+        $Session.LabelledUids[$key] = $found
+    }
+    if ($null -eq $found) { return $null }
+    return , $found
+}
+
 # The folders of a session that its policy names, found once in its listing, as sets of full names as it spells them:
 # Denied, those of DenyFolders (as -Folder takes them), and Sent, the sent folder, whose messages are the user's own.
-# With them, for Get-LabelFolder, the full names of the folders by name, ignoring case, and by special use.
+# With them, for Get-LabelFolder, the full names of the folders by name, ignoring case, and by special use; and
+# DeniedUses, the special uses that DenyFolders names, whether a folder is marked with them or not.
 function Get-PolicyFolderSet($Session) {
     if ($Session.PolicyFolders) { return $Session.PolicyFolders }
     # Without the listing, DenyFolders would find no folder, and withhold nothing
     if (-not $Session.ContainsKey('Folders')) { throw 'The folders of the mailbox must be listed before its policy is applied.' }
     $denied = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    # The special uses that DenyFolders names, for the system labels that stand for them: Gmail marks no folder
+    # \Important in its LIST (measured on a real Gmail, 2026-11-07, which marks the others), so the label \Important
+    # stands for no folder, and only the use named withholds the messages with it, from All Mail and the inbox too
+    $deniedUses = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($pattern in $Session.Settings.Policy.DenyFolders) {
         foreach ($folder in (Select-ImapFolder $Session.Folders $pattern)) { $null = $denied.Add($folder.FullName) }
+        if ($script:SpecialUseNames -contains $pattern) { $null = $deniedUses.Add($pattern) }
     }
     $sent = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($folder in (Select-ImapFolder $Session.Folders 'Sent')) { $null = $sent.Add($folder.FullName) }
@@ -179,7 +206,18 @@ function Get-PolicyFolderSet($Session) {
     foreach ($use in $script:SystemLabels.Values) {
         $bySpecialUse[$use] = [string[]]@(foreach ($folder in (Select-ImapFolder $Session.Folders $use)) { $folder.FullName })
     }
-    $Session.PolicyFolders = @{ Denied = $denied; Sent = $sent; ByName = $byName; BySpecialUse = $bySpecialUse }
+    # The system labels of the uses denied that no folder is marked with (\Important on Gmail): Gmail leaves the label of
+    # the folder open out of the X-GM-LABELS of its messages (measured: \Inbox in INBOX, a label in its folder), so in the
+    # folder of such a label, which nothing here tells apart, the messages are found by a search of the label instead
+    # (Get-LabelledUidSet). Only on a server with labels: another would refuse the search.
+    $unmarked = [System.Collections.Generic.List[string]]::new()
+    if ($Session.Client -and (Test-GMailServer $Session)) {
+        foreach ($label in @($script:SystemLabels.Keys | Sort-Object)) {
+            $use = $script:SystemLabels[$label]
+            if ($deniedUses.Contains($use) -and $bySpecialUse[$use].Count -eq 0) { $unmarked.Add($label) }
+        }
+    }
+    $Session.PolicyFolders = @{ Denied = $denied; DeniedUses = $deniedUses; UnmarkedLabels = $unmarked; Sent = $sent; ByName = $byName; BySpecialUse = $bySpecialUse }
     return $Session.PolicyFolders
 }
 
@@ -199,15 +237,16 @@ function Get-ResultProperty($Result, [string]$Type, [string]$Name) {
     return , [string[]]@($Result.Properties | Where-Object { $_.PropertyType -eq $Type -and $_.Property -eq $Name } | ForEach-Object { $_.Value })
 }
 
-# Whether the results of the trusted server authenticate a domain as the one of the From: DMARC passed for it, when
-# there is a DMARC result; when there is none (Gmail gives none for a message that a Google Group of the same domain
-# relays), a DKIM signature of that very domain passed, which is how DMARC takes an aligned signature (strictly: the
-# same domain, not a parent nor a child of it)
+# Whether the results of the trusted server authenticate a domain as the one of the From: DMARC passed for it, or for
+# a domain it is part of, when there is a DMARC result (Gmail names the domain whose record it applied, so a sender at
+# email.claude.com passes as header.from=claude.com, measured: see Test-WithinDomain); when there is none (Gmail gives
+# none for a message that a Google Group of the same domain relays), a DKIM signature of that very domain passed,
+# which is how DMARC takes an aligned signature (strictly: the same domain, not a parent nor a child of it)
 function Test-DomainAuthenticated($Results, [string]$Domain) {
     if (-not $Results -or -not $Domain) { return $false }
     $dmarc = @($Results.Results | Where-Object { $_.Method -eq 'dmarc' })
     if ($dmarc.Count) {
-        return [bool]@($dmarc | Where-Object { $_.Result -eq 'pass' -and @(Get-ResultProperty $_ 'header' 'from' | Where-Object { Test-SameText $_ $Domain }).Count }).Count
+        return [bool]@($dmarc | Where-Object { $_.Result -eq 'pass' -and @(Get-ResultProperty $_ 'header' 'from' | Where-Object { Test-WithinDomain $Domain $_ }).Count }).Count
     }
     foreach ($result in @($Results.Results | Where-Object { $_.Method -eq 'dkim' -and $_.Result -eq 'pass' })) {
         # The signing domain (header.d), or the domain of the signing identity (header.i), as Gmail writes it
@@ -247,9 +286,11 @@ function Get-RelayedSender($Session, $Summary) {
     $results = Get-TrustedAuthenticationResult $Summary $policy.TrustAuthenticationResults
     if (-not (Test-DomainAuthenticated $results $own)) { return @{ Sender = $null; Why = "the group that relays it is not authenticated" } }
     foreach ($arc in @($results.Results | Where-Object { $_.Method -eq 'arc' -and $_.Result -eq 'pass' })) {
-        # Ignoring case, as the names in Authentication-Results are read (RFC 8601), alike in every culture
+        # Ignoring case, as the names in Authentication-Results are read (RFC 8601), alike in every culture. The domain
+        # it names may be a parent of the sender's, as in header.from (Test-DomainAuthenticated): only seen there, on a
+        # real Gmail, and taken here alike
         $sealed = [regex]::Match([string]$arc.ResultComment, '(?:^|\s)dmarc=pass\s+fromdomain=(\S+)', 'IgnoreCase, CultureInvariant')
-        if ($sealed.Success -and (Test-SameText $sealed.Groups[1].Value $original.Domain)) { return @{ Sender = $original; Why = $null } }
+        if ($sealed.Success -and (Test-WithinDomain $original.Domain $sealed.Groups[1].Value)) { return @{ Sender = $original; Why = $null } }
     }
     return @{ Sender = $null; Why = "the ARC result of $($policy.TrustAuthenticationResults) does not say that DMARC passed for $(Format-ShownText $original.Domain), the domain of its X-Original-From" }
 }
@@ -322,6 +363,17 @@ function Get-WithheldReason($Session, $Folder, $Summary) {
     foreach ($label in $Summary.GMailLabels) {
         foreach ($name in (Get-LabelFolder $places $label)) {
             if ($places.Denied.Contains($name)) { return "It has the label '$label', and the folder '$name' is in DenyFolders $of." }
+        }
+        $use = $script:SystemLabels[$label]
+        if ($use -and $places.DeniedUses.Contains($use)) { return "It has the label '$label', and $use is in DenyFolders $of." }
+    }
+    # In a folder without a special use, which may be that of a label that Gmail leaves out (Get-PolicyFolderSet)
+    if ($places.UnmarkedLabels.Count -and -not (Get-SpecialUse $Folder)) {
+        foreach ($label in $places.UnmarkedLabels) {
+            $use = $script:SystemLabels[$label]
+            $labelled = Get-LabelledUidSet $Session $Folder $label
+            if ($null -eq $labelled) { return "It could not be told whether it has the label '$label', and $use is in DenyFolders $of." }
+            if ($labelled.Contains($Summary.UniqueId.Id)) { return "It has the label '$label', and $use is in DenyFolders $of." }
         }
     }
 

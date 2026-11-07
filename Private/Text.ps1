@@ -31,6 +31,17 @@ function Test-SameText([string]$A, [string]$B) {
     return [string]::Equals((ConvertTo-ComposedText $A), (ConvertTo-ComposedText $B), [StringComparison]::OrdinalIgnoreCase)
 }
 
+# Whether a domain is another, or one of its subdomains, compared as Test-SameText compares them: news.client.example
+# is within client.example, and evilclient.example is not. For the results of the receiving server, which name the
+# domain whose DMARC record it applied: Gmail writes header.from=claude.com for a sender at email.claude.com (measured
+# on a real Gmail, 2026-11-07: every sender of a subdomain, 10 of 300 messages of an inbox).
+function Test-WithinDomain([string]$Domain, [string]$Parent) {
+    $Domain = ConvertTo-ComposedText $Domain
+    $Parent = ConvertTo-ComposedText $Parent
+    if (-not $Domain -or -not $Parent) { return $false }
+    return [string]::Equals($Domain, $Parent, [StringComparison]::OrdinalIgnoreCase) -or $Domain.EndsWith(".$Parent", [StringComparison]::OrdinalIgnoreCase)
+}
+
 # Throws when a pattern is not a valid wildcard pattern ("report[12"), so that it is refused where it is given rather
 # than where it is applied, with the message of PowerShell itself: -like only reads the pattern here, matching nothing,
 # where a method of .NET would wrap the message ('Exception calling "IsMatch"...', measured). Checked composed, as
