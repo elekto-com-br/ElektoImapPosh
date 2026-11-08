@@ -126,7 +126,8 @@ Describe 'What a policy withholds' {
             # Folders that answer a search with the UIDs given, or fail, and count the searches
             function New-SearchedFolder([string]$FullName, [System.Threading.Tasks.Task]$Answer) {
                 $folder = [PSCustomObject]@{ FullName = $FullName; Attributes = [MailKit.FolderAttributes]'HasNoChildren'; Searches = 0; Answer = $Answer }
-                $folder | Add-Member ScriptMethod SearchAsync { param($Query, $Token) $this.Searches++; $this.Answer }
+                # The query and the token come in $args, unread
+                $folder | Add-Member ScriptMethod SearchAsync { $this.Searches++; $this.Answer }
                 $folder
             }
             function Get-Answer([uint32[]]$Uids) {

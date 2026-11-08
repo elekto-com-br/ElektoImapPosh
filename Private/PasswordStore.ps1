@@ -124,6 +124,13 @@ namespace ElektoImapPosh
 '@
 }
 
+# Saving and deleting a password stop the command on any failure ($ErrorActionPreference = 'Stop'). The Credential
+# Manager and the files are reached through .NET, and an exception of .NET ends only its own statement otherwise: the
+# command went on, Set-ImapAccount as if the password were stored, and Remove-ImapAccount took a password that could
+# not be deleted for none stored, and removed its account (#23, measured with another call of .NET that throws, as
+# PowerShell treats them all alike). Reading has no such stop: Get-ImapAccount catches what it throws, and a command
+# that reads, left without the password, connects to nothing.
+
 # The stored password of the account, or $null when none is stored
 function Read-StoredPassword([string]$Account) {
     if ($IsWindows) {
@@ -143,6 +150,7 @@ function Read-StoredPassword([string]$Account) {
 }
 
 function Save-StoredPassword([string]$Account, [string]$User, [string]$Secret) {
+    $ErrorActionPreference = 'Stop'
     if ($IsWindows) {
         Initialize-CredentialManager
         [ElektoImapPosh.CredentialManager]::Write($script:CredentialTargetPrefix + $Account, $User, $Secret)
@@ -166,8 +174,10 @@ function Save-StoredPassword([string]$Account, [string]$User, [string]$Secret) {
     }
 }
 
-# False when no password was stored
+# False when no password was stored. A password that stays is an error that stops the caller, not a password
+# reported as deleted.
 function Clear-StoredPassword([string]$Account) {
+    $ErrorActionPreference = 'Stop'
     if ($IsWindows) {
         Initialize-CredentialManager
         return [ElektoImapPosh.CredentialManager]::Delete($script:CredentialTargetPrefix + $Account)
@@ -175,8 +185,9 @@ function Clear-StoredPassword([string]$Account) {
 
     $path = Get-PasswordFilePath $Account
     if (-not (Test-Path -LiteralPath $path)) { return $false }
-    # A file that stays is an error that stops the caller, not a password reported as deleted
-    Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+    # Deleted by .NET, as the Credential Manager deletes, so that a file that cannot be deleted fails as a credential
+    # does, and the test of one, which runs on Linux and macOS, covers the stop that Windows relies on
+    [IO.File]::Delete($path)
     return $true
 }
 

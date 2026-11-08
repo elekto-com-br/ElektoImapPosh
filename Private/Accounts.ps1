@@ -189,8 +189,12 @@ function Find-PasswordVariableOwner($Names, [string]$Name) {
     return @($Names | Where-Object { (Get-PasswordVariableName $_) -eq $variable })[0]
 }
 
-# Writes the accounts file, with its policies, settings in a fixed order and without the empty ones
+# Writes the accounts file, with its policies, settings in a fixed order and without the empty ones. Any failure stops
+# the caller here, before it stores or deletes a password that would then not match: an exception of .NET, as the
+# rename below may throw, would otherwise end only its own statement, and the command went on as if the file were
+# written (#23, measured on ElektoMailPosh's copy of this code).
 function Write-AccountFile([string]$Default, [System.Collections.IDictionary]$Accounts, [System.Collections.IDictionary]$Policies) {
+    $ErrorActionPreference = 'Stop'
     $path = Get-AccountFilePath
     $data = [ordered]@{}
     if ($Default) { $data.Default = $Default }
@@ -215,8 +219,16 @@ function Write-AccountFile([string]$Default, [System.Collections.IDictionary]$Ac
         }
     }
 
-    # A failure stops the caller here, before it stores or deletes a password that would then not match
     New-Item -ItemType Directory -Path (Split-Path -Path $path) -Force -ErrorAction Stop | Out-Null
+    # When accounts.json is a link, as GNU stow makes one into a dotfiles repository, the file it finally points to is
+    # the one written: the rename below, over the link, would put a regular file in its place, and the file in the
+    # repository would get no more changes, without a word (#22). ResolveLinkTarget throws for a path that does not
+    # exist, and gives $null for one that is no link (both measured). A link to no file never comes here: reading it,
+    # Read-AccountFile stops the command.
+    if (Test-Path -LiteralPath $path) {
+        $target = [IO.File]::ResolveLinkTarget($path, $true)
+        if ($target) { $path = $target.FullName }
+    }
     # Written beside it and then put in its place (a rename, atomic), so a write that fails or is interrupted
     # leaves the previous file whole. Outside Windows, the new file has the mode of the one it replaces from
     # the start, before anything is written: a file the user made owner-only is never readable by others,
