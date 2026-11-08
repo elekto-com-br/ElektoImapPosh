@@ -16,7 +16,7 @@ BeforeAll {
     $savedEnvironment = @{}
     foreach ($name in $variableNames) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
-        [Environment]::SetEnvironmentVariable($name, $null)
+        Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore
     }
     $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config'
 
@@ -95,13 +95,13 @@ BeforeAll {
 
     function Reset-ImapVariables {
         $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config'
-        foreach ($name in 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_NO_TLS', 'IMAP_SKIP_CERTIFICATE_CHECK') { [Environment]::SetEnvironmentVariable($name, $null) }
+        foreach ($name in 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_NO_TLS', 'IMAP_SKIP_CERTIFICATE_CHECK') { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
     }
 }
 
 AfterAll {
     foreach ($entry in $savedEnvironment.GetEnumerator()) {
-        [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value)
+        Set-Item -LiteralPath "env:$($entry.Key)" -Value $entry.Value
     }
     Remove-Module ElektoImapPosh -ErrorAction SilentlyContinue
 }

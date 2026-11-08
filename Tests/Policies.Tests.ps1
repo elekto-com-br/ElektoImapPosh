@@ -12,14 +12,14 @@ BeforeAll {
     $savedEnvironment = @{}
     foreach ($name in $variableNames) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
-        [Environment]::SetEnvironmentVariable($name, $null)
+        Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore
     }
     $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config'
     New-Item -ItemType Directory -Path $env:IMAP_CONFIG_DIR | Out-Null
     $accountsFile = Join-Path $env:IMAP_CONFIG_DIR 'accounts.json'
 
     function Clear-Environment {
-        foreach ($name in $variableNames | Where-Object { $_ -ne 'IMAP_CONFIG_DIR' }) { [Environment]::SetEnvironmentVariable($name, $null) }
+        foreach ($name in $variableNames | Where-Object { $_ -ne 'IMAP_CONFIG_DIR' }) { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
     }
 
     # Resolve-ImapConfiguration as a command calls it, with a stand-in for its $PSCmdlet that keeps the errors
@@ -38,7 +38,7 @@ BeforeAll {
 
 AfterAll {
     foreach ($entry in $savedEnvironment.GetEnumerator()) {
-        [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value)
+        Set-Item -LiteralPath "env:$($entry.Key)" -Value $entry.Value
     }
     Remove-Module ElektoImapPosh -ErrorAction SilentlyContinue
 }

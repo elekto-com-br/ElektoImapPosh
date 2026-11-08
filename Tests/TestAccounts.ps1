@@ -15,7 +15,7 @@ function Set-TestAccount([string]$Folder, [int]$Port, [hashtable]$Accounts, [has
         $file.Accounts[$entry.Key] = $account
         $variable = "IMAP_PASS_$($entry.Key.ToUpperInvariant())"
         if (-not $SavedEnvironment.ContainsKey($variable)) { $SavedEnvironment[$variable] = [Environment]::GetEnvironmentVariable($variable) }
-        [Environment]::SetEnvironmentVariable($variable, 'not-a-password')
+        Set-Item -LiteralPath "env:$variable" -Value 'not-a-password'
     }
     Set-Content -Path (Join-Path $env:IMAP_CONFIG_DIR 'accounts.json') -Value ($file | ConvertTo-Json -Depth 5)
     return @($Accounts.Keys | ForEach-Object { "IMAP_PASS_$($_.ToUpperInvariant())" })

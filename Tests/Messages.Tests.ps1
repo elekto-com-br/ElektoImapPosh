@@ -18,13 +18,13 @@ BeforeAll {
     $savedEnvironment = @{}
     foreach ($name in $variableNames) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
-        [Environment]::SetEnvironmentVariable($name, $null)
+        Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore
     }
 }
 
 AfterAll {
     foreach ($entry in $savedEnvironment.GetEnumerator()) {
-        [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value)
+        Set-Item -LiteralPath "env:$($entry.Key)" -Value $entry.Value
     }
     Remove-Module ElektoImapPosh -ErrorAction SilentlyContinue
 }
@@ -547,7 +547,7 @@ Describe 'Get-ImapMessage against smtp4dev' -Skip:(-not $smtp4devInstalled) {
 
     AfterAll {
         Stop-Smtp4dev $server
-        foreach ($name in $passwords) { [Environment]::SetEnvironmentVariable($name, $null) }
+        foreach ($name in $passwords) { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
         $env:IMAP_CONFIG_DIR = $null
     }
 
@@ -745,7 +745,7 @@ Describe 'Get-ImapMessage against smtp4dev' -Skip:(-not $smtp4devInstalled) {
             (Get-ImapMessage -First 1).Withheld | Should -BeLike "*DenyFolders of the policy 'inbox'."
         } finally {
             $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config'
-            foreach ($name in 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_NO_TLS', 'IMAP_POLICY') { [Environment]::SetEnvironmentVariable($name, $null) }
+            foreach ($name in 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_NO_TLS', 'IMAP_POLICY') { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
         }
     }
 }
@@ -779,7 +779,7 @@ Describe 'Get-ImapMessage on Gmail' {
 
     AfterAll {
         Stop-FakeGmail $server
-        foreach ($name in $passwords) { [Environment]::SetEnvironmentVariable($name, $null) }
+        foreach ($name in $passwords) { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
         $env:IMAP_CONFIG_DIR = $null
     }
 
@@ -968,7 +968,7 @@ Describe 'Get-ImapThread on Gmail' {
 
     AfterAll {
         Stop-FakeGmail $server
-        foreach ($name in $passwords) { [Environment]::SetEnvironmentVariable($name, $null) }
+        foreach ($name in $passwords) { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
         $env:IMAP_CONFIG_DIR = $null
     }
 
@@ -1086,7 +1086,7 @@ Describe 'What the commands return of what a sender writes, on Gmail' {
 
     AfterAll {
         Stop-FakeGmail $server
-        foreach ($name in $passwords) { [Environment]::SetEnvironmentVariable($name, $null) }
+        foreach ($name in $passwords) { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
         $env:IMAP_CONFIG_DIR = $null
     }
 
@@ -1163,7 +1163,7 @@ Describe 'Read-ImapMessage against smtp4dev' -Skip:(-not $smtp4devInstalled) {
 
     AfterAll {
         Stop-Smtp4dev $server
-        foreach ($name in $passwords) { [Environment]::SetEnvironmentVariable($name, $null) }
+        foreach ($name in $passwords) { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
         $env:IMAP_CONFIG_DIR = $null
     }
 
@@ -1268,7 +1268,7 @@ Describe 'Policies on a message a group relays, against smtp4dev' -Skip:(-not $s
 
     AfterAll {
         Stop-Smtp4dev $server
-        foreach ($name in $passwords) { [Environment]::SetEnvironmentVariable($name, $null) }
+        foreach ($name in $passwords) { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
         $env:IMAP_CONFIG_DIR = $null
     }
 

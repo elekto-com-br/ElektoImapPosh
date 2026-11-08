@@ -15,7 +15,7 @@ BeforeAll {
     $savedEnvironment = @{}
     foreach ($name in $variableNames) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
-        [Environment]::SetEnvironmentVariable($name, $null)
+        Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore
     }
 
     # Runs a script in the module with the session of an account, as a command would, and closes it after;
@@ -40,7 +40,7 @@ BeforeAll {
 
 AfterAll {
     foreach ($entry in $savedEnvironment.GetEnumerator()) {
-        [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value)
+        Set-Item -LiteralPath "env:$($entry.Key)" -Value $entry.Value
     }
     Remove-Module ElektoImapPosh -ErrorAction SilentlyContinue
 }
@@ -514,7 +514,7 @@ Describe 'Folders against smtp4dev' -Skip:(-not $smtp4devInstalled) {
             $result.Count | Should -Be 2
         } finally {
             $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config'
-            foreach ($name in 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_NO_TLS') { [Environment]::SetEnvironmentVariable($name, $null) }
+            foreach ($name in 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_NO_TLS') { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
         }
     }
 }
