@@ -23,6 +23,28 @@ BeforeAll {
     $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config'
     New-Item -ItemType Directory -Path $env:IMAP_CONFIG_DIR | Out-Null
     $accountsFile = Join-Path $env:IMAP_CONFIG_DIR 'accounts.json'
+    $manifestPath = Join-Path (Split-Path $PSScriptRoot) 'ElektoImapPosh.psd1'
+
+    # Runs a script in a process of its own, as a user's script runs, and returns its output as text, first a line
+    # that says the module was imported (so that a process that failed before the command does not pass for one that
+    # stopped in it). Pester runs each test inside a try/catch, and within one an exception of .NET stops the command,
+    # where in a script without one it ends only its own statement and the command goes on (#23, measured on
+    # ElektoMailPosh); the XML in which PowerShell takes back the output of a script block stops it too (measured), so
+    # the output comes back as text. The process gets the configuration folder of the tests, and runs nothing without
+    # it: the module would otherwise write the user's own accounts file and passwords.
+    function Invoke-AsUserScript([scriptblock]$Script) {
+        if (-not $env:IMAP_CONFIG_DIR -or -not $env:IMAP_CONFIG_DIR.StartsWith([string]$TestDrive, [StringComparison]::Ordinal)) {
+            throw "IMAP_CONFIG_DIR ('$env:IMAP_CONFIG_DIR') is not in the test folder."
+        }
+        & ([Environment]::ProcessPath) -NoProfile -NonInteractive -OutputFormat text -Command {
+            param($Manifest, $Config, $Script)
+            if (-not $Config) { throw 'No configuration folder for the test.' }
+            $env:IMAP_CONFIG_DIR = $Config
+            $module = Import-Module $Manifest -PassThru
+            "imported $($module.Name)"
+            & ([scriptblock]::Create($Script)) $module
+        } -args $manifestPath, $env:IMAP_CONFIG_DIR, "$Script" 2>$null
+    }
 
     # Resolve-ImapConfiguration as a command calls it, with a stand-in for its $PSCmdlet; the error it
     # reports is thrown here, for Should -Throw
@@ -443,6 +465,28 @@ Describe 'Keeping the accounts file whole' {
         @(Get-ChildItem -Path $env:IMAP_CONFIG_DIR -Filter '*.tmp') | Should -BeNullOrEmpty
     }
 
+    # The rename throws an exception of .NET, as on Windows while another program has the file open, which ended only
+    # its own statement: Set-ImapAccount went on to store the password of an account it had not written (#23)
+    It 'stops the command when the new file cannot be put in its place' {
+        # A folder where accounts.json goes, which the rename cannot replace, on any platform
+        Remove-Item -LiteralPath $accountsFile -Force
+        New-Item -ItemType Directory -Path $accountsFile | Out-Null
+        try {
+            $output = Invoke-AsUserScript {
+                param($Module)
+                # A password store that leaves a mark, and touches no real one
+                & $Module { function script:Save-StoredPassword { New-Item -ItemType File -Path (Join-Path $env:IMAP_CONFIG_DIR 'stored') | Out-Null } }
+                Set-ImapAccount -Name home -Server imap.example.net -User me@example.net -Password ([Net.NetworkCredential]::new('', 'not-a-password').SecurePassword)
+            }
+
+            $output | Should -Contain 'imported ElektoImapPosh'
+            Join-Path $env:IMAP_CONFIG_DIR 'stored' | Should -Not -Exist -Because 'Set-ImapAccount stops before it stores the password of an account it did not write'
+            @(Get-ChildItem -Path $env:IMAP_CONFIG_DIR -Filter '*.tmp') | Should -BeNullOrEmpty
+        } finally {
+            Remove-Item -LiteralPath $accountsFile -Recurse -Force
+        }
+    }
+
     It 'keeps an account whose password could not be deleted' {
         Mock -ModuleName ElektoImapPosh Clear-StoredPassword { throw 'Access to the password is denied.' }
 
@@ -452,25 +496,49 @@ Describe 'Keeping the accounts file whole' {
     }
 }
 
-# The real password file, under the test folder (so not on Windows, where the store is the Credential Manager),
-# in a folder where it cannot be deleted (so not as root)
-Describe 'A password file that cannot be deleted' -Skip:($IsWindows -or $isRoot) {
+# The real password files, under the test folder (so not on Windows, where the store is the Credential Manager). The
+# commands run in a process of their own (Invoke-AsUserScript), where a failure of .NET does what it does in a user's
+# script.
+Describe 'A password file that cannot be written or deleted' -Skip:$IsWindows {
     BeforeAll {
-        Set-Content -Path $accountsFile -Value '{ "Accounts": { "work": { "Server": "imap.example.com", "User": "me@example.com" } } }'
         $env:IMAP_PASS_WORK = $null
+        $secrets = Join-Path $env:IMAP_CONFIG_DIR 'secrets'
     }
 
-    It 'is reported, and its account kept' {
+    BeforeEach {
+        Set-Content -Path $accountsFile -Value '{ "Accounts": { "work": { "Server": "imap.example.com", "User": "me@example.com" } } }'
+    }
+
+    # Written through .NET, whose exceptions ended only their own statement: Set-ImapAccount went on as if stored (#23)
+    It 'stops Set-ImapAccount when it cannot be written, and leaves the account without a password' {
+        # A folder where the password file goes
+        $folder = New-Item -ItemType Directory -Path (Join-Path $secrets 'work') -Force
+        try {
+            $output = Invoke-AsUserScript { Set-ImapAccount -Name work -Password ([Net.NetworkCredential]::new('', 'not-a-password').SecurePassword) -Verbose 4>&1 }
+
+            $output -join "`n" | Should -BeLike "*Account 'work' saved*" -Because 'the account is written before its password'
+            $output -join "`n" | Should -Not -BeLike "*Password of account 'work' stored*" -Because 'Set-ImapAccount stops, rather than report the password stored'
+            (Get-ImapAccount work -WarningAction SilentlyContinue).PasswordSource | Should -Be 'Missing'
+        } finally {
+            # Save-StoredPassword gives what is there the mode of a password file, which a folder cannot be emptied in
+            [IO.File]::SetUnixFileMode($folder.FullName, 'UserRead, UserWrite, UserExecute')
+            Remove-Item -LiteralPath $folder.FullName -Recurse -Force
+        }
+    }
+
+    # In a folder where it cannot be deleted (so not as root). It is deleted by .NET, as a credential of Windows is, so
+    # this checks the stop that the Credential Manager relies on too (#23).
+    It 'is reported when it cannot be deleted, and its account kept' -Skip:$isRoot {
         Set-ImapAccount -Name work -Password ([Net.NetworkCredential]::new('', 'not-a-password').SecurePassword)
-        $secrets = Join-Path $env:IMAP_CONFIG_DIR 'secrets'
         [IO.File]::SetUnixFileMode($secrets, 'UserRead, UserExecute')
         try {
-            { Remove-ImapAccount work } | Should -Throw
+            $output = Invoke-AsUserScript { Remove-ImapAccount work }
         } finally {
             [IO.File]::SetUnixFileMode($secrets, 'UserRead, UserWrite, UserExecute')
         }
 
-        (Get-ImapAccount).Name | Should -Be 'work'
+        $output | Should -Contain 'imported ElektoImapPosh'
+        (Get-ImapAccount).Name | Should -Be 'work' -Because 'Remove-ImapAccount stops before it removes the account whose password stays'
         Join-Path $secrets 'work' | Should -Exist
         Remove-ImapAccount work
         Join-Path $secrets 'work' | Should -Not -Exist
@@ -499,6 +567,51 @@ Describe 'The mode of the accounts file' -Skip:$IsWindows {
         $seen.Mode | Should -Be $ownerOnly
         [IO.File]::GetUnixFileMode($accountsFile) | Should -Be $ownerOnly
         (Get-ImapAccount work).Port | Should -Be 143
+    }
+}
+
+# GNU stow links each file of a dotfiles repository into place, so accounts.json may be a link, which the rename of a
+# new file over it would turn into a regular file, and the file in the repository would get no more changes (#22).
+# Links need no privilege outside Windows.
+Describe 'An accounts file that is a link' -Skip:$IsWindows {
+    BeforeAll {
+        $env:IMAP_PASS_WORK = 'not-a-password'
+        $dotfiles = Join-Path $TestDrive 'dotfiles'
+    }
+
+    AfterAll {
+        $env:IMAP_PASS_WORK = $null
+    }
+
+    It 'stays a link, and the file it finally points to gets the change (<Case>)' -TestCases @(
+        @{ Case = 'a link'; Kind = 'direct' }
+        @{ Case = 'a relative link'; Kind = 'relative' }
+        @{ Case = 'a link to a link'; Kind = 'chain' }
+    ) {
+        New-Item -ItemType Directory -Path $dotfiles -Force | Out-Null
+        $real = Join-Path $dotfiles 'accounts.json'
+        Set-Content -Path $real -Value '{ "Accounts": { "work": { "Server": "imap.example.com", "User": "me@example.com" } } }'
+        [IO.File]::SetUnixFileMode($real, 'UserRead, UserWrite')
+        $middle = Join-Path $dotfiles 'middle.json'
+        $link = switch ($Kind) {
+            'direct' { $real }
+            'relative' { [IO.Path]::GetRelativePath($env:IMAP_CONFIG_DIR, $real) }
+            'chain' { [IO.File]::CreateSymbolicLink($middle, $real) | Out-Null; $middle }
+        }
+        Remove-Item -LiteralPath $accountsFile -Force -ErrorAction Ignore
+        [IO.File]::CreateSymbolicLink($accountsFile, $link) | Out-Null
+        try {
+            Set-ImapAccount -Name work -Port 143
+
+            (Get-Item -LiteralPath $accountsFile).LinkTarget | Should -Be $link
+            if ($Kind -eq 'chain') { (Get-Item -LiteralPath $middle).LinkTarget | Should -Be $real }
+            (Get-Content -LiteralPath $real -Raw | ConvertFrom-Json -AsHashtable).Accounts.work.Port | Should -Be 143
+            [IO.File]::GetUnixFileMode($real) | Should -Be ([IO.UnixFileMode]'UserRead, UserWrite') -Because 'the new file takes the mode of the one it replaces, not that of the link'
+            @(Get-ChildItem -Path $env:IMAP_CONFIG_DIR, $dotfiles -Filter '*.tmp') | Should -BeNullOrEmpty
+        } finally {
+            Remove-Item -LiteralPath $accountsFile -Force
+            Remove-Item -LiteralPath $dotfiles -Recurse -Force
+        }
     }
 }
 

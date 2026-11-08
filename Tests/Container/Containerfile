@@ -1,0 +1,54 @@
+# The image in which Invoke-ContainerBuild.ps1 runs Build.ps1, as in ElektoMailPosh: Ubuntu 24.04, as the ubuntu-latest
+# of the CI; PowerShell and the .NET SDK at the versions given, from their releases, checked by their hashes; Pester and
+# PSScriptAnalyzer at the versions of the CI; smtp4dev, as the CI installs it, which the tests start on the loopback
+# (a container without network keeps it); and the mail libraries restored from NuGet as packages.lock.json pins them
+# (each package checked by its hash), so that Build.ps1 restores them without the network. The base is pinned by
+# digest, so nothing new comes in unreviewed; bump them by hand, as Dependabot does not see them.
+# Build.ps1 runs as the user "ubuntu" of the image, not as root: root reads and deletes files whatever their modes, so
+# the tests that take a permission away would not test what they mean to.
+# The context of the build is the folder Dependencies, for the restore.
+FROM docker.io/library/ubuntu@sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d
+
+ARG PWSH_VERSION
+ARG PWSH_SHA256
+ARG DOTNET_SDK_VERSION
+ARG DOTNET_SDK_SHA512
+
+ENV POWERSHELL_TELEMETRY_OPTOUT=1 \
+    POWERSHELL_UPDATECHECK=Off \
+    DOTNET_ROOT=/opt/dotnet \
+    DOTNET_NOLOGO=1 \
+    DOTNET_CLI_TELEMETRY_OPTOUT=1
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl libicu74 libssl3t64 libgssapi-krb5-2 \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN test -n "$PWSH_VERSION" && test -n "$PWSH_SHA256" \
+ && curl -fsSL -o /tmp/pwsh.tar.gz "https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VERSION}/powershell-${PWSH_VERSION}-linux-x64.tar.gz" \
+ && echo "${PWSH_SHA256}  /tmp/pwsh.tar.gz" | sha256sum -c - \
+ && mkdir -p /opt/pwsh \
+ && tar -xzf /tmp/pwsh.tar.gz -C /opt/pwsh \
+ && rm /tmp/pwsh.tar.gz \
+ && chmod +x /opt/pwsh/pwsh \
+ && ln -s /opt/pwsh/pwsh /usr/local/bin/pwsh
+
+RUN test -n "$DOTNET_SDK_VERSION" && test -n "$DOTNET_SDK_SHA512" \
+ && curl -fsSL -o /tmp/dotnet.tar.gz "https://builds.dotnet.microsoft.com/dotnet/Sdk/${DOTNET_SDK_VERSION}/dotnet-sdk-${DOTNET_SDK_VERSION}-linux-x64.tar.gz" \
+ && echo "${DOTNET_SDK_SHA512}  /tmp/dotnet.tar.gz" | sha512sum -c - \
+ && mkdir -p /opt/dotnet \
+ && tar -xzf /tmp/dotnet.tar.gz -C /opt/dotnet \
+ && rm /tmp/dotnet.tar.gz \
+ && ln -s /opt/dotnet/dotnet /usr/local/bin/dotnet
+
+USER ubuntu
+WORKDIR /home/ubuntu
+RUN pwsh -NoProfile -NonInteractive -Command "\
+    Install-PSResource -Name Pester -Version '[6.2.0]' -Repository PSGallery -TrustRepository -Quiet; \
+    Install-PSResource -Name PSScriptAnalyzer -Version '[1.25.0]' -Repository PSGallery -TrustRepository -Quiet"
+
+RUN dotnet tool install --global Rnwood.Smtp4dev --version 3.15.0
+ENV PATH="${PATH}:/home/ubuntu/.dotnet/tools"
+
+COPY --chown=ubuntu:ubuntu Dependencies.csproj packages.lock.json /home/ubuntu/dependencies/
+RUN dotnet restore /home/ubuntu/dependencies/Dependencies.csproj --locked-mode --packages /home/ubuntu/packages

@@ -57,6 +57,8 @@ The settings are kept in `accounts.json`, in the folder `ElektoImapPosh` of your
 }
 ```
 
+The file may be a link, as GNU stow makes one into a dotfiles repository: the file it points to is the one written, and the link stays.
+
 The file is read ignoring case, as PowerShell reads names: keys and settings can be written in any case, and `-Account WORK` reads from the account `work`. So two accounts whose names differ only in case are refused, since they would be the same account and share its password; and so are two whose names differ only in `.`, `-` and `_` (`work.prod` and `work-prod`), which would read their password from the same `IMAP_PASS_WORK_PROD`.
 
 #### Where the passwords go
@@ -308,6 +310,8 @@ Import-Module ./ElektoImapPosh.psd1
 ```
 
 `Build.ps1` restores the libraries into `lib`, runs the checks and the tests (with Pester 5 or later, when installed) and stages the package at `out/ElektoImapPosh`.
+
+The tests write accounts files and password files, in folders of their own. To keep them apart from the accounts of your machine altogether, `./Tests/Container/Invoke-ContainerBuild.ps1` runs `Build.ps1` in a container (Podman or Docker): without network, as a user that is not root, with the repository mounted read-only and copied inside.
 
 ## License
 
