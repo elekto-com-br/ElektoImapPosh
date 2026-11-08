@@ -311,7 +311,7 @@ Import-Module ./ElektoImapPosh.psd1
 
 `Build.ps1` restores the libraries into `lib`, runs the checks and the tests (with Pester 5 or later, when installed) and stages the package at `out/ElektoImapPosh`.
 
-The tests write accounts files and password files, in folders of their own. To keep them apart from the accounts of your machine altogether, `./Tests/Container/Invoke-ContainerBuild.ps1` runs `Build.ps1` in a container (Podman or Docker): without network, as a user that is not root, with the repository mounted read-only and copied inside.
+The tests write accounts files and password files, in folders of their own, and never your accounts: they run with `IMAP_CONFIG_DIR`, and `HOME` on Linux and macOS, in a temporary folder, and `Build.ps1` fails if the accounts of your machine changed, comparing the names, sizes and times of their files (and on Windows of the credentials of the module), never what they hold. To keep the tests apart from your machine altogether, `./Tests/Container/Invoke-ContainerBuild.ps1` runs `Build.ps1` in a container (Podman or Docker): without network, as a user that is not root, with the repository mounted read-only and copied inside.
 
 ## License
 

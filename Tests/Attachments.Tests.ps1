@@ -17,7 +17,7 @@ BeforeAll {
     $savedEnvironment = @{}
     foreach ($name in $variableNames) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
-        [Environment]::SetEnvironmentVariable($name, $null)
+        Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore
     }
 
     # The write of the module held until the gate opens: all of it, or with after only the end of its task, the file
@@ -89,7 +89,7 @@ namespace ElektoImapPoshTests
 
 AfterAll {
     foreach ($entry in $savedEnvironment.GetEnumerator()) {
-        [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value)
+        Set-Item -LiteralPath "env:$($entry.Key)" -Value $entry.Value
     }
     Remove-Module ElektoImapPosh -ErrorAction SilentlyContinue
 }
@@ -432,7 +432,7 @@ Describe 'Save-ImapAttachment on Gmail' {
     AfterAll {
         Stop-FakeGmail $server
         Stop-FakeGmail $elsewhere
-        foreach ($name in $passwords) { [Environment]::SetEnvironmentVariable($name, $null) }
+        foreach ($name in $passwords) { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
         $env:IMAP_CONFIG_DIR = $null
     }
 
@@ -1129,7 +1129,7 @@ Describe 'Save-ImapMessage on Gmail' {
     AfterAll {
         Stop-FakeGmail $server
         Stop-FakeGmail $crowd
-        foreach ($name in $passwords) { [Environment]::SetEnvironmentVariable($name, $null) }
+        foreach ($name in $passwords) { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
         $env:IMAP_CONFIG_DIR = $null
     }
 

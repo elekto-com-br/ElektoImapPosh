@@ -18,7 +18,7 @@ BeforeAll {
     $savedEnvironment = @{}
     foreach ($name in $variableNames) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
-        [Environment]::SetEnvironmentVariable($name, $null)
+        Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore
     }
     $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config'
     New-Item -ItemType Directory -Path $env:IMAP_CONFIG_DIR | Out-Null
@@ -62,7 +62,7 @@ BeforeAll {
 
 AfterAll {
     foreach ($entry in $savedEnvironment.GetEnumerator()) {
-        [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value)
+        Set-Item -LiteralPath "env:$($entry.Key)" -Value $entry.Value
     }
     Remove-Module ElektoImapPosh -ErrorAction SilentlyContinue
 }
@@ -70,7 +70,7 @@ AfterAll {
 Describe 'Settings without accounts' {
     BeforeEach {
         Remove-Item -Path $accountsFile -ErrorAction Ignore
-        foreach ($name in $variableNames | Where-Object { $_ -ne 'IMAP_CONFIG_DIR' }) { [Environment]::SetEnvironmentVariable($name, $null) }
+        foreach ($name in $variableNames | Where-Object { $_ -ne 'IMAP_CONFIG_DIR' }) { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
     }
 
     It 'come from IMAP_USER and IMAP_PASS, with imap.gmail.com:993 by default' {
@@ -123,11 +123,11 @@ Describe 'Settings without accounts' {
 
         (Resolve-Configuration).$Setting | Should -BeFalse
         foreach ($value in 'true', 'TRUE', '1') {
-            [Environment]::SetEnvironmentVariable($Variable, $value)
+            Set-Item -LiteralPath "env:$Variable" -Value $value
             (Resolve-Configuration).$Setting | Should -BeTrue -Because "$Variable is '$value'"
         }
         foreach ($value in 'false', '0') {
-            [Environment]::SetEnvironmentVariable($Variable, $value)
+            Set-Item -LiteralPath "env:$Variable" -Value $value
             (Resolve-Configuration).$Setting | Should -BeFalse -Because "$Variable is '$value'"
         }
     }
@@ -138,7 +138,7 @@ Describe 'Settings without accounts' {
     ) {
         $env:IMAP_USER = 'me@example.com'
         $env:IMAP_PASS = 'not-a-password'
-        [Environment]::SetEnvironmentVariable($Variable, 'yes')
+        Set-Item -LiteralPath "env:$Variable" -Value 'yes'
 
         { Resolve-Configuration } | Should -Throw -ExpectedMessage "*$Variable must be true or false*"
     }
@@ -185,7 +185,7 @@ Describe 'Settings of an account' {
     }
 
     BeforeEach {
-        foreach ($name in $variableNames | Where-Object { $_ -ne 'IMAP_CONFIG_DIR' }) { [Environment]::SetEnvironmentVariable($name, $null) }
+        foreach ($name in $variableNames | Where-Object { $_ -ne 'IMAP_CONFIG_DIR' }) { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
     }
 
     It 'are those of the default account, ignoring the IMAP_* variables' {
@@ -217,7 +217,7 @@ Describe 'Settings of an account' {
         @{ Setting = 'SkipCertificateCheck'; Variable = 'IMAP_SKIP_CERTIFICATE_CHECK' }
     ) {
         $env:IMAP_PASS_WORK = 'not-a-password'
-        [Environment]::SetEnvironmentVariable($Variable, 'true')
+        Set-Item -LiteralPath "env:$Variable" -Value 'true'
 
         (Resolve-Configuration work).$Setting | Should -BeFalse
     }
@@ -251,7 +251,7 @@ Describe 'Passwords' {
 Describe 'The account commands' {
     BeforeEach {
         Remove-Item -Path $accountsFile -ErrorAction Ignore
-        foreach ($name in $variableNames | Where-Object { $_ -ne 'IMAP_CONFIG_DIR' }) { [Environment]::SetEnvironmentVariable($name, $null) }
+        foreach ($name in $variableNames | Where-Object { $_ -ne 'IMAP_CONFIG_DIR' }) { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
         Mock -ModuleName ElektoImapPosh Save-StoredPassword { }
         Mock -ModuleName ElektoImapPosh Read-StoredPassword { $null }
         Mock -ModuleName ElektoImapPosh Clear-StoredPassword { $true }

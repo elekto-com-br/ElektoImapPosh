@@ -71,3 +71,25 @@ Describe 'Help of <_>' -AllowNullOrEmptyForEach -ForEach @((Import-PowerShellDat
         }
     }
 }
+
+# Since .NET 9, [Environment]::SetEnvironmentVariable given $null, which PowerShell passes as "", leaves the variable
+# defined and empty (measured on PowerShell 7.6, found by the ElektoMailPosh session): a test that cleared a variable,
+# or put back one that was not there, left it behind, empty, for the files after it. The tests clear with Remove-Item
+# on env:, and put back with Set-Item on env:, which removes a variable given $null.
+Describe 'The test scripts' {
+    It 'set and clear environment variables on env:, not with SetEnvironmentVariable' {
+        function Find-SetEnvironmentVariable([string]$Code) {
+            $tree = [System.Management.Automation.Language.Parser]::ParseInput($Code, [ref]$null, [ref]$null)
+            , @($tree.FindAll({
+                        param($node)
+                        $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $node.Static -and "$($node.Member)" -eq 'SetEnvironmentVariable'
+                    }, $true))
+        }
+
+        (Find-SetEnvironmentVariable '[Environment]::SetEnvironmentVariable($name, $null)').Count | Should -Be 1 -Because 'the search finds the form it looks for'
+        $found = foreach ($file in Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' -Recurse) {
+            foreach ($node in (Find-SetEnvironmentVariable (Get-Content -LiteralPath $file.FullName -Raw))) { "$($file.Name):$($node.Extent.StartLineNumber)" }
+        }
+        $found | Should -BeNullOrEmpty
+    }
+}
