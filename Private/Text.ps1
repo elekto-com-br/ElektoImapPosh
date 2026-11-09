@@ -33,8 +33,8 @@ function Test-SameText([string]$A, [string]$B) {
 
 # Whether a domain is another, or one of its subdomains, compared as Test-SameText compares them: news.client.example
 # is within client.example, and evilclient.example is not. For the results of the receiving server, which name the
-# domain whose DMARC record it applied: Gmail writes header.from=claude.com for a sender at email.claude.com (measured
-# on a real Gmail, 2026-11-07: every sender of a subdomain, 10 of 300 messages of an inbox).
+# domain whose DMARC record it applied: Gmail writes header.from=example.com for a sender at news.example.com (measured
+# on a real Gmail, 2026-11-07, for every sender of a subdomain in the inbox measured).
 function Test-WithinDomain([string]$Domain, [string]$Parent) {
     $Domain = ConvertTo-ComposedText $Domain
     $Parent = ConvertTo-ComposedText $Parent

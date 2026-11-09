@@ -81,6 +81,15 @@ which the group sealed when it took the message, says that DMARC passed for the 
 X-Original-From. Meant for those who read headers: the reason in Withheld says which of these a message
 missed. -UseXOriginalFrom:$false takes it away.
 
+.PARAMETER TrustSameDomain
+Makes the allow lists of senders (AllowReadFrom, AllowAttachmentsFrom) take for authenticated a sender of
+the domain of the mailbox's user whose message carries no Authentication-Results of the server named in
+TrustAuthenticationResults: mail from inside the domain, which Google Workspace delivers without them,
+while it stamps every message from outside, a forged one included, with results that then decide as for
+any sender. Off by default, since a server that does not stamp every message from outside would let a
+forged sender of the domain through; measured on Google Workspace only. Needs TrustAuthenticationResults.
+-TrustSameDomain:$false takes it away.
+
 .EXAMPLE
 Set-ImapPolicy agent -DenyFolders 'Finance/*', Junk -MaxAgeDays 90 -MaxMessages 200 -MaxMessageSize 25MB
 
@@ -108,6 +117,12 @@ Set-ImapPolicy support -AllowReadFrom '*@client.example' -TrustAuthenticationRes
 
 Lets the messages of client.example be read also when they come through a Google Group of the mailbox's
 own domain, which puts its own address in the From.
+
+.EXAMPLE
+Set-ImapPolicy team -AllowAttachmentsFrom '*@example.com' -TrustAuthenticationResults mx.google.com -TrustSameDomain
+
+On a Google Workspace mailbox of example.com, lets the attachments of its authenticated senders be saved,
+those of colleagues of the same domain included, whose messages come with no Authentication-Results.
 #>
 Function Set-ImapPolicy {
     [CmdletBinding(SupportsShouldProcess)]
@@ -133,7 +148,8 @@ Function Set-ImapPolicy {
         [ValidateRange('NonNegative')]
         [long]$MaxAttachmentSize,
         [string]$TrustAuthenticationResults,
-        [switch]$UseXOriginalFrom
+        [switch]$UseXOriginalFrom,
+        [switch]$TrustSameDomain
     )
 
     $file = Read-AccountFile
@@ -159,6 +175,9 @@ Function Set-ImapPolicy {
     $allowLists = @('AllowReadFrom', 'AllowAttachmentsFrom' | Where-Object { $settings.Contains($_) })
     if ($allowLists -and -not $settings.Contains('TrustAuthenticationResults')) {
         Write-Warning "Policy '$Name' has no TrustAuthenticationResults, and without it no sender is authenticated, so no sender passes $($allowLists -join ' and '). Give -TrustAuthenticationResults (mx.google.com on Gmail)."
+    }
+    elseif ($settings.TrustSameDomain -and -not $settings.Contains('TrustAuthenticationResults')) {
+        Write-Warning "Policy '$Name' has TrustSameDomain but no TrustAuthenticationResults, whose results it needs to tell mail from inside the domain: it takes no sender. Give -TrustAuthenticationResults (mx.google.com on Gmail)."
     }
 
     if (-not $PSCmdlet.ShouldProcess("policy '$Name' in '$(Get-AccountFilePath)'", 'Save')) { return }

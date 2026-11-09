@@ -18,6 +18,10 @@
 #   and also the Sender, Reply-To and X-Original-From, since an address there only withholds more.
 # - UseXOriginalFrom: the allow lists judge the sender behind a Google Group of the mailbox's own domain, which writes
 #   its own address in the From (Get-RelayedSender).
+# - TrustSameDomain: the allow lists take for authenticated a sender of the mailbox's own domain whose message carries no
+#   results of the trusted server: mail from inside the domain, which Google Workspace delivers without them
+#   (Test-InsideSender). Off by default, as a server that does not stamp every message from outside would let a
+#   forged sender through.
 # An allow list, when present, denies what it does not name; a deny list wins. Folders, senders and attachments are
 # wildcard patterns, matched by Test-Wildcard (ignoring case alike in every culture, and a name written composed or
 # decomposed alike): senders such as *@example.com, attachments a MIME type when they have a "/" (image/*) and a file
@@ -42,6 +46,7 @@ $script:PolicySettings = [ordered]@{
     MaxAttachmentSize          = 'Limit'
     TrustAuthenticationResults = 'Server'
     UseXOriginalFrom           = 'Switch'
+    TrustSameDomain            = 'Switch'
 }
 
 # Why a value cannot be the setting of a policy, to follow its name in a message; $null when it can. A list may be
@@ -239,7 +244,7 @@ function Get-ResultProperty($Result, [string]$Type, [string]$Name) {
 
 # Whether the results of the trusted server authenticate a domain as the one of the From: DMARC passed for it, or for
 # a domain it is part of, when there is a DMARC result (Gmail names the domain whose record it applied, so a sender at
-# email.claude.com passes as header.from=claude.com, measured: see Test-WithinDomain); when there is none (Gmail gives
+# news.example.com passes as header.from=example.com, measured: see Test-WithinDomain); when there is none (Gmail gives
 # none for a message that a Google Group of the same domain relays), a DKIM signature of that very domain passed,
 # which is how DMARC takes an aligned signature (strictly: the same domain, not a parent nor a child of it)
 function Test-DomainAuthenticated($Results, [string]$Domain) {
@@ -265,6 +270,27 @@ function Test-AuthenticatedSender($Summary, [string]$Server) {
     $senders = @($Summary.Envelope.From.Mailboxes)
     if ($senders.Count -ne 1) { return $false }
     return Test-DomainAuthenticated (Get-TrustedAuthenticationResult $Summary $Server) $senders[0].Domain
+}
+
+# Whether a message comes from inside the mailbox's own domain, for a policy with TrustSameDomain (or whatever the
+# policy says, with -WhateverThePolicy, to tell why a sender is not taken): the only sender of its From is of the domain
+# of the mailbox's user, and no Authentication-Results of the receiving server the policy trusts is on it, anywhere.
+# Google Workspace delivers the mail between users of the same domain without them, and stamps every message from
+# outside, a forged one included, with its own, removing any that claims its name (all measured, on Google only), so
+# that those results then decide, as for any sender. A header that cannot be read may be of that server: not inside.
+function Test-InsideSender($Session, $Summary, [switch]$WhateverThePolicy) {
+    $policy = $Session.Settings.Policy
+    if ((-not $WhateverThePolicy -and -not $policy.TrustSameDomain) -or -not $policy.TrustAuthenticationResults) { return $false }
+    if (-not ($Session.Settings.User -cmatch '@([^@]+)$')) { return $false }
+    $own = $Matches[1]
+    $senders = @($Summary.Envelope.From.Mailboxes)
+    if ($senders.Count -ne 1 -or -not (Test-SameText $senders[0].Domain $own)) { return $false }
+    foreach ($header in @($Summary.Headers | Where-Object { $_.Field -eq 'Authentication-Results' })) {
+        $results = $null
+        if (-not [MimeKit.Cryptography.AuthenticationResults]::TryParse($header.RawValue, [ref]$results)) { return $false }
+        if (Test-SameText $results.AuthenticationServiceIdentifier $policy.TrustAuthenticationResults) { return $false }
+    }
+    return $true
 }
 
 # The sender behind a message that a Google Group of the mailbox's own domain relays, for the allow lists of a policy
@@ -338,9 +364,14 @@ function Get-SenderOutsideReason($Session, [string]$Setting, $Summary, [bool]$Ow
         }
         if ($relayed.Why) { $why = " Its X-Original-From is not taken: $($relayed.Why)." }
     }
-    if (-not $Own -and -not (Test-AuthenticatedSender $Summary $server)) {
+    if (-not $Own -and -not (Test-AuthenticatedSender $Summary $server) -and -not (Test-InsideSender $Session $Summary)) {
         if (-not $server) { return "$Setting $of passes only authenticated senders, and the policy has no TrustAuthenticationResults to authenticate them." }
-        return "The sender is not authenticated by $server (no DMARC pass, nor a DKIM signature, for the domain of the From), and $Setting $of passes only authenticated senders.$why"
+        # A sender of the mailbox's own domain with no results at all: mail from inside the domain, which TrustSameDomain
+        # would take (with it on, such a message never comes here)
+        $inside = if (Test-InsideSender $Session $Summary -WhateverThePolicy) {
+            " Mail from inside the domain carries no Authentication-Results: TrustSameDomain takes it as authenticated."
+        }
+        return "The sender is not authenticated by $server (no DMARC pass, nor a DKIM signature, for the domain of the From), and $Setting $of passes only authenticated senders.$why$inside"
     }
     $senders = @($Summary.Envelope.From.Mailboxes | ForEach-Object { $_.Address })
     if ($senders.Count -eq 0) { return "It has no sender, and $Setting $of passes only the senders it names." }
