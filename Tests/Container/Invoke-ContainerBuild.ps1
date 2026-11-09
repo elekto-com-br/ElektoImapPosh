@@ -63,6 +63,7 @@ foreach ($each in $Version) {
     & $engine build --quiet --tag $image --file (Join-Path $PSScriptRoot 'Containerfile') `
         --build-arg "PWSH_VERSION=$each" --build-arg "PWSH_SHA256=$($releases[$each])" `
         --build-arg "DOTNET_SDK_VERSION=$sdkVersion" --build-arg "DOTNET_SDK_SHA512=$sdkSha512" `
+        --build-arg "AUDIT_STAMP=$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))" `
         (Join-Path $repository 'Dependencies') | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Could not build $image." }
 

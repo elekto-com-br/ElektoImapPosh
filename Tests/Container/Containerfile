@@ -14,13 +14,19 @@ ARG PWSH_SHA256
 ARG DOTNET_SDK_VERSION
 ARG DOTNET_SDK_SHA512
 
+# DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK: the first use of the SDK checks its workloads, and without network wrote "An
+# issue was encountered verifying workloads" (measured); the module needs no workload
 ENV POWERSHELL_TELEMETRY_OPTOUT=1 \
     POWERSHELL_UPDATECHECK=Off \
     DOTNET_ROOT=/opt/dotnet \
     DOTNET_NOLOGO=1 \
-    DOTNET_CLI_TELEMETRY_OPTOUT=1
+    DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+    DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK=true
 
-RUN apt-get update \
+# Without a terminal and without apt-utils, debconf warned that it delayed the configuration of the packages, which
+# needs neither (measured)
+RUN export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes \
+ && apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl libicu74 libssl3t64 libgssapi-krb5-2 \
  && rm -rf /var/lib/apt/lists/*
 
@@ -50,5 +56,10 @@ RUN pwsh -NoProfile -NonInteractive -Command "\
 RUN dotnet tool install --global Rnwood.Smtp4dev --version 3.15.0
 ENV PATH="${PATH}:/home/ubuntu/.dotnet/tools"
 
+# Restored again at every build of the image (AUDIT_STAMP changes each time), so that the NuGet audit of the run, which
+# has no network, finds fresh data on vulnerabilities in the cache: data older than some hours is not taken, and the
+# restore warned (NU1900, measured)
+ARG AUDIT_STAMP
 COPY --chown=ubuntu:ubuntu Dependencies.csproj packages.lock.json /home/ubuntu/dependencies/
-RUN dotnet restore /home/ubuntu/dependencies/Dependencies.csproj --locked-mode --packages /home/ubuntu/packages
+RUN echo "NuGet audit of $AUDIT_STAMP" \
+ && dotnet restore /home/ubuntu/dependencies/Dependencies.csproj --locked-mode --packages /home/ubuntu/packages
