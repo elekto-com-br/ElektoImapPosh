@@ -304,6 +304,11 @@ function Resolve-ImapConfiguration($Cmdlet, [string]$Account) {
     }
 
     $password = Get-AccountPassword $name
+    # Once, for this account: an error of .NET followed by PasswordMissing said that the account had no password
+    if ($password.Failure) {
+        Write-ImapError $Cmdlet "The password of account '$name' could not be read: $($password.Failure)" 'PasswordUnreadable' ReadError $name
+        return $null
+    }
     if (-not $password) {
         Write-ImapError $Cmdlet (Get-MissingPasswordMessage $name) 'PasswordMissing' ObjectNotFound $name
         return $null

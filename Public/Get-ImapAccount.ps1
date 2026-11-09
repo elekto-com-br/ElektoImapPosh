@@ -55,7 +55,8 @@ Function Get-ImapAccount {
         $account = $file.Accounts[$accountName]
         try {
             $password = Get-AccountPassword $accountName
-            $passwordSource = if ($password) { $password.Source } else { 'Missing' }
+            $passwordSource = if ($password.Failure) { 'Unusable' } elseif ($password) { $password.Source } else { 'Missing' }
+            if ($password.Failure) { Write-Warning "The password of account '$accountName' could not be read: $($password.Failure)" }
         } catch {
             Write-Warning $_.Exception.Message
             $passwordSource = 'Unusable'

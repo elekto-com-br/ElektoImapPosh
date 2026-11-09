@@ -30,7 +30,9 @@ that says how many were left out.
 
 Messages come from the pipeline of Get-ImapMessage, which says where each is: account, folder and UID.
 If the folder was numbered anew since then (another UIDVALIDITY), the error UidValidityChanged says
-so, rather than read another message with the same number.
+so, rather than read another message with the same number. They are read in batches of up to 100: the
+metadata of the messages of each folder of a batch comes in one request to the server, then the text of
+each, in the order they came; so the first text comes once the batch is complete, or the pipeline ends.
 
 .PARAMETER Account
 The account to read from, kept by Set-ImapAccount. If not provided, reads from the default account, if
@@ -106,69 +108,33 @@ Function Read-ImapMessage {
         $sessions = @{}
         # Here, before any input, only what was typed is bound: see Get-ImapFolder
         $folderFromPipeline = -not $PSBoundParameters.ContainsKey('Folder')
+        # The messages that come, read in batches of up to ReadBatchSize UIDs: the summaries of each folder in one FETCH
+        # (Read-ImapMessageBatch), rather than one for each message
+        $pending = [System.Collections.Generic.List[object]]::new()
+        $pendingUids = 0
     }
 
     process {
         $session = Get-ImapSession $PSCmdlet $sessions $Account
         if (-not $session) { return }
-        $settings = $session.Settings
-        $policy = $settings.Policy
-        # Once MaxMessages is spent, the messages that come are left out without opening their folder or fetching anything
-        if ($policy -and $policy.MaxMessages -and [int]$session.MessagesHandled -ge $policy.MaxMessages) {
-            $session.MessagesLeftOut = [int]$session.MessagesLeftOut + $Uid.Count
-            return
-        }
-
-        $name = if ($Folder) { $Folder } else { 'Inbox' }
-        $found = Get-ImapMessageByUid $PSCmdlet $session $name -Literal:($folderFromPipeline -and $Folder) -Uid $Uid -UidValidity $UidValidity
-        if (-not $found) { return }
-        $item = $found.Folder
-        foreach ($id in $Uid) {
-            $summary = $found.ByUid[$id]
-            if (-not $summary) {
-                Write-ImapError $PSCmdlet "There is no message with the UID $id in the folder '$($item.FullName)' of $($settings.User)." 'MessageNotFound' ObjectNotFound $id
-                continue
-            }
-            # The one check of the policy, on the metadata, before the body is fetched
-            $reason = Get-WithheldReason $session $item $summary
-            if ($reason) {
-                Write-ImapError $PSCmdlet "The message $id in the folder '$($item.FullName)' of $($settings.User) was not read: $reason" 'MessageWithheld' PermissionDenied $id
-                continue
-            }
-            # MaxMessages counts the messages of the account read in the whole command
-            if ($policy -and $policy.MaxMessages -and [int]$session.MessagesHandled -ge $policy.MaxMessages) {
-                $session.MessagesLeftOut = [int]$session.MessagesLeftOut + 1
-                continue
-            }
-            $session.MessagesHandled = [int]$session.MessagesHandled + 1
-
-            $content = Get-ImapMessageText $PSCmdlet $session $item $summary -Html:$Html
-            if ($null -eq $content) { continue }
-            # With its lines, and whole; then cut by -MaxLength
-            $text = Format-ShownBody $content.Text
-            $truncated = [bool]($MaxLength -and $text -and $text.Length -gt $MaxLength)
-            if ($truncated) {
-                # Not between the two halves of a character outside the BMP (an emoji), which would leave half of it
-                $length = if ([char]::IsHighSurrogate($text[$MaxLength - 1])) { $MaxLength - 1 } else { $MaxLength }
-                $text = $text.Substring(0, $length)
-            }
-
-            # Not withheld: the check above passed
-            $message = ConvertTo-ImapMessage $session $item $summary $null
-            $message.PSObject.TypeNames.Insert(0, 'ElektoImapPosh.MessageText')
-            $parts = Get-ImapPartList $session $item $summary
-            $message | Add-Member -NotePropertyMembers ([ordered]@{
-                    Attachments = [object[]]@($parts | Where-Object { -not $_.Inline } | Select-Object Name, FileName, ContentType, Size, Withheld)
-                    InlineParts = [object[]]@($parts | Where-Object { $_.Inline } | Select-Object Name, FileName, ContentType, Size, Withheld)
-                    Format      = $content.Format
-                    Truncated   = $truncated
-                    Text        = $text
-                })
-            $message
+        $pending.Add([PSCustomObject]@{
+                Session     = $session
+                Folder      = if ($Folder) { $Folder } else { 'Inbox' }
+                Literal     = [bool]($folderFromPipeline -and $Folder)
+                Uid         = $Uid
+                UidValidity = $UidValidity
+                Group       = $null
+            })
+        $pendingUids += $Uid.Count
+        if ($pendingUids -ge $script:ReadBatchSize) {
+            Read-ImapMessageBatch $PSCmdlet $pending.ToArray() -Html:$Html -MaxLength $MaxLength
+            $pending.Clear()
+            $pendingUids = 0
         }
     }
 
     end {
+        if ($pending.Count) { Read-ImapMessageBatch $PSCmdlet $pending.ToArray() -Html:$Html -MaxLength $MaxLength }
         # One warning for each account, however many messages came from the pipeline
         $warned = [System.Collections.Generic.List[object]]::new()
         foreach ($session in @($sessions.psbase.Values)) {

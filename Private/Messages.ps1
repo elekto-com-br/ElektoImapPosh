@@ -219,6 +219,99 @@ function ConvertTo-ImapMessage($Session, $Folder, $Summary, [string]$Withheld) {
     }
 }
 
+# The most UIDs that Read-ImapMessage keeps before it reads them: the summaries of the messages kept come in one FETCH
+# for each folder, rather than one for each message, a round trip each (some 0.4 s against Gmail, measured); their texts
+# still one each, as MailKit fetches a part of one message at a time (and each message has its text in a part of its own)
+$script:ReadBatchSize = 100
+
+# Reads the messages that Read-ImapMessage kept, each request one item of its pipeline (its session, the name of its
+# folder, whether that name is literal, its UIDs and UidValidity), and returns what Read-ImapMessage returns for them:
+# first the summaries, one FETCH for each folder of each account (and UidValidity given), in the order the folders came;
+# then each message in the order it came, its folder opened again when another was opened since. Once MaxMessages is
+# spent, the messages of a folder not yet fetched are left out without fetching anything; within a batch, the summaries
+# (metadata, which a policy never withholds) may be fetched of messages that the limit then leaves out.
+function Read-ImapMessageBatch($Cmdlet, [object[]]$Requests, [switch]$Html, [int]$MaxLength) {
+    $groups = [System.Collections.Generic.List[object]]::new()
+    $byKey = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    foreach ($request in $Requests) {
+        if (-not $request.Session.ContainsKey('BatchKey')) { $request.Session.BatchKey = [guid]::NewGuid().ToString('N') }
+        $key = "$($request.Session.BatchKey)`n$([int][bool]$request.Literal)`n$($request.UidValidity)`n$($request.Folder)"
+        $group = $null
+        if (-not $byKey.TryGetValue($key, [ref]$group)) {
+            $group = @{ Session = $request.Session; Folder = $request.Folder; Literal = $request.Literal; UidValidity = $request.UidValidity; Uids = [System.Collections.Generic.List[uint32]]::new(); Fetched = $false; Found = $null }
+            $byKey[$key] = $group
+            $groups.Add($group)
+        }
+        $request.Group = $group
+        foreach ($id in $request.Uid) { $group.Uids.Add($id) }
+    }
+    foreach ($group in $groups) {
+        $policy = $group.Session.Settings.Policy
+        if ($policy -and $policy.MaxMessages -and [int]$group.Session.MessagesHandled -ge $policy.MaxMessages) { continue }
+        $group.Found = Get-ImapMessageByUid $Cmdlet $group.Session $group.Folder -Literal:$group.Literal -Uid $group.Uids.ToArray() -UidValidity $group.UidValidity
+        $group.Fetched = $true
+    }
+
+    foreach ($request in $Requests) {
+        $session = $request.Session
+        $settings = $session.Settings
+        $policy = $settings.Policy
+        if (-not $request.Group.Fetched) {
+            $session.MessagesLeftOut = [int]$session.MessagesLeftOut + $request.Uid.Count
+            continue
+        }
+        # Not found, or numbered anew: Get-ImapMessageByUid said so
+        $found = $request.Group.Found
+        if (-not $found) { continue }
+        $item = $found.Folder
+        foreach ($id in $request.Uid) {
+            $summary = $found.ByUid[$id]
+            if (-not $summary) {
+                Write-ImapError $Cmdlet "There is no message with the UID $id in the folder '$($item.FullName)' of $($settings.User)." 'MessageNotFound' ObjectNotFound $id
+                continue
+            }
+            # The one check of the policy, on the metadata, before the body is fetched
+            $reason = Get-WithheldReason $session $item $summary
+            if ($reason) {
+                Write-ImapError $Cmdlet "The message $id in the folder '$($item.FullName)' of $($settings.User) was not read: $reason" 'MessageWithheld' PermissionDenied $id
+                continue
+            }
+            # MaxMessages counts the messages of the account read in the whole command
+            if ($policy -and $policy.MaxMessages -and [int]$session.MessagesHandled -ge $policy.MaxMessages) {
+                $session.MessagesLeftOut = [int]$session.MessagesLeftOut + 1
+                continue
+            }
+            # Another folder of the batch may have been opened since its summaries came
+            if (-not (Open-ImapFolder $Cmdlet $session $item)) { continue }
+            $session.MessagesHandled = [int]$session.MessagesHandled + 1
+
+            $content = Get-ImapMessageText $Cmdlet $session $item $summary -Html:$Html
+            if ($null -eq $content) { continue }
+            # With its lines, and whole; then cut by -MaxLength
+            $text = Format-ShownBody $content.Text
+            $truncated = [bool]($MaxLength -and $text -and $text.Length -gt $MaxLength)
+            if ($truncated) {
+                # Not between the two halves of a character outside the BMP (an emoji), which would leave half of it
+                $length = if ([char]::IsHighSurrogate($text[$MaxLength - 1])) { $MaxLength - 1 } else { $MaxLength }
+                $text = $text.Substring(0, $length)
+            }
+
+            # Not withheld: the check above passed
+            $message = ConvertTo-ImapMessage $session $item $summary $null
+            $message.PSObject.TypeNames.Insert(0, 'ElektoImapPosh.MessageText')
+            $parts = Get-ImapPartList $session $item $summary
+            $message | Add-Member -NotePropertyMembers ([ordered]@{
+                    Attachments = [object[]]@($parts | Where-Object { -not $_.Inline } | Select-Object Name, FileName, ContentType, Size, Withheld)
+                    InlineParts = [object[]]@($parts | Where-Object { $_.Inline } | Select-Object Name, FileName, ContentType, Size, Withheld)
+                    Format      = $content.Format
+                    Truncated   = $truncated
+                    Text        = $text
+                })
+            $message
+        }
+    }
+}
+
 # The text of a message, in a hashtable with Text and Format (Text or Html, both $null when the message has no text):
 # its text/plain part, or else its text/html part, as they are; with -Html, the other way round. MimeKit decodes them
 # (base64 or quoted-printable, and their charset); nothing converts the HTML. Only that part is fetched, by BODY.PEEK:

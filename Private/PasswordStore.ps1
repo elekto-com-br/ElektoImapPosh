@@ -67,15 +67,17 @@ namespace ElektoImapPosh
         [DllImport("advapi32.dll")]
         private static extern void CredFree(IntPtr buffer);
 
-        // The password of the generic credential, or null when there is none
-        public static string Read(string target)
+        // The password of the generic credential, or null when there is none; or null, and why in failure, when it could
+        // not be read: an exception would end only the statement of PowerShell that called it, which went on
+        public static string Read(string target, out string failure)
         {
+            failure = null;
             IntPtr pointer;
             if (!CredRead(target, CRED_TYPE_GENERIC, 0, out pointer))
             {
                 int error = Marshal.GetLastWin32Error();
-                if (error == ERROR_NOT_FOUND) return null;
-                throw new Win32Exception(error);
+                if (error != ERROR_NOT_FOUND) failure = new Win32Exception(error).Message;
+                return null;
             }
             try
             {
@@ -128,14 +130,19 @@ namespace ElektoImapPosh
 # Manager and the files are reached through .NET, and an exception of .NET ends only its own statement otherwise: the
 # command went on, Set-ImapAccount as if the password were stored, and Remove-ImapAccount took a password that could
 # not be deleted for none stored, and removed its account (#23, measured with another call of .NET that throws, as
-# PowerShell treats them all alike). Reading has no such stop: Get-ImapAccount catches what it throws, and a command
-# that reads, left without the password, connects to nothing.
+# PowerShell treats them all alike). Reading throws nothing either (Read-StoredPassword): a store that cannot be read
+# gives its reason, which the commands report once, for that account; before, the error of .NET came, and then the
+# command said that the account had no password (PasswordMissing, measured).
 
-# The stored password of the account, or $null when none is stored
-function Read-StoredPassword([string]$Account) {
+# The stored password of the account, or $null when none is stored; or $null, and in $Failure why, when the store
+# could not be read, as Wait-ImapTask and the Credential Manager of the module give it, rather than an exception
+function Read-StoredPassword([string]$Account, [ref]$Failure) {
     if ($IsWindows) {
         Initialize-CredentialManager
-        return [ElektoImapPosh.CredentialManager]::Read($script:CredentialTargetPrefix + $Account)
+        $reason = $null
+        $secret = [ElektoImapPosh.CredentialManager]::Read($script:CredentialTargetPrefix + $Account, [ref]$reason)
+        if ($reason -and $Failure) { $Failure.Value = "the credential $($script:CredentialTargetPrefix)$Account of the Credential Manager could not be read: $reason" }
+        return $secret
     }
 
     $path = Get-PasswordFilePath $Account
@@ -144,9 +151,16 @@ function Read-StoredPassword([string]$Account) {
     if ([IO.File]::GetUnixFileMode($path) -band $othersAccess) {
         throw "The password file '$path' can be read by other users. Restrict it with: chmod 600 '$path'"
     }
+    # By a task, whose failure Wait-ImapTask gives as a message, where ReadAllText would throw
+    $task = [IO.File]::ReadAllTextAsync($path, [System.Threading.CancellationToken]::None)
+    $reason = Wait-ImapTask $task
+    if ($reason) {
+        if ($Failure) { $Failure.Value = "the file '$path' could not be read: $reason" }
+        return $null
+    }
     # The file may be written by hand (echo, an editor), which ends it with a newline that is not part of the
     # password; one that really ends in CR or LF cannot be typed at Read-Host
-    return ([IO.File]::ReadAllText($path)).TrimEnd("`r", "`n")
+    return $task.Result.TrimEnd("`r", "`n")
 }
 
 function Save-StoredPassword([string]$Account, [string]$User, [string]$Secret) {
@@ -192,12 +206,15 @@ function Clear-StoredPassword([string]$Account) {
 }
 
 # The password of the account and where it came from (Environment, CredentialManager or File), or
-# $null when it has none
+# $null when it has none; or, when its store could not be read, Failure, why, and no password
 function Get-AccountPassword([string]$Account) {
     $password = [Environment]::GetEnvironmentVariable((Get-PasswordVariableName $Account))
     if ($password) { return @{ Password = $password; Source = 'Environment' } }
 
-    $password = Read-StoredPassword $Account
-    if ($password) { return @{ Password = $password; Source = if ($IsWindows) { 'CredentialManager' } else { 'File' } } }
+    $failure = $null
+    $password = Read-StoredPassword $Account ([ref]$failure)
+    $source = if ($IsWindows) { 'CredentialManager' } else { 'File' }
+    if ($failure) { return @{ Password = $null; Source = $source; Failure = $failure } }
+    if ($password) { return @{ Password = $password; Source = $source } }
     return $null
 }
