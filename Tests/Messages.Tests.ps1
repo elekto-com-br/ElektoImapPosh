@@ -983,8 +983,58 @@ Describe 'Get-ImapMessage on Gmail' {
         @($result).Count | Should -Be 1
         "$warnings" | Should -Be "The policy 'one' lets one command read 1 message of tester: 3 more were not read."
         $commands = @($server.State.Commands.ToArray() | Select-Object -Skip $before)
-        @($commands | Where-Object { $_ -like '* UID FETCH *' }).Count | Should -Be 2 -Because 'the summary and the text of the one message read are fetched, and nothing of the others'
+        @($commands | Where-Object { $_ -like '* UID FETCH *' }).Count | Should -Be 2 -Because 'the summaries of the batch come in one fetch, and the text of the one message read in another'
         @($commands | Where-Object { $_ -like '* EXAMINE *' }).Count | Should -Be 1
+    }
+
+    # The summaries of the messages from the pipeline come in one fetch for each folder, a round trip saved for each
+    # message (measured: some 0.4 s against Gmail), and their texts one each
+    It 'reads the messages from the pipeline with one fetch of summaries for each folder, in the order they came' {
+        $all = @(Get-ImapMessage open -Folder All)
+        $inbox = @(Get-ImapMessage open -Folder Inbox)
+        $mixed = $all[0], $inbox[0], $all[1], $inbox[1]
+        $before = $server.State.Commands.Count
+
+        $result = @($mixed | Read-ImapMessage)
+
+        @($result | ForEach-Object { "$($_.Folder)/$($_.Uid)" }) | Should -Be @($mixed | ForEach-Object { "$($_.Folder)/$($_.Uid)" })
+        $result.Text | Should -Not -Contain $null
+        $commands = @($server.State.Commands.ToArray() | Select-Object -Skip $before)
+        @($commands | Where-Object { $_ -like '* UID FETCH *ENVELOPE*' }).Count | Should -Be 2 -Because 'the summaries of each folder come in one fetch'
+        @($commands | Where-Object { $_ -like '* UID FETCH *' -and $_ -notlike '*ENVELOPE*' }).Count | Should -Be 4 -Because 'the text of each message comes in a fetch of its own'
+    }
+
+    It 'reads in batches of ReadBatchSize UIDs, with a fetch of summaries for each batch' {
+        $all = @(Get-ImapMessage open -Folder All)
+        $size = InModuleScope ElektoImapPosh { $script:ReadBatchSize }
+        $before = $server.State.Commands.Count
+        InModuleScope ElektoImapPosh { $script:ReadBatchSize = 3 }
+        try {
+            $result = @($all | Read-ImapMessage)
+        } finally {
+            InModuleScope ElektoImapPosh -Parameters @{ Size = $size } { param($Size) $script:ReadBatchSize = $Size }
+        }
+
+        $result.Uid | Should -Be $all.Uid
+        $commands = @($server.State.Commands.ToArray() | Select-Object -Skip $before)
+        @($commands | Where-Object { $_ -like '* UID FETCH *ENVELOPE*' }).Count | Should -Be 2 -Because 'four messages come in a batch of three and one of one'
+    }
+
+    It 'fetches nothing of a batch that comes once MaxMessages is spent' {
+        $all = @(Get-ImapMessage open -Folder All)
+        $size = InModuleScope ElektoImapPosh { $script:ReadBatchSize }
+        $before = $server.State.Commands.Count
+        InModuleScope ElektoImapPosh { $script:ReadBatchSize = 2 }
+        try {
+            $result = @($all | Read-ImapMessage -Account one -WarningVariable warnings -WarningAction SilentlyContinue)
+        } finally {
+            InModuleScope ElektoImapPosh -Parameters @{ Size = $size } { param($Size) $script:ReadBatchSize = $Size }
+        }
+
+        $result.Count | Should -Be 1
+        "$warnings" | Should -Be "The policy 'one' lets one command read 1 message of tester: 3 more were not read."
+        $commands = @($server.State.Commands.ToArray() | Select-Object -Skip $before)
+        @($commands | Where-Object { $_ -like '* UID FETCH *ENVELOPE*' }).Count | Should -Be 1 -Because 'the second batch comes once the limit is spent'
     }
 
     It 'takes a folder from the pipeline by its exact name, so a label "Sent" stays that label' {

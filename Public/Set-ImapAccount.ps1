@@ -182,8 +182,10 @@ Function Set-ImapAccount {
     if ($secret) {
         Save-StoredPassword $Name $settings.User $secret
         Write-Verbose "Password of account '$Name' stored."
-    } elseif (-not (Get-AccountPassword $Name)) {
-        Write-Warning (Get-MissingPasswordMessage $Name)
+    } else {
+        $stored = Get-AccountPassword $Name
+        if ($stored.Failure) { Write-Warning "The password of account '$Name' could not be read: $($stored.Failure)" }
+        elseif (-not $stored) { Write-Warning (Get-MissingPasswordMessage $Name) }
     }
 
     # While an account is the default, the IMAP_* variables are of no use, and IMAP_PASS should not linger
