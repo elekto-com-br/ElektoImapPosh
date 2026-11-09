@@ -8,13 +8,14 @@ The PowerShell equivalent of "does it compile and pass": MailKitLite and MimeKit
 NuGet as Dependencies/packages.lock.json pins them, with the NuGet audit failing the restore on a known
 vulnerability, and their assemblies copied to ./lib, from where the module loads them (so the module runs
 from the source only after a first build). Then every script is parsed for syntax errors, the manifest is
-validated, PSScriptAnalyzer runs (when installed) and the Pester tests run (when Pester 5 or later is
-installed), in a process of their own with IMAP_CONFIG_DIR, and HOME on Linux and macOS, in a temporary
-folder; the build fails if the accounts of the machine changed (the files of their folders, and on Windows
-the credentials of the module, compared by name, size and time, never by what they hold), or if a test left
-accounts in that temporary folder. If everything passes, the package is staged at ./out/ElektoImapPosh, with all the functions
-in a single .psm1 and the assemblies in lib, and imported in a clean process to check that every function
-in the manifest is exported and has its help. It is then ready for Publish-PSResource.
+validated, PSScriptAnalyzer runs (when installed; any error or warning fails the build, in the tests too)
+and the Pester tests run (when Pester 5 or later is installed), in a process of their own with
+IMAP_CONFIG_DIR, and HOME on Linux and macOS, in a temporary folder; the build fails if the accounts of
+the machine changed (the files of their folders, and on Windows the credentials of the module, compared
+by name, size and time, never by what they hold), or if a test left accounts in that temporary folder.
+If everything passes, the package is staged at ./out/ElektoImapPosh, with all the functions in a single
+.psm1 and the assemblies in lib, and imported in a clean process to check that every function in the
+manifest is exported and has its help. It is then ready for Publish-PSResource.
 
 Needs the .NET SDK 10 or later, for the restore. Used by the GitHub workflows; can also be run locally
 before committing or tagging.
@@ -175,10 +176,13 @@ if (Get-Module -ListAvailable PSScriptAnalyzer) {
         Invoke-ScriptAnalyzer -Path (Join-Path $PSScriptRoot 'Tests') -Recurse -Severity $severity -ExcludeRule PSAvoidUsingWriteHost,
         PSUseDeclaredVarsMoreThanAssignments, PSUseShouldProcessForStateChangingFunctions
     )
-    if ($findings) { $findings | Format-Table -AutoSize RuleName, Severity, ScriptName, Line, Message | Out-String | Write-Host }
-    $analyzerErrors = @($findings | Where-Object Severity -EQ 'Error')
-    if ($analyzerErrors) { throw "PSScriptAnalyzer found $($analyzerErrors.Count) error(s)." }
-    Write-Host 'PSScriptAnalyzer OK.'
+    # Any finding fails the build, a warning in the tests too: none are let stand, so that a new one is seen at once
+    if ($findings) {
+        $findings | Format-Table -AutoSize RuleName, Severity, ScriptName, Line, Message | Out-String | Write-Host
+        $errorCount = @($findings | Where-Object Severity -EQ 'Error').Count
+        throw "PSScriptAnalyzer found $errorCount error(s) and $($findings.Count - $errorCount) warning(s)."
+    }
+    Write-Host 'PSScriptAnalyzer OK (0 errors, 0 warnings).'
 }
 else {
     Write-Warning 'PSScriptAnalyzer not installed; skipping static analysis.'

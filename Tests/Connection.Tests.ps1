@@ -51,7 +51,8 @@ BeforeAll {
                     $writer.WriteLine("$tag OK $command completed")
                 }
             } catch {
-                # The listener or the connection closed by Stop-FakeImapServer
+                # The listener or the connection closed by Stop-FakeImapServer: kept, for a test that wants to see why
+                $State.Error = $_.Exception.Message
             } finally {
                 $State.Closed = $true
             }
@@ -93,7 +94,7 @@ BeforeAll {
         [pscustomobject]@{ Runspace = $runspace; Result = $runspace.BeginInvoke() }
     }
 
-    function Reset-ImapVariables {
+    function Reset-ImapEnvironment {
         $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config'
         foreach ($name in 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_NO_TLS', 'IMAP_SKIP_CERTIFICATE_CHECK') { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
     }
@@ -153,7 +154,7 @@ Describe 'Waiting for the server' {
         } finally {
             $powershell.Dispose()
             $listener.Stop()
-            Reset-ImapVariables
+            Reset-ImapEnvironment
         }
     }
 
@@ -173,7 +174,7 @@ Describe 'Waiting for the server' {
         } finally {
             $command.Runspace.Dispose()
             Stop-FakeImapServer $server
-            Reset-ImapVariables
+            Reset-ImapEnvironment
         }
     }
 
@@ -193,7 +194,7 @@ Describe 'Waiting for the server' {
         } finally {
             $command.Runspace.Dispose()
             Stop-FakeImapServer $server
-            Reset-ImapVariables
+            Reset-ImapEnvironment
         }
     }
 
@@ -212,7 +213,7 @@ Describe 'Waiting for the server' {
         } finally {
             $command.Runspace.Dispose()
             Stop-FakeImapServer $server
-            Reset-ImapVariables
+            Reset-ImapEnvironment
         }
     }
 
@@ -230,7 +231,7 @@ Describe 'Waiting for the server' {
         } finally {
             $command.Runspace.Dispose()
             Stop-FakeImapServer $server
-            Reset-ImapVariables
+            Reset-ImapEnvironment
         }
     }
 }
@@ -322,7 +323,7 @@ Describe 'Test-ImapAccount against smtp4dev' -Skip:(-not $smtp4devInstalled) {
             $result.User | Should -Be 'tester'
             $result.Security | Should -Be 'None'
         } finally {
-            Reset-ImapVariables
+            Reset-ImapEnvironment
         }
     }
 }
@@ -400,7 +401,7 @@ Describe 'Encrypted connections, through a TLS proxy in front of smtp4dev' -Skip
             $result.Security | Should -Be 'StartTls'
             $result.SslProtocol | Should -BeIn 'Tls12', 'Tls13'
         } finally {
-            Reset-ImapVariables
+            Reset-ImapEnvironment
             $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config-tls'
         }
     }
