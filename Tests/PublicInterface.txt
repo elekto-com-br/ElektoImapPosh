@@ -115,6 +115,7 @@ Set-ImapPolicy
     -MaxMessages Int32, ValidateRange('NonNegative')
     -MaxMessageSize Int64, ValidateRange('NonNegative')
     -TrustAuthenticationResults String
+    -TrustSameDomain SwitchParameter
     -UseXOriginalFrom SwitchParameter
     -WhatIf SwitchParameter, alias wi
 

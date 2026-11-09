@@ -251,14 +251,14 @@ Describe 'What a policy withholds' {
         @{ Case = 'only DKIM passed, for another domain'; From = 'client@client.example'; Results = @('mx.google.com; dkim=pass header.i=@other.example; spf=pass smtp.mailfrom=client.example') }
         @{ Case = 'DKIM passed for the domain, but DMARC failed'; From = 'client@client.example'; Results = @('mx.google.com; dkim=pass header.i=@client.example; dmarc=fail header.from=client.example') }
         @{ Case = 'the From has two senders'; From = 'client@client.example, other@client.example'; Results = @('mx.google.com; dmarc=pass header.from=client.example') }
-        @{ Case = 'the header cannot be read'; From = 'client@client.example'; Results = @('not ; a = header') }
+        @{ Case = 'the header cannot be read'; From = 'client@client.example'; Results = @('mx.google.com; dmarc') }
     ) {
         $summary = New-Summary $From -AuthenticationResults $Results
 
         Get-Reason $trusted -Summary $summary | Should -Be "The sender is not authenticated by mx.google.com (no DMARC pass, nor a DKIM signature, for the domain of the From), and AllowReadFrom of the policy 'agent' passes only authenticated senders."
     }
 
-    # Gmail names the domain whose DMARC record it applied: header.from=claude.com for a sender at email.claude.com
+    # Gmail names the domain whose DMARC record it applied: header.from=example.com for a sender at news.example.com
     # (measured on a real Gmail)
     It 'takes as authenticated a sender of a subdomain when DMARC passed for a parent of it, as Gmail writes it' {
         $news = New-Summary 'Client News <news@email.client.example>' -AuthenticationResults 'mx.google.com; dkim=pass header.i=@email.client.example header.s=s1; spf=pass smtp.mailfrom=bounce@email.client.example; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=client.example'
@@ -353,6 +353,58 @@ Describe 'What a policy withholds' {
         }
 
         $milliseconds[1] | Should -BeLessThan ($milliseconds[0] * 5) -Because "with 1000 folders ($($milliseconds[1]) ms) the check should take about as long as with 10 ($($milliseconds[0]) ms)"
+    }
+
+    # Google Workspace delivers the mail between users of the same domain with no Authentication-Results, and stamps every
+    # message from outside, a forged one included (measured)
+    Context 'mail from inside the domain, with TrustSameDomain' {
+        BeforeAll {
+            $inside = @{ AllowReadFrom = @('*@elekto.example'); TrustAuthenticationResults = 'mx.google.com'; TrustSameDomain = $true }
+            $mailbox = 'me@elekto.example'
+            $colleague = 'Colleague <colleague@elekto.example>'
+            $notAuthenticated = "The sender is not authenticated by mx.google.com (no DMARC pass, nor a DKIM signature, for the domain of the From), and AllowReadFrom of the policy 'agent' passes only authenticated senders."
+            $hint = ' Mail from inside the domain carries no Authentication-Results: TrustSameDomain takes it as authenticated.'
+        }
+
+        It 'takes a sender of the mailbox''s own domain, on a message with no results of the receiving server, as authenticated' {
+            Get-Reason $inside -Summary (New-Summary $colleague) -User $mailbox | Should -BeNullOrEmpty
+            Get-Reason $inside -Summary (New-Summary 'Colleague <COLLEAGUE@Elekto.Example>') -User 'ME@ELEKTO.EXAMPLE' | Should -BeNullOrEmpty -Because 'a domain is read ignoring case'
+            Get-Reason $inside -Summary (New-Summary $colleague -AuthenticationResults 'mx.other.example; dmarc=pass header.from=elekto.example') -User $mailbox |
+                Should -BeNullOrEmpty -Because 'the results of another server, which a sender may write, do not count'
+        }
+
+        It 'says how mail from inside the domain is taken, when TrustSameDomain is off' {
+            $policy = @{ AllowReadFrom = @('*@elekto.example'); TrustAuthenticationResults = 'mx.google.com' }
+
+            Get-Reason $policy -Summary (New-Summary $colleague) -User $mailbox | Should -Be "$notAuthenticated$hint"
+            Get-Reason $policy -Summary (New-Summary $colleague -AuthenticationResults 'mx.google.com; dmarc=fail header.from=elekto.example') -User $mailbox |
+                Should -Be $notAuthenticated -Because 'a forged sender of the domain comes stamped by the receiving server'
+            Get-Reason $policy -Summary (New-Summary 'Someone <someone@other.example>') -User $mailbox | Should -Be $notAuthenticated
+        }
+
+        It 'does not take a sender as from inside the domain when <Case>' -TestCases @(
+            @{ Case = 'the receiving server stamped the message, as every forged one'; From = 'Colleague <colleague@elekto.example>'; Results = @('mx.google.com; dmarc=fail (p=REJECT sp=REJECT dis=NONE) header.from=elekto.example'); User = 'me@elekto.example' }
+            @{ Case = 'the results of the receiving server are below those of another'; From = 'Colleague <colleague@elekto.example>'; Results = @('mx.other.example; dmarc=pass header.from=elekto.example', 'mx.google.com; dmarc=fail header.from=elekto.example'); User = 'me@elekto.example' }
+            @{ Case = 'a header cannot be read'; From = 'Colleague <colleague@elekto.example>'; Results = @('mx.google.com; dmarc'); User = 'me@elekto.example' }
+            @{ Case = 'the sender is of another domain'; From = 'Someone <someone@other.example>'; Results = @(); User = 'me@elekto.example' }
+            @{ Case = 'the sender is of a subdomain'; From = 'Robot <robot@mail.elekto.example>'; Results = @(); User = 'me@elekto.example' }
+            @{ Case = 'the domain has a format character in it'; From = "Colleague <colleague@elek`u{200B}to.example>"; Results = @(); User = 'me@elekto.example' }
+            @{ Case = 'the From has two senders'; From = 'colleague@elekto.example, other@elekto.example'; Results = @(); User = 'me@elekto.example' }
+            @{ Case = 'the mailbox has no domain'; From = 'Colleague <colleague@elekto.example>'; Results = @(); User = 'tester' }
+        ) {
+            Get-Reason $inside -Summary (New-Summary $From -AuthenticationResults $Results) -User $User | Should -BeLike 'The sender is not authenticated by mx.google.com*'
+        }
+
+        It 'takes no sender without TrustAuthenticationResults' {
+            Get-Reason @{ AllowReadFrom = @('*@elekto.example'); TrustSameDomain = $true } -Summary (New-Summary $colleague) -User $mailbox |
+                Should -Be "AllowReadFrom of the policy 'agent' passes only authenticated senders, and the policy has no TrustAuthenticationResults to authenticate them."
+        }
+
+        It 'still withholds a colleague that a deny list names' {
+            $policy = $inside + @{ DenyReadFrom = @('colleague@elekto.example') }
+
+            Get-Reason $policy -Summary (New-Summary $colleague) -User $mailbox | Should -BeLike '*matches*in DenyReadFrom*'
+        }
     }
 
     Context 'the sender behind a Google Group, with UseXOriginalFrom' {

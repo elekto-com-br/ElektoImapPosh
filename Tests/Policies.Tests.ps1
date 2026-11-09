@@ -129,6 +129,29 @@ Describe 'The policy commands' {
         (Get-ImapPolicy agent).UseXOriginalFrom | Should -BeNullOrEmpty
     }
 
+    It 'keep TrustSameDomain as true, and take it away with -TrustSameDomain:$false' {
+        Set-ImapPolicy agent -AllowAttachmentsFrom '*@example.com' -TrustAuthenticationResults mx.google.com -TrustSameDomain
+
+        (Read-Json).Policies.agent.TrustSameDomain | Should -BeTrue
+        (Get-Content -Path $accountsFile -Raw) | Should -Match '"TrustSameDomain": true'
+        (Get-ImapPolicy agent).TrustSameDomain | Should -BeTrue
+
+        Set-ImapPolicy agent -TrustSameDomain:$false
+
+        (Read-Json).Policies.agent.Keys | Should -Not -Contain 'TrustSameDomain'
+        (Get-ImapPolicy agent).TrustSameDomain | Should -BeNullOrEmpty
+    }
+
+    It 'warn that TrustSameDomain takes no sender without TrustAuthenticationResults' {
+        Set-ImapPolicy agent -TrustSameDomain -WarningVariable warnings -WarningAction SilentlyContinue
+
+        "$warnings" | Should -BeLike "Policy 'agent' has TrustSameDomain but no TrustAuthenticationResults*it takes no sender.*"
+
+        Set-ImapPolicy agent -TrustAuthenticationResults mx.google.com -WarningVariable warnings
+
+        $warnings | Should -BeNullOrEmpty
+    }
+
     It 'warn that the allow lists of senders pass no sender without TrustAuthenticationResults' {
         Set-ImapPolicy agent -AllowReadFrom '*@example.com' -AllowAttachmentsFrom '*@example.com' -WarningVariable warnings -WarningAction SilentlyContinue
 
