@@ -7,6 +7,19 @@ A PowerShell module for reading email by IMAP, from several accounts on the same
 > [!NOTE]
 > Under development: the first version, 0.1.0, is not on the PowerShell Gallery yet.
 
+## Before Giving It to an AI Agent
+
+> [!WARNING]
+> If you give this module to an AI agent, you do so at your own risk: **the responsibility for whatever comes of it rests entirely with you, and in no way with Elekto or the authors of this module.** It is provided as is, with no warranty of any kind (see the [license](LICENSE)). Caveat emptor.
+
+This is no prohibition: the policies were made for agents (see [Policies](#policies)). But think it through, and be careful:
+
+- **Your mail leaves your machine.** Unless the model runs on your own machine, what an agent reads with this module goes to the provider of its model (Anthropic, OpenAI, Google, Microsoft or another), under that provider's terms and privacy policy: the senders, recipients and subjects of the messages it lists, the text of those it reads, the files it opens. Your mail holds the personal data of others too (clients, colleagues, family). Are you allowed to share it with that provider, by your contracts and by the law where you are (LGPD in Brazil, GDPR in Europe)?
+- **Mail is untrusted input.** Anyone can send you a message, write in it text that an agent may take for instructions (prompt injection), and put any address in it as the sender. The module keeps out of what it returns the characters that would hide text from you or drive your terminal, but no tool can tell an instruction from a message. Look at what an agent means to do after reading mail before you let it act, above all when it would send, buy, pay or delete.
+- **Never let instructions reach an agent by mail.** Do not set up an agent that reads a mailbox and does what its messages ask, not even those of a sender you trust: a sender can be forged, and a reply or a forward carries the words of others.
+- **Keep private what should stay private.** Unlike a connector that hands an agent the whole mailbox, a policy keeps from it the text and the attachments of the senders and folders you choose (your bank, your doctor, a client's affairs), and limits how far back it searches and how much one command downloads. Start with a narrow policy, and widen it as you learn what the agent needs.
+- **A policy prevents accidents, not misuse.** The metadata of every message (senders, recipients, subjects, the names of attachments) can always be read. An agent that runs commands as you can change the policy, edit the accounts file or read the stored passwords, and agents can be very creative in finding a way to carry out a task. If you do not want to trust an agent with your mail, do not give it this tool.
+
 ## Requirements
 
 PowerShell 7.6 or later, on Windows, Linux or macOS. The module carries [MailKitLite and MimeKitLite](THIRD-PARTY-NOTICES.md), MailKit and MimeKit without BouncyCastle, so nothing else needs installing.
@@ -157,6 +170,7 @@ Get-ImapPolicy                  # the policies, and the accounts that follow eac
 - `NoTls` (`Set-ImapAccount <name> -NoTls`, or `IMAP_NO_TLS=true`) connects in plain text, password included. It is meant for test servers on your own machine that have no TLS, such as [smtp4dev](https://github.com/rnwood/smtp4dev). Always use TLS with a real mailbox, and be responsible.
 - The server's certificate is checked: issued by an authority the machine trusts, for the name of the server, and in date. `SkipCertificateCheck` (`Set-ImapAccount <name> -SkipCertificateCheck`, or `IMAP_SKIP_CERTIFICATE_CHECK=true`) accepts any certificate, for servers with one of their own and for test servers: the connection is still encrypted, but nothing proves that the other end is the server you meant. Gmail never needs it. Be responsible.
 - Both are settings of the account, as they are of its server, so every command that reads from it connects the same way. `-NoTls:$false` and `-SkipCertificateCheck:$false` turn them off.
+
 ### Gmail and Google Workspace
 
 Gmail and Google Workspace come first, and their ways are followed where IMAP alone would mislead. What was seen on real mailboxes:
