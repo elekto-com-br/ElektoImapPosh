@@ -226,10 +226,14 @@ $script:ReadBatchSize = 100
 
 # Reads the messages that Read-ImapMessage kept, each request one item of its pipeline (its session, the name of its
 # folder, whether that name is literal, its UIDs and UidValidity), and returns what Read-ImapMessage returns for them:
-# first the summaries, one FETCH for each folder of each account (and UidValidity given), in the order the folders came;
-# then each message in the order it came, its folder opened again when another was opened since. Once MaxMessages is
-# spent, the messages of a folder not yet fetched are left out without fetching anything; within a batch, the summaries
-# (metadata, which a policy never withholds) may be fetched of messages that the limit then leaves out.
+# first the summaries, one FETCH for each folder of each account (and UidValidity given), in the order the folders came,
+# and the policy of each message checked with them, while that folder is the one open, since on Gmail the check may
+# search it for a label (before, the check came with the text, when another folder of the batch was open, and MailKit
+# refused that search, so every message of a label was withheld under DenyFolders Important: found in the review
+# before the first release); then each message in the order it came, its folder opened again when another was opened
+# since. Once MaxMessages is spent, the messages of a folder not yet fetched are left out without fetching anything;
+# within a batch, the summaries (metadata, which a policy never withholds) may be fetched of messages that the limit
+# then leaves out.
 function Read-ImapMessageBatch($Cmdlet, [object[]]$Requests, [switch]$Html, [int]$MaxLength) {
     $groups = [System.Collections.Generic.List[object]]::new()
     $byKey = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
@@ -238,7 +242,7 @@ function Read-ImapMessageBatch($Cmdlet, [object[]]$Requests, [switch]$Html, [int
         $key = "$($request.Session.BatchKey)`n$([int][bool]$request.Literal)`n$($request.UidValidity)`n$($request.Folder)"
         $group = $null
         if (-not $byKey.TryGetValue($key, [ref]$group)) {
-            $group = @{ Session = $request.Session; Folder = $request.Folder; Literal = $request.Literal; UidValidity = $request.UidValidity; Uids = [System.Collections.Generic.List[uint32]]::new(); Fetched = $false; Found = $null }
+            $group = @{ Session = $request.Session; Folder = $request.Folder; Literal = $request.Literal; UidValidity = $request.UidValidity; Uids = [System.Collections.Generic.List[uint32]]::new(); Fetched = $false; Found = $null; Withheld = @{} }
             $byKey[$key] = $group
             $groups.Add($group)
         }
@@ -250,6 +254,12 @@ function Read-ImapMessageBatch($Cmdlet, [object[]]$Requests, [switch]$Html, [int
         if ($policy -and $policy.MaxMessages -and [int]$group.Session.MessagesHandled -ge $policy.MaxMessages) { continue }
         $group.Found = Get-ImapMessageByUid $Cmdlet $group.Session $group.Folder -Literal:$group.Literal -Uid $group.Uids.ToArray() -UidValidity $group.UidValidity
         $group.Fetched = $true
+        # The one check of the policy, on the metadata, made now, with the folder of the messages still open: on Gmail
+        # it may search that folder for a label (Get-LabelledUidSet), and MailKit refuses the search of a folder once
+        # another folder of the batch is opened. By the keys of ByUid, so that a message found always has its answer.
+        if ($group.Found) {
+            foreach ($entry in @($group.Found.ByUid.GetEnumerator())) { $group.Withheld[$entry.Key] = Get-WithheldReason $group.Session $group.Found.Folder $entry.Value }
+        }
     }
 
     foreach ($request in $Requests) {
@@ -270,8 +280,8 @@ function Read-ImapMessageBatch($Cmdlet, [object[]]$Requests, [switch]$Html, [int
                 Write-ImapError $Cmdlet "There is no message with the UID $id in the folder '$($item.FullName)' of $($settings.User)." 'MessageNotFound' ObjectNotFound $id
                 continue
             }
-            # The one check of the policy, on the metadata, before the body is fetched
-            $reason = Get-WithheldReason $session $item $summary
+            # The check of the policy, made on the metadata when the summaries came, before the body is fetched
+            $reason = $request.Group.Withheld[$id]
             if ($reason) {
                 Write-ImapError $Cmdlet "The message $id in the folder '$($item.FullName)' of $($settings.User) was not read: $reason" 'MessageWithheld' PermissionDenied $id
                 continue

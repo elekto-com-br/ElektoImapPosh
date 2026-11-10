@@ -36,8 +36,9 @@ reported as an error without stopping the others.
 The folders to search, instead of the inbox: a special use (Inbox, All, Archive, Drafts, Flagged,
 Important, Junk, Sent or Trash), which stands for the folder the server marks so, or else for the
 folder of that name; or a full folder name, such as "[Gmail]/Sent Mail" or "Work/Clients", ignoring
-case; or a wildcard pattern matched against the full names. A name that matches no folder is reported
-as an error.
+case; or a wildcard pattern matched against the full names, where only * and ? are wildcards and
+brackets are taken as written, so that "[Gmail]/*" is every system folder of Gmail. A name that matches
+no folder is reported as an error, a pattern that matches none is not.
 Also taken from the pipeline, as the folders listed by Get-ImapFolder: each is then the folder of that
 exact full name, so that a label "Sent" of the user stays that label.
 

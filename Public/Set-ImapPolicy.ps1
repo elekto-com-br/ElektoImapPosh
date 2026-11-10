@@ -25,7 +25,8 @@ The name of the policy: letters, digits, '.', '-' and '_', starting with a lette
 
 .PARAMETER DenyFolders
 Folders whose messages are listed, with their metadata, but not read nor changed: full names,
-special uses (Junk, Trash...) or wildcard patterns, as -Folder of Get-ImapFolder takes them.
+special uses (Junk, Trash...) or wildcard patterns, as -Folder of Get-ImapFolder takes them: only * and
+? are wildcards, and brackets are taken as written, so that "[Gmail]/*" is every system folder of Gmail.
 
 .PARAMETER AllowReadFrom
 The senders whose messages may be read in full; those of any other sender are withheld. Addresses or
@@ -78,8 +79,10 @@ that a Google Group of the mailbox's own domain relays: the group writes its own
 write that header too, it is taken only when the From is of the domain of the mailbox's user,
 authenticated, and when the ARC result in the Authentication-Results of TrustAuthenticationResults,
 which the group sealed when it took the message, says that DMARC passed for the domain of
-X-Original-From. Meant for those who read headers: the reason in Withheld says which of these a message
-missed. -UseXOriginalFrom:$false takes it away.
+X-Original-From. A message that misses any of these is judged by its From, and the list must then name
+the sender in X-Original-From as well, so that a sender the group did not vouch for never passes as the
+group. Meant for those who read headers: the reason in Withheld says which of these a message missed.
+-UseXOriginalFrom:$false takes it away.
 
 .PARAMETER TrustSameDomain
 Makes the allow lists of senders (AllowReadFrom, AllowAttachmentsFrom) take for authenticated a sender of
@@ -123,6 +126,8 @@ Set-ImapPolicy team -AllowAttachmentsFrom '*@example.com' -TrustAuthenticationRe
 
 On a Google Workspace mailbox of example.com, lets the attachments of its authenticated senders be saved,
 those of colleagues of the same domain included, whose messages come with no Authentication-Results.
+A Google Group of example.com is such a sender too, whatever it relays from outside: add
+-UseXOriginalFrom to judge the sender behind it.
 #>
 Function Set-ImapPolicy {
     [CmdletBinding(SupportsShouldProcess)]

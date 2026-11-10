@@ -37,12 +37,16 @@ $script:FakeGmailFolders = [ordered]@{
     'Sent'              = '\HasNoChildren'
 }
 
-function Start-FakeGmail([hashtable[]]$Messages) {
+# -Folders, -Capabilities, -Namespace (the answer to NAMESPACE, which MailKit asks when NAMESPACE is announced) and
+# -Delimiter make it stand for a server that is not Gmail. With -Namespace, LIST matches its pattern as RFC 3501 says
+# (* is anything, % anything but the delimiter), so that "INBOX.*", which MailKit sends for the namespace "INBOX.",
+# does not match INBOX itself, as on Courier and Cyrus.
+function Start-FakeGmail([hashtable[]]$Messages, $Folders = $script:FakeGmailFolders, [string]$Capabilities = 'IMAP4rev1 X-GM-EXT-1 SPECIAL-USE CHILDREN', [string]$Namespace, [string]$Delimiter = '/') {
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
     $listener.Start()
     $state = [hashtable]::Synchronized(@{ Commands = [Collections.Concurrent.ConcurrentQueue[string]]::new(); Client = $null })
     $runspace = [powershell]::Create().AddScript({
-            param($Listener, $State, $Messages, $Folders)
+            param($Listener, $State, $Messages, $Folders, $Capabilities, $Namespace, $Delimiter)
 
             function Format-Quoted([string]$Text) {
                 if (-not $Text) { return 'NIL' }
@@ -230,7 +234,6 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                 $Writer.Write("* $Sequence FETCH ($answer)`r`n")
             }
 
-            $capabilities = 'IMAP4rev1 X-GM-EXT-1 SPECIAL-USE CHILDREN'
             while ($true) {
                 try { $client = $Listener.AcceptTcpClient() } catch { break }
                 $State.Client = $client
@@ -251,12 +254,21 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                         if ($command -eq 'UID') { $command, $arguments = $arguments -split ' ', 2; $command = "UID $($command.ToUpperInvariant())" }
                         switch ($command) {
                             'CAPABILITY' { $writer.WriteLine("* CAPABILITY $capabilities") }
+                            'NAMESPACE' { if ($Namespace) { $writer.WriteLine("* NAMESPACE $Namespace") } }
                             'LIST' {
                                 $pattern = ($arguments -split ' ', 2)[1].Trim('"')
-                                if ($pattern -eq '') { $writer.WriteLine('* LIST (\Noselect) "/" ""') }
+                                if ($pattern -eq '') { $writer.WriteLine("* LIST (\Noselect) `"$Delimiter`" `"`"") }
+                                $regex = '^' + (([regex]::Escape($pattern) -creplace '\\\*', '.*') -creplace '%', "[^$([regex]::Escape($Delimiter))]*") + '$'
                                 foreach ($entry in $Folders.GetEnumerator()) {
-                                    if ($pattern -like '*[*%]*' -or $pattern -eq $entry.Key) { $writer.WriteLine("* LIST ($($entry.Value)) `"/`" $(Format-Quoted $entry.Key)") }
+                                    $listed = if ($Namespace) { $pattern -ne '' -and $entry.Key -cmatch $regex } else { $pattern -like '*[*%]*' -or $pattern -eq $entry.Key }
+                                    if ($listed) { $writer.WriteLine("* LIST ($($entry.Value)) `"$Delimiter`" $(Format-Quoted $entry.Key)") }
                                 }
+                            }
+                            # The counts of a folder, which MailKit asks one folder at a time without LIST-STATUS
+                            'STATUS' {
+                                $name = ($arguments -creplace '\s*\([^)]*\)$').Trim('"') -creplace '\\(.)', '$1'
+                                $inFolder = Get-FolderMessage $Messages $name
+                                $writer.WriteLine("* STATUS $(Format-Quoted $name) (MESSAGES $($inFolder.Count) UNSEEN $(@($inFolder | Where-Object { -not $_.Seen }).Count))")
                             }
                             { $_ -in 'EXAMINE', 'SELECT' } {
                                 $selected = $arguments.Trim('"') -replace '\\(.)', '$1'
@@ -323,7 +335,7 @@ function Start-FakeGmail([hashtable[]]$Messages) {
                     $client.Dispose()
                 }
             }
-        }).AddArgument($listener).AddArgument($state).AddArgument($Messages).AddArgument($script:FakeGmailFolders)
+        }).AddArgument($listener).AddArgument($state).AddArgument($Messages).AddArgument($Folders).AddArgument($Capabilities).AddArgument($Namespace).AddArgument($Delimiter)
     $null = $runspace.BeginInvoke()
     [pscustomobject]@{ Port = $listener.LocalEndpoint.Port; Listener = $listener; Runspace = $runspace; State = $state }
 }
