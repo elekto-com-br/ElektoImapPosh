@@ -93,3 +93,84 @@ Describe 'The test scripts' {
         $found | Should -BeNullOrEmpty
     }
 }
+
+# The names of variables ignore case: "foreach ($domain in ...)" in a function with the parameter $Domain writes that
+# parameter, and what follows the loop reads the last item for it. Test-DomainAuthenticated did so, and took a DKIM
+# signature of any domain, named as header.d, for one of the domain of the From (found in the review before the first release).
+Describe 'The functions of the module' {
+    BeforeAll {
+        # The variables that the left side of an assignment writes: $a, [string]$a, each of $a, $b; not $a.Name nor $a[0]
+        function Get-AssignedVariable($Left) {
+            if ($Left -is [System.Management.Automation.Language.VariableExpressionAst]) { $Left }
+            elseif ($Left -is [System.Management.Automation.Language.AttributedExpressionAst]) { Get-AssignedVariable $Left.Child }
+            elseif ($Left -is [System.Management.Automation.Language.ArrayLiteralAst]) { foreach ($element in $Left.Elements) { Get-AssignedVariable $element } }
+        }
+
+        # The places of a script that write a parameter of the function they are in by accident, each as
+        # "<name>:<line> <function>: $<variable> is the parameter $<Parameter>": the variable of a foreach that is one of
+        # its parameters, and an assignment to one in another spelling than the one it is declared in (in that very
+        # spelling, a function gives a parameter of its own another value on purpose)
+        function Find-ParameterOverwrite([string]$Name, [string]$Script) {
+            $errors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseInput($Script, [ref]$null, [ref]$errors)
+            $errors | Should -BeNullOrEmpty -Because "$Name should parse"
+            $writes = $ast.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.ForEachStatementAst] -or $node -is [System.Management.Automation.Language.AssignmentStatementAst]
+                }, $true)
+            foreach ($write in $writes) {
+                # The nearest function around it: one defined inside another has parameters of its own
+                $function = $write.Parent
+                while ($function -and $function -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $function = $function.Parent }
+                if (-not $function) { continue }
+                $parameters = @(@($function.Parameters) + @($function.Body.ParamBlock.Parameters) | Where-Object { $_ } | ForEach-Object { $_.Name.VariablePath.UserPath })
+                $loop = $write -is [System.Management.Automation.Language.ForEachStatementAst]
+                $variables = if ($loop) { $write.Variable } else { Get-AssignedVariable $write.Left }
+                foreach ($variable in $variables) {
+                    $written = $variable.VariablePath.UserPath
+                    foreach ($parameter in $parameters) {
+                        if (-not [string]::Equals($written, $parameter, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                        if ($loop -or -not [string]::Equals($written, $parameter, [StringComparison]::Ordinal)) {
+                            "${Name}:$($write.Extent.StartLineNumber) $($function.Name): `$$written is the parameter `$$parameter"
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    # A form the search missed would let the test of the module pass without finding anything
+    It 'finds a loop or an assignment that writes a parameter by accident, and none of those meant' {
+        $accident = @'
+function f($Results, [string]$Domain) { foreach ($domain in $Results) { } }
+function f { param($Folder) process { foreach ($Folder in 1, 2) { } } }
+function f($Name) { $name = 'x' }
+function f($Name) { [string]$name = 'x' }
+function f($Name) { $other, $NAME = 1, 2 }
+function f($Count) { $count += 1 }
+function f($Name) { 1 | ForEach-Object { $name = $_ } }
+'@
+        $meant = @'
+function f($Name) { $Name = 'x' }
+function f($Domain) { foreach ($signer in 1, 2) { $signer -eq $domain } }
+function f($Name) { function g($Other) { foreach ($name in 1, 2) { } } }
+function f($Settings) { $settings.Name = 'x'; $settings['Name'] = 'x' }
+function f($Name) { $script:name = 'x' }
+foreach ($name in 1, 2) { $Name = $name }
+'@
+
+        $found = @(Find-ParameterOverwrite 'accident' $accident)
+        $found | ForEach-Object { [int]($_ -creplace '^accident:(\d+) .*$', '$1') } | Should -Be (1..7) -Because "each line has one such write: $($found -join '; ')"
+        Find-ParameterOverwrite 'meant' $meant | Should -BeNullOrEmpty
+    }
+
+    It 'write none of their parameters by accident' {
+        $root = Split-Path $PSScriptRoot
+        $files = @(Get-ChildItem -LiteralPath (Join-Path $root 'Private'), (Join-Path $root 'Public') -Filter '*.ps1') + (Get-Item -LiteralPath (Join-Path $root 'ElektoImapPosh.psm1'))
+        $files.Count | Should -BeGreaterThan 10
+
+        $found = foreach ($file in $files) { Find-ParameterOverwrite "$($file.Directory.Name)/$($file.Name)" ([IO.File]::ReadAllText($file.FullName)) }
+
+        $found | Should -BeNullOrEmpty -Because 'the names of variables ignore case, so such a write changes the parameter for the rest of the function'
+    }
+}

@@ -327,6 +327,19 @@ Describe 'Get-ImapFolder on a Gmail mailbox' {
         (Get-ImapFolder gmail -Folder Sent).Folder | Should -Be '[Gmail]/E-mails enviados'
     }
 
+    # To a wildcard pattern "[Gmail]" is one of five letters: "[Gmail]/*" listed nothing, and a typo was no error
+    It 'takes the brackets of a pattern as written, and reports a bracketed name with a typo' {
+        (Get-ImapFolder gmail -Folder '[Gmail]/*').Folder | Should -Be '[Gmail]/E-mails enviados', '[Gmail]/Todos os e-mails'
+        (Get-ImapFolder gmail -Folder '[Gmail]/Todos*').Folder | Should -Be '[Gmail]/Todos os e-mails'
+        (Get-ImapFolder gmail -Folder '`[Gmail`]/*').Folder | Should -Be '[Gmail]/E-mails enviados', '[Gmail]/Todos os e-mails' -Because 'the brackets escaped, the way around it before, still work'
+
+        $result = Get-ImapFolder gmail -Folder '[Gmail]/Lixeiraa' -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $result | Should -BeNullOrEmpty
+        $errors.Count | Should -Be 1
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'FolderNotFound,*'
+    }
+
     It 'takes a folder from the pipeline by its exact name, so a label "Sent" stays that label' {
         $result = [PSCustomObject]@{ Account = 'gmail'; Folder = 'Sent' } | Get-ImapFolder
 

@@ -93,7 +93,7 @@ Describe 'The policy commands' {
         @{ Setting = 'AllowAttachmentsFrom'; Value = 'me@example.com', 'example.com'; Message = "*'example.com' has no @*" }
         @{ Setting = 'DenyAttachmentTypes'; Value = '.exe'; Message = "*-DenyAttachmentTypes must be a list of MIME types or file names, such as application/pdf, image/* or *.pdf, and '.exe' would match only a file of that very name: for the extension, write *.exe." }
         @{ Setting = 'AllowAttachmentTypes'; Value = 'pdf'; Message = "*'pdf' would match only a file of that very name: for the extension, write *.pdf." }
-        @{ Setting = 'DenyFolders'; Value = 'Finance/[2026'; Message = '*-DenyFolders has ''Finance/`[2026'', which is not a valid wildcard pattern.' }
+        @{ Setting = 'DenyReadFrom'; Value = '*@example[.com'; Message = '*-DenyReadFrom has ''`*@example`[.com'', which is not a valid wildcard pattern.' }
         # A range reversed only once composed, as it would be matched (U+232A is U+3009 composed)
         @{ Setting = 'DenyAttachmentTypes'; Value = '*[' + [char]0x232A + '-' + [char]0x3008 + ']*'; Message = '*-DenyAttachmentTypes has *, which is not a valid wildcard pattern.' }
         @{ Setting = 'DenyFolders'; Value = 'Junk', ''; Message = '*-DenyFolders must be a non-empty list of folder names or patterns, with no empty entries*' }
@@ -105,6 +105,16 @@ Describe 'The policy commands' {
 
         { Set-ImapPolicy agent @parameters } | Should -Throw -ExpectedMessage $Message
         Get-Content -Path $accountsFile -Raw | Should -Be $before
+    }
+
+    # The brackets of a folder pattern are taken as written (ConvertTo-FolderPattern), so that no folder pattern is
+    # invalid, "[Gmail" included
+    It 'accept the folder pattern <Value>, as written' -TestCases @(
+        @{ Value = '[Gmail]/*' }, @{ Value = '[Gmail' }, @{ Value = 'Finance/[2026' }, @{ Value = '`[Gmail`]/*' }
+    ) {
+        Set-ImapPolicy agent -DenyFolders $Value
+
+        (Get-ImapPolicy agent).DenyFolders | Should -Be $Value
     }
 
     # A bare extension is refused, not a pattern nor a name with more than an extension
@@ -344,8 +354,8 @@ Describe 'Policies in the accounts file' {
             Policies = '{ "agent": { "MaxAgeDays": 0 } }' }
         @{ Case = 'a sender without @'; Message = "*DenyReadFrom of policy 'agent'*'bank.example' has no @*"
             Policies = '{ "agent": { "DenyReadFrom": ["*@example.com", "bank.example"] } }' }
-        @{ Case = 'an invalid pattern'; Message = '*DenyFolders of policy ''agent''*has ''`[Gmail'', which is not a valid wildcard pattern.'
-            Policies = '{ "agent": { "DenyFolders": ["[Gmail"] } }' }
+        @{ Case = 'an invalid pattern'; Message = '*DenyReadFrom of policy ''agent''*has ''`*@example`[.com'', which is not a valid wildcard pattern.'
+            Policies = '{ "agent": { "DenyReadFrom": ["*@example[.com"] } }' }
         @{ Case = 'an empty list'; Message = "*AllowReadFrom of policy 'agent'*must be a non-empty list*"
             Policies = '{ "agent": { "AllowReadFrom": [] } }' }
         @{ Case = 'a server that is not a name'; Message = "*TrustAuthenticationResults of policy 'agent'*must be the name*"

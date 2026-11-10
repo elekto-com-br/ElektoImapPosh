@@ -17,7 +17,7 @@
 #   sender. The allow lists of senders match only authenticated senders; the deny lists match the From as written,
 #   and also the Sender, Reply-To and X-Original-From, since an address there only withholds more.
 # - UseXOriginalFrom: the allow lists judge the sender behind a Google Group of the mailbox's own domain, which writes
-#   its own address in the From (Get-RelayedSender).
+#   its own address in the From (Get-RelayedSender); one they cannot take must be in the list too, as the From is.
 # - TrustSameDomain: the allow lists take for authenticated a sender of the mailbox's own domain whose message carries no
 #   results of the trusted server: mail from inside the domain, which Google Workspace delivers without them
 #   (Test-InsideSender). Off by default, as a server that does not stamp every message from outside would let a
@@ -74,7 +74,8 @@ function Get-PolicyValueError([string]$Setting, $Value) {
         $what = @{ Folders = 'folder names or patterns'; Senders = 'addresses or patterns, such as *@example.com'; Attachments = 'MIME types or file names, such as application/pdf, image/* or *.pdf' }[$kind]
         return "must be a non-empty list of $what, with no empty entries"
     }
-    $wrong = @($items | Where-Object { try { Assert-WildcardPattern $_; $false } catch { $true } })
+    # A folder pattern is checked as Select-ImapFolder applies it, its brackets taken as written
+    $wrong = @($items | Where-Object { try { Assert-WildcardPattern $(if ($kind -eq 'Folders') { ConvertTo-FolderPattern $_ } else { $_ }); $false } catch { $true } })
     if ($wrong.Count) { return "has '$($wrong[0])', which is not a valid wildcard pattern" }
     if ($kind -eq 'Senders') {
         $wrong = @($items | Where-Object { -not $_.Contains('@') })
@@ -254,9 +255,12 @@ function Test-DomainAuthenticated($Results, [string]$Domain) {
         return [bool]@($dmarc | Where-Object { $_.Result -eq 'pass' -and @(Get-ResultProperty $_ 'header' 'from' | Where-Object { Test-WithinDomain $Domain $_ }).Count }).Count
     }
     foreach ($result in @($Results.Results | Where-Object { $_.Method -eq 'dkim' -and $_.Result -eq 'pass' })) {
-        # The signing domain (header.d), or the domain of the signing identity (header.i), as Gmail writes it
+        # The signing domain (header.d), or the domain of the signing identity (header.i), as Gmail writes it. The loop
+        # has a variable of its own, not $domain: the names of variables ignore case, so that one was the parameter
+        # $Domain, and each signer was then compared with itself, whatever the From (measured, found in the review
+        # before the first release)
         $signers = [System.Collections.Generic.List[string]]::new()
-        foreach ($domain in (Get-ResultProperty $result 'header' 'd')) { $signers.Add($domain) }
+        foreach ($signingDomain in (Get-ResultProperty $result 'header' 'd')) { $signers.Add($signingDomain) }
         foreach ($identity in (Get-ResultProperty $result 'header' 'i')) { $signers.Add(($identity -csplit '@')[-1]) }
         if (@($signers | Where-Object { Test-SameText $_ $Domain }).Count) { return $true }
     }
@@ -295,22 +299,29 @@ function Test-InsideSender($Session, $Summary, [switch]$WhateverThePolicy) {
 
 # The sender behind a message that a Google Group of the mailbox's own domain relays, for the allow lists of a policy
 # with UseXOriginalFrom: a hashtable with Sender, the mailbox of the topmost X-Original-From, or $null and Why, the
-# reason it is not taken. The group writes its own address in the From and the sender's in X-Original-From, which any
-# sender can also write. So it is taken only when the From is of the domain of the mailbox's user (a group of its
-# own), authenticated (Test-DomainAuthenticated), and when the ARC result in the trusted Authentication-Results,
-# which the group sealed when it took the message ("arc=pass (... dmarc=pass fromdomain=client.example)"), says that
-# DMARC passed for the domain of X-Original-From.
+# reason it is not taken, with Named, the address it names all the same ($null when it names no single sender). The
+# group writes its own address in the From and the sender's in X-Original-From, which any sender can also write. So
+# it is taken only when the From is of the domain of the mailbox's user (a group of its own), authenticated
+# (Test-DomainAuthenticated), and when the ARC result in the trusted Authentication-Results, which the group sealed
+# when it took the message ("arc=pass (... dmarc=pass fromdomain=client.example)"), says that DMARC passed for the
+# domain of X-Original-From. A sender named and not taken must still be in the list, as the From is
+# (Get-SenderOutsideReason). Without the header there is no sender behind the From, and no Why.
 function Get-RelayedSender($Session, $Summary) {
     $header = @($Summary.Headers | Where-Object { $_.Field -eq 'X-Original-From' })[0]
+    if (-not $header) { return @{ Sender = $null; Why = $null } }
+    # PowerShell binds the TryParse of InternetAddress here, which takes a group too ("Team: a@x.example;"), and a
+    # list of two senders is not parsed at all (both measured): only a mailbox is one sender
     $original = $null
-    if (-not $header -or -not [MimeKit.MailboxAddress]::TryParse($header.Value, [ref]$original)) { return @{ Sender = $null; Why = $null } }
+    if (-not [MimeKit.MailboxAddress]::TryParse($header.Value, [ref]$original) -or $original -isnot [MimeKit.MailboxAddress]) {
+        return @{ Sender = $null; Why = 'it does not name one sender'; Named = $null }
+    }
     $policy = $Session.Settings.Policy
     $own = if ($Session.Settings.User -cmatch '@([^@]+)$') { $Matches[1] } else { $null }
     $relays = @($Summary.Envelope.From.Mailboxes)
-    if (-not $own) { return @{ Sender = $null; Why = "the user of the mailbox, $($Session.Settings.User), has no domain whose groups to trust" } }
-    if ($relays.Count -ne 1 -or -not (Test-SameText $relays[0].Domain $own)) { return @{ Sender = $null; Why = "its From is not of $own, the domain of the mailbox" } }
+    if (-not $own) { return @{ Sender = $null; Why = "the user of the mailbox, $($Session.Settings.User), has no domain whose groups to trust"; Named = $original.Address } }
+    if ($relays.Count -ne 1 -or -not (Test-SameText $relays[0].Domain $own)) { return @{ Sender = $null; Why = "its From is not of $own, the domain of the mailbox"; Named = $original.Address } }
     $results = Get-TrustedAuthenticationResult $Summary $policy.TrustAuthenticationResults
-    if (-not (Test-DomainAuthenticated $results $own)) { return @{ Sender = $null; Why = "the group that relays it is not authenticated" } }
+    if (-not (Test-DomainAuthenticated $results $own)) { return @{ Sender = $null; Why = "the group that relays it is not authenticated"; Named = $original.Address } }
     foreach ($arc in @($results.Results | Where-Object { $_.Method -eq 'arc' -and $_.Result -eq 'pass' })) {
         # Ignoring case, as the names in Authentication-Results are read (RFC 8601), alike in every culture. The domain
         # it names may be a parent of the sender's, as in header.from (Test-DomainAuthenticated): only seen there, on a
@@ -318,7 +329,7 @@ function Get-RelayedSender($Session, $Summary) {
         $sealed = [regex]::Match([string]$arc.ResultComment, '(?:^|\s)dmarc=pass\s+fromdomain=(\S+)', 'IgnoreCase, CultureInvariant')
         if ($sealed.Success -and (Test-WithinDomain $original.Domain $sealed.Groups[1].Value)) { return @{ Sender = $original; Why = $null } }
     }
-    return @{ Sender = $null; Why = "the ARC result of $($policy.TrustAuthenticationResults) does not say that DMARC passed for $(Format-ShownText $original.Domain), the domain of its X-Original-From" }
+    return @{ Sender = $null; Why = "the ARC result of $($policy.TrustAuthenticationResults) does not say that DMARC passed for $(Format-ShownText $original.Domain), the domain of its X-Original-From"; Named = $original.Address }
 }
 
 # The addresses of a message that a deny list is matched against, each with the field it comes from: the From, as the
@@ -350,7 +361,10 @@ function Test-OwnMessage($Session, $Folder, $Summary) {
 # Why a list of senders of a policy (AllowReadFrom or AllowAttachmentsFrom, named by $Setting) does not pass the
 # sender of a message, in a sentence, or $null when it does. It passes only an authenticated sender, or the user's own
 # message ($Own), whose every sender it names. Under UseXOriginalFrom, the sender behind a group of the mailbox's own
-# domain is the one judged (Get-RelayedSender), when it can be taken; the reason says why, when it cannot.
+# domain is the one judged (Get-RelayedSender), when it can be taken. When it cannot, the From is judged, and the
+# list must name the sender of X-Original-From as well: the From alone would pass whatever a group relays, under a
+# list that names the group or its whole domain, and only for the senders that the group did not vouch for, while one
+# it vouched for is withheld. The reason says why it was not taken.
 function Get-SenderOutsideReason($Session, [string]$Setting, $Summary, [bool]$Own) {
     $policy = $Session.Settings.Policy
     $of = "of the policy '$($policy.Name)'"
@@ -377,13 +391,22 @@ function Get-SenderOutsideReason($Session, [string]$Setting, $Summary, [bool]$Ow
     if ($senders.Count -eq 0) { return "It has no sender, and $Setting $of passes only the senders it names." }
     $outside = @($senders | Where-Object { $address = $_; -not @($policy[$Setting] | Where-Object { Test-Wildcard $address $_ }).Count })
     if ($outside.Count) { return "The sender $(Format-ShownText $outside[0]) is not in $Setting $of.$why" }
+    # The From passed. The sender that X-Original-From names, not taken ($why is then set, by the block above), must
+    # be in the list as well
+    if ($why) {
+        if (-not $relayed.Named) { return "Its X-Original-From names no single sender, and $Setting $of passes only the senders it names." }
+        if (-not @($policy[$Setting] | Where-Object { Test-Wildcard $relayed.Named $_ }).Count) {
+            return "Its X-Original-From, $(Format-ShownText $relayed.Named), is not in $Setting $of.$why"
+        }
+    }
     return $null
 }
 
 # Why the policy of a session withholds the body and the attachments of a message, in a sentence, or $null when it does
 # not. The one check for every command that reads messages, made on the summary that Get-ImapMessageSummary fetches,
-# before the body or an attachment is; $Folder is the folder the message was read from. Fails closed: a message whose
-# date or size is unknown is withheld by a limit on them.
+# before the body or an attachment is; $Folder is the folder the message was read from, which must be the one open,
+# since on Gmail the check may search it for a label (Get-LabelledUidSet). Fails closed: a message whose date or size
+# is unknown is withheld by a limit on them.
 function Get-WithheldReason($Session, $Folder, $Summary) {
     $policy = $Session.Settings.Policy
     if (-not $policy) { return $null }

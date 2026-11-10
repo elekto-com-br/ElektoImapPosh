@@ -27,10 +27,19 @@ function Test-SelectableFolder($Folder) {
     return -not ($Folder.Attributes -band ([MailKit.FolderAttributes]::NoSelect -bor [MailKit.FolderAttributes]::NonExistent))
 }
 
+# A name given to -Folder or to DenyFolders as the pattern that Test-Wildcard matches: only * and ? are wildcards in
+# it, and its brackets are taken as written. Gmail names every system folder "[Gmail]/...", and to a wildcard pattern
+# "[Gmail]" is one of the letters G, m, a, i and l: "[Gmail]/*" matched no folder of Gmail, so a policy that denied
+# it withheld nothing, and a typo in "[Gmail]/Trash" was no error, as a pattern that matches nothing is none
+# (measured, found in the review before the first release). A bracket escaped with a backtick, the way around it
+# before, stays as it is.
+function ConvertTo-FolderPattern([string]$Pattern) {
+    return $Pattern -creplace '(?<!`)([\[\]])', '`$1'
+}
+
 # The folders a name given to -Folder stands for, in an array: those the server marks with that special use,
 # when it is one and the server marks any; or else the folder of that full name, ignoring case; or else, when
-# the name has wildcards, those whose full names match it. The exact name comes first because Gmail's names
-# have brackets, which a pattern reads as a wildcard.
+# the name has wildcards (* or ?, see ConvertTo-FolderPattern), those whose full names match it.
 # With -Literal, only the folder of that exact full name: for a name that came from the pipeline, which is the
 # full name of a folder the server listed, and may be a label "Sent" on Gmail, which is not its sent folder.
 function Select-ImapFolder($Folders, [string]$Name, [switch]$Literal) {
@@ -40,8 +49,9 @@ function Select-ImapFolder($Folders, [string]$Name, [switch]$Literal) {
         if ($special) { return , $special }
     }
     $exact = @($Folders | Where-Object { $_.FullName -eq $Name })
-    if ($exact -or -not [WildcardPattern]::ContainsWildcardCharacters($Name)) { return , $exact }
-    return , @($Folders | Where-Object { Test-Wildcard $_.FullName $Name })
+    $pattern = ConvertTo-FolderPattern $Name
+    if ($exact -or -not [WildcardPattern]::ContainsWildcardCharacters($pattern)) { return , $exact }
+    return , @($Folders | Where-Object { Test-Wildcard $_.FullName $pattern })
 }
 
 # The folders that the names given to -Folder stand for (see Select-ImapFolder), each once, in an array. A name that
@@ -50,7 +60,7 @@ function Select-ImapFolderList($Cmdlet, $Session, $Folders, [string[]]$Names, [s
     $chosen = [System.Collections.Generic.List[object]]::new()
     foreach ($name in $Names) {
         $found = Select-ImapFolder $Folders $name -Literal:$Literal
-        if ($found.Count -eq 0 -and ($Literal -or -not [WildcardPattern]::ContainsWildcardCharacters($name))) {
+        if ($found.Count -eq 0 -and ($Literal -or -not [WildcardPattern]::ContainsWildcardCharacters((ConvertTo-FolderPattern $name)))) {
             Write-ImapError $Cmdlet "There is no folder '$name' in the mailbox of $($Session.Settings.User). Get-ImapFolder lists them." 'FolderNotFound' ObjectNotFound $name
         }
         foreach ($item in $found) {
@@ -85,6 +95,9 @@ function Get-ImapFolderList($Cmdlet, $Session, [MailKit.StatusItems]$StatusItems
     Write-Verbose "Listing the folders of $($Session.Settings.User)..."
     $client = $Session.Client
     $folders = [System.Collections.Generic.List[object]]::new()
+    # The full names listed, so that a folder two namespaces give is listed once, and the inbox is found without a
+    # scan of the list
+    $listed = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($namespace in $client.PersonalNamespaces) {
         $task = $client.GetFoldersAsync($namespace, $StatusItems, $false, [System.Threading.CancellationToken]::None)
         $failure = Wait-ImapTask $task
@@ -93,8 +106,24 @@ function Get-ImapFolderList($Cmdlet, $Session, [MailKit.StatusItems]$StatusItems
             return $null
         }
         foreach ($folder in $task.Result) {
-            if (Test-SelectableFolder $folder) { $folders.Add($folder) }
+            if ($listed.Add($folder.FullName) -and (Test-SelectableFolder $folder)) { $folders.Add($folder) }
         }
+    }
+    # The inbox is outside its own namespace on a server whose personal namespace is "INBOX." (Courier, Cyrus, the
+    # Dovecot of cPanel): MailKit lists such a namespace by LIST "" "INBOX.*", which INBOX does not match, so the inbox,
+    # the default folder of every command, could not be read (found in the review before the first release, and measured
+    # on Dovecot 2.3.21 with that namespace). MailKit holds the inbox since the login, so it goes first when the listing
+    # left it out. Only the personal namespaces are listed, not the folders shared nor those of other users.
+    $inbox = $client.Inbox
+    if ($inbox -and $listed.Add($inbox.FullName) -and (Test-SelectableFolder $inbox)) {
+        if ($StatusItems -ne 'None') {
+            $failure = Wait-ImapTask ($inbox.StatusAsync($StatusItems, [System.Threading.CancellationToken]::None))
+            if ($failure) {
+                Write-ImapError $Cmdlet "Could not list the folders of $($Session.Settings.User): $failure" 'FolderListFailed' ReadError $Session.Settings.Account
+                return $null
+            }
+        }
+        $folders.Insert(0, $inbox)
     }
     $Session.Folders = $folders.ToArray()
     return , $Session.Folders
