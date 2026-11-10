@@ -16,13 +16,22 @@ $script:LogoutTimeout = [TimeSpan]::FromSeconds(2)
 # of its exception, without throwing it. The wait goes in short steps, so that Ctrl+C stops the command at
 # once, where a synchronous call would hold PowerShell until the server answers; the command's finally block
 # then disposes of the client, which ends the task. With -Timeout, it stops waiting after that long, and the
-# caller disposes of the client.
+# caller disposes of the client. Every caller takes a text for a failure and nothing for success, so a failure is
+# never nothing: neither a task that is missing, as when the method that should give it threw (see
+# Test-ImapConnection), nor an exception whose message is empty, as MailKit gives a login refused with a response code
+# and no text after it (NO [AUTHENTICATIONFAILED], measured: the login was taken for accepted, and the commands went on
+# without one; found in the review before the first release).
 function Wait-ImapTask([System.Threading.Tasks.Task]$Task, [TimeSpan]$Timeout = [System.Threading.Timeout]::InfiniteTimeSpan) {
+    if ($null -eq $Task) { return 'The operation could not be started.' }
     $stopwatch = [Diagnostics.Stopwatch]::StartNew()
     while ([System.Threading.Tasks.Task]::WaitAny([System.Threading.Tasks.Task[]]@($Task), 200) -lt 0) {
         if ($Timeout -ge [TimeSpan]::Zero -and $stopwatch.Elapsed -ge $Timeout) { return "No answer in $($Timeout.TotalSeconds) seconds." }
     }
-    if ($Task.IsFaulted) { return $Task.Exception.InnerException.Message }
+    if ($Task.IsFaulted) {
+        $exception = $Task.Exception.InnerException
+        if (-not [string]::IsNullOrWhiteSpace($exception.Message)) { return $exception.Message }
+        return "The operation failed, and gave no reason ($($exception.GetType().Name))."
+    }
     if ($Task.IsCanceled) { return 'The operation was canceled.' }
     return $null
 }
@@ -60,11 +69,13 @@ function Connect-ImapServer($Cmdlet, $Settings) {
         $task = $client.ConnectAsync($Settings.Server, $Settings.Port, $options)
         $failure = Wait-ImapTask $task
         if ($failure) {
-            $hint = if ($task.Exception.InnerException -is [MailKit.Security.SslHandshakeException] -and -not $Settings.SkipCertificateCheck) {
-                $how = if ($Settings.Account) { "Set-ImapAccount $($Settings.Account) -SkipCertificateCheck" } else { 'IMAP_SKIP_CERTIFICATE_CHECK=true' }
-                " (For a server with a certificate of its own, $how accepts it.)"
-            }
-            Write-ImapError $Cmdlet "Could not connect to $($Settings.Server):$($Settings.Port) ($options): $($failure.TrimEnd())$hint" 'ConnectionFailed' ConnectionError $Settings.Server
+            # No hint at SkipCertificateCheck, which the README names with its caveat (decided with JP, 2026-11-10): the
+            # module cannot tell a server with a certificate of its own from something that answers in the place of a
+            # public server (a proxy that inspects the traffic, the portal of a hotel), and an agent acts on what an
+            # error says. The hint came after any failure of the handshake too, where no certificate was ever seen and
+            # the setting changed nothing but leave the account without the check (found in the review before the
+            # first release).
+            Write-ImapError $Cmdlet "Could not connect to $($Settings.Server):$($Settings.Port) ($options): $($failure.TrimEnd())" 'ConnectionFailed' ConnectionError $Settings.Server
             return $null
         }
         $connected = $true
@@ -148,6 +159,28 @@ function Get-ImapSession($Cmdlet, [hashtable]$Sessions, [string]$Account) {
     if (-not $client) { return $null }
     $Sessions[$Account] = $Sessions[$name] = @{ Settings = $settings; Client = $client }
     return $Sessions[$Account]
+}
+
+# Whether the connection of a session is still there; if not, reports it once for the session (ConnectionLost), and
+# the account is given up for the rest of the command: whatever is left to do in it is left out, with no error of its
+# own, as the commands skip an account that could not connect. Reconnecting would cost a login (2.1 s on Gmail,
+# measured) and could go round in a loop with a server that keeps dropping (decided with JP, 2026-11-10). The
+# operation that met the drop reports its own failure first, so a connection lost is two errors: what was being done,
+# and that the rest was left out.
+# Called before the operations of MailKit that check the connection before they give a task, OpenAsync and
+# GetFoldersAsync: they throw (ServiceNotConnectedException), which ends only their statement, so the folder was taken
+# for open and the listing for empty, and every message left gave errors that named false causes (UidValidityChanged,
+# FolderNotFound; 495 errors for 250 messages, found in the review before the first release). Also before each
+# operation of a loop that would otherwise fail once for each folder or attachment left.
+function Test-ImapConnection($Cmdlet, $Session) {
+    $client = $Session.Client
+    if ($client.IsConnected -and $client.IsAuthenticated) { return $true }
+    if (-not $Session.Lost) {
+        $Session.Lost = $true
+        $settings = $Session.Settings
+        Write-ImapError $Cmdlet "The connection to $($settings.Server) was lost, so what was left to do in the mailbox of $($settings.User) was left out." 'ConnectionLost' ConnectionError $settings.Server
+    }
+    return $false
 }
 
 # Closes the connections of a command: logging out, from its end block, or with -Abort, from its clean

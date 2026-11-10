@@ -350,6 +350,9 @@ function Write-ImapFile($Cmdlet, [IO.MemoryStream]$Content, [string]$Path, [stri
 # counts as saved, so that running again gives the same, with a warning, since it may have come from another message;
 # one that could not be written does not (Copilot on #13), nor one that exists but cannot be read, of unknown content.
 function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [string]$Directory, [string]$FileName, [string]$Shown, [System.Collections.Generic.Dictionary[string, object]]$Saved, [System.Collections.Generic.HashSet[string]]$Unmarked, [switch]$Force) {
+    # A connection lost at a part is reported with it, and the other parts of the message are left out with no error of
+    # their own (see Test-ImapConnection)
+    if (-not (Test-ImapConnection $Cmdlet $Session)) { return $null }
     $where = "the message $($Summary.UniqueId.Id) in the folder '$($Folder.FullName)' of $($Session.Settings.User)"
     $what = "the part '$Shown' of $where"
     $path = Test-FileTarget $Cmdlet $Directory $FileName $what 'Attachment' $Saved -Force:$Force

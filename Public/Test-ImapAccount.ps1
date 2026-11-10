@@ -5,8 +5,10 @@ Connects to the IMAP server of an account and authenticates, to check its settin
 .DESCRIPTION
 The `Test-ImapAccount` function connects with the settings of an account (see Set-ImapAccount), or
 of the default account, or else of the IMAP_* environment variables, and authenticates. It returns
-what it found: how the connection was secured, the authentication mechanisms the server offers, and
-the capabilities it has after the login. It reads nothing from the mailbox.
+what it found: how the connection was secured, whether the server's certificate was checked
+(CertificateChecked, false for an account with -SkipCertificateCheck, and with -NoTls, where there
+is none), the authentication mechanisms the server offers, and the capabilities it has after the
+login. It reads nothing from the mailbox.
 
 The connection is always encrypted: TLS from the start on port 993, and STARTTLS on any other port,
 which fails when the server does not offer it. The server's certificate must be valid. An account
@@ -66,6 +68,9 @@ Function Test-ImapAccount {
                     User                     = $settings.User
                     Security                 = "$(Get-SecureSocketOption $settings.Port -NoTls:$settings.NoTls)"
                     SslProtocol              = if ($client.IsSecure) { "$($client.SslProtocol)" } else { 'None' }
+                    # Encrypted is not checked: with SkipCertificateCheck, nothing proved who answered (found in the
+                    # review before the first release: the result was the same as for a certificate that validated)
+                    CertificateChecked       = [bool]($client.IsSecure -and -not $settings.SkipCertificateCheck)
                     AuthenticationMechanisms = $mechanisms
                     Capabilities             = @("$($client.Capabilities)" -csplit ', ')
                     Elapsed                  = $stopwatch.Elapsed
