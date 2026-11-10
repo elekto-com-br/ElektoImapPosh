@@ -14,8 +14,9 @@ would drive a terminal (an escape sequence), reorder the text (an override of di
 whoever reads it (the tags of Unicode, which an AI reads and a person does not see): each run of such
 characters is shown as one U+FFFD, the replacement character, a tab or line break as a space, and the
 invisible characters that only change how a text is shown (soft hyphen, zero-width space, marks of
-direction) are removed. Each of those texts is cut to 1000 characters, ending in an ellipsis (U+2026), and
-each list of addresses to its first 100, with a last entry that says how many more there were, such as
+direction) are removed. Each of those texts is cut to 1000 characters, ending in an ellipsis (U+2026), but
+for the name of an address, cut on its own to 200, so that the address after it stays whole; and each list
+of addresses to its first 100, with a last entry that says how many more there were, such as
 "... and 9900 more" (with the ellipsis).
 
 Without -Folder, it searches the inbox, or All Mail with -Query. -First says how many messages of each

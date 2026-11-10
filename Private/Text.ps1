@@ -10,9 +10,13 @@
 # Below them, how the module shows a text that comes in a message (Format-ShownText).
 
 # Text in the composed form of Unicode (NFC), so that a name written decomposed (NFD), as macOS writes names, is the
-# same name. A lone surrogate, which Normalize refuses and each file system writes its own way, becomes "_".
+# same name. What Normalize refuses becomes "_": a lone surrogate, which each file system also writes its own way, and
+# U+FFFE, the one other character it refuses (measured over every code point, .NET 10), which a sender can write in
+# plain ASCII on the wire (an encoded word of RFC 2047). Refused, Normalize threw, and the command went on with no
+# text: a deny list of senders missed an address with it, and a file was named "attachment.bin" (found in the review
+# before the first release); and with a try up the stack, the whole command ended there.
 function ConvertTo-ComposedText([string]$Text) {
-    return ($Text -creplace '[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]', '_').Normalize([Text.NormalizationForm]::FormC)
+    return ($Text -creplace '[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]|\uFFFE', '_').Normalize([Text.NormalizationForm]::FormC)
 }
 
 # Whether a text matches a wildcard pattern, ignoring case alike in every culture, with both composed: WildcardPattern
@@ -63,6 +67,10 @@ function Assert-WildcardPattern([string]$Pattern) {
 # Cc): far more than a person writes, and few enough that the messages of one command do not flood the context of an AI
 $script:ShownTextLength = 1000
 $script:ShownAddressCount = 100
+# The most characters of the name of an address, cut apart from the address, which then always stays whole: a name
+# is a few dozen characters, and one of a thousand pushed the address out of "Name <address>", cut to 1000 as one text
+# (found in the review before the first release)
+$script:ShownNameLength = 200
 
 # Characters that change only how a text is shown, removed: the soft hyphen, the zero-width space, the word joiner
 # and the BOM, which split a word unseen, and the marks of direction (ALM, LRM, RLM), which can turn the digits of an

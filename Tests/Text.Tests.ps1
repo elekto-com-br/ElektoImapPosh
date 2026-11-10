@@ -111,6 +111,55 @@ Describe 'Matching a pattern' {
         { InModuleScope ElektoImapPosh -Parameters @{ Pattern = $straight } { param($Pattern) Assert-WildcardPattern $Pattern } } | Should -Not -Throw
         Test-Match ([string][char]0x232A) $straight | Should -BeTrue -Because 'a pattern taken matches as it was checked'
     }
+
+    # Normalize threw on U+FFFE, so the text was lost: the pattern matched nothing, and a deny list let the sender through
+    It 'matches a text with a character that Normalize refuses' {
+        Test-Match ('spam' + [char]0xFFFE + 'mer@denied.example') '*@denied.example' | Should -BeTrue
+        Test-Match ('x' + [char]0xD800 + '@denied.example') '*@denied.example' | Should -BeTrue
+    }
+}
+
+Describe 'A text composed' {
+    BeforeAll {
+        # Every character that Normalize refuses in a text, in C#: a loop over 1.1 million code points takes some 20 s
+        # in PowerShell
+        if (-not ('ElektoImapPoshTests.Normalization' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Text;
+
+namespace ElektoImapPoshTests
+{
+    public static class Normalization
+    {
+        public static int[] Refused()
+        {
+            var refused = new List<int>();
+            for (int code = 0; code <= 0x10FFFF; code++)
+            {
+                if (code >= 0xD800 && code <= 0xDFFF) continue;
+                try { ("a" + char.ConvertFromUtf32(code) + "b").Normalize(NormalizationForm.FormC); }
+                catch (ArgumentException) { refused.Add(code); }
+            }
+            return refused.ToArray();
+        }
+    }
+}
+'@
+        }
+    }
+
+    # Whatever .NET refuses, should it refuse more one day, and the halves of characters, which no code point is
+    It 'composes every text, with "_" for each character that Normalize refuses' {
+        $refused = [ElektoImapPoshTests.Normalization]::Refused()
+        $texts = @($refused | ForEach-Object { 'a' + [char]::ConvertFromUtf32($_) + 'b' }) + @(('a' + [char]0xD800 + 'b'), ('a' + [char]0xDC00 + 'b'))
+        $composed = @(InModuleScope ElektoImapPosh -Parameters @{ Texts = $texts } { param($Texts) foreach ($text in $Texts) { ConvertTo-ComposedText $text } })
+
+        $refused | Should -Contain 0xFFFE
+        $composed.Count | Should -Be $texts.Count
+        foreach ($text in $composed) { [string]::Equals($text, 'a_b', [StringComparison]::Ordinal) | Should -BeTrue -Because "'$text' should be 'a_b'" }
+    }
 }
 
 # What a sender writes, shown without what drives a terminal, reorders the text or hides it, and cut when it would
