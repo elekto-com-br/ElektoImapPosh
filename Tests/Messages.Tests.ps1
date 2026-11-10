@@ -1380,6 +1380,73 @@ Describe 'A mailbox whose personal namespace is INBOX.' {
     }
 }
 
+# A connection the server drops in the middle of a command: the operation it cut short and ConnectionLost, the rest of
+# that account left out, and the other accounts read. MailKit's OpenAsync and GetFoldersAsync throw on a connection
+# lost before they give a task, so the folder was taken for open and the listing for empty: errors with false causes
+# for each message left, and inside a try (as Pester runs a test) the whole command ended there.
+Describe 'A connection lost in the middle of a command, on Gmail' {
+    BeforeAll {
+        $now = [DateTimeOffset]::Now
+        $messages = @(
+            @{ Uid = 1; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'In the inbox'; Text = 'One.'; Date = $now.AddHours(-6); Size = 1000 }
+            @{ Uid = 2; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'Also in the inbox'; Text = 'Two.'; Date = $now.AddHours(-5); Size = 1000 }
+            @{ Uid = 3; Folders = '[Gmail]/All Mail', 'Finance'; Labels = @('Finance'); From = 'Bank <alerts@bank.example>'; Subject = 'In Finance'; Text = 'Three.'; Date = $now.AddHours(-4); Size = 1000 }
+            @{ Uid = 4; Folders = '[Gmail]/All Mail', 'Finance'; Labels = @('Finance'); From = 'Bank <alerts@bank.example>'; Subject = 'Also in Finance'; Text = 'Four.'; Date = $now.AddHours(-3); Size = 1000 }
+            @{ Uid = 5; Folders = '[Gmail]/All Mail', 'Finance/Bank'; Labels = @('Finance/Bank'); From = 'Bank <alerts@bank.example>'; Subject = 'In Bank'; Text = 'Five.'; Date = $now.AddHours(-2); Size = 1000 }
+            @{ Uid = 6; Folders = '[Gmail]/All Mail', 'Finance/Bank'; Labels = @('Finance/Bank'); From = 'Bank <alerts@bank.example>'; Subject = 'Also in Bank'; Text = 'Six.'; Date = $now.AddHours(-1); Size = 1000 }
+        )
+        $server = Start-FakeGmail $messages
+        # The other account, on a server of its own, which nothing drops
+        $other = Start-FakeGmail $messages
+        $passwords = Set-TestAccount 'dropped' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ dropped = @{}; other = @{ Port = $other.Port } }
+        $folders = 'INBOX', 'Finance', 'Finance/Bank'
+    }
+
+    AfterAll {
+        Stop-FakeGmail $server
+        Stop-FakeGmail $other
+        foreach ($name in $passwords) { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
+        $env:IMAP_CONFIG_DIR = $null
+    }
+
+    AfterEach {
+        $server.State.DropOn = $null
+    }
+
+    It 'reports the folder it could not open and the connection lost, and reads the other accounts' {
+        $server.State.DropOn = '^\S+ EXAMINE "?Finance"?$'
+
+        $result = Get-ImapMessage -Account dropped, other -Folder $folders -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        @($errors.FullyQualifiedErrorId) | Should -Be 'FolderOpenFailed,Get-ImapMessage', 'ConnectionLost,Get-ImapMessage'
+        ($result | Where-Object Account -EQ 'dropped').Subject | Should -Be 'Also in the inbox', 'In the inbox'
+        @($result | Where-Object Account -EQ 'other').Count | Should -Be 6
+    }
+
+    It 'reads nothing more of the account once the connection is lost, from the pipeline' {
+        $listed = Get-ImapMessage dropped -Folder $folders
+        $listed.Count | Should -Be 6
+        # The first fetch of a text, which the summaries (with ENVELOPE) are not
+        $server.State.DropOn = '^(?!.*ENVELOPE)\S+ UID FETCH '
+
+        $read = $listed | Read-ImapMessage -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $read | Should -BeNullOrEmpty
+        @($errors.FullyQualifiedErrorId) | Should -Be 'MessageFetchFailed,Read-ImapMessage', 'ConnectionLost,Read-ImapMessage'
+    }
+
+    It 'reports a listing of the folders the drop cut short, and the connection lost, and nothing else' {
+        $listed = Get-ImapMessage dropped -Folder $folders
+        # The listing of the folders, not the LIST "" "" of the login
+        $server.State.DropOn = '^\S+ LIST "" "?\*"?$'
+
+        $read = $listed | Read-ImapMessage -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $read | Should -BeNullOrEmpty
+        @($errors.FullyQualifiedErrorId) | Should -Be 'FolderListFailed,Read-ImapMessage', 'ConnectionLost,Read-ImapMessage'
+    }
+}
+
 Describe 'Get-ImapThread on Gmail' {
     BeforeAll {
         $now = [DateTimeOffset]::Now

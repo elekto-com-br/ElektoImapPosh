@@ -22,11 +22,17 @@
 # its terms it knows: X-GM-RAW, X-GM-LABELS, X-GM-THRID (the ThreadId, or the Uid of a message without one, as X-GM-THRID
 # gives), HEADER Message-ID (a part of it, ignoring case, as IMAP searches a header) and SINCE; it ignores any other term.
 # As Gmail, the X-GM-LABELS of a FETCH leave out the label of the folder open (\Inbox in INBOX), which a search still finds.
+# STATUS gives the counts of a folder, and refuses them for one that holds no messages (\Noselect, \NonExistent); with
+# LIST-STATUS among -Capabilities, LIST ... RETURN (STATUS (...)) gives them after the LIST line of each folder that can
+# hold messages (RFC 5819).
+# For a test, two keys of State, each a regex of a whole command line: DropOn closes the connection at the first command
+# that matches, as a server that goes away, and RefuseOn answers NO to each one.
 
-# The folders of the mailbox, with their attributes: Gmail's in English, and labels of the user, one named Sent
+# The folders of the mailbox, with their attributes: Gmail's in English, and labels of the user, one named Sent.
+# "[Gmail]" as Gmail lists it to a plain LIST (MailKit's transcript list-personal.txt; \NonExistent with LIST-EXTENDED)
 $script:FakeGmailFolders = [ordered]@{
     'INBOX'             = '\HasNoChildren'
-    '[Gmail]'           = '\HasChildren \NonExistent'
+    '[Gmail]'           = '\HasChildren \Noselect'
     '[Gmail]/All Mail'  = '\All \HasNoChildren'
     '[Gmail]/Sent Mail' = '\HasNoChildren \Sent'
     '[Gmail]/Trash'     = '\HasNoChildren \Trash'
@@ -64,6 +70,11 @@ function Start-FakeGmail([hashtable[]]$Messages, $Folders = $script:FakeGmailFol
             }
             function Get-FolderMessage($Messages, [string]$Folder) {
                 return , @($Messages | Where-Object { $_.Folders -contains $Folder } | Sort-Object { $_.Uid })
+            }
+            # The counts of a folder, as STATUS gives them
+            function Write-Status($Writer, [string]$Folder) {
+                $inFolder = Get-FolderMessage $Messages $Folder
+                $Writer.WriteLine("* STATUS $(Format-Quoted $Folder) (MESSAGES $($inFolder.Count) UNSEEN $(@($inFolder | Where-Object { -not $_.Seen }).Count))")
             }
             # The label that a folder stands for, which Gmail leaves out of the X-GM-LABELS of the messages read from it
             # (measured: \Inbox in INBOX, a label in its folder, \Important in the folder of important messages)
@@ -249,28 +260,43 @@ function Start-FakeGmail([hashtable[]]$Messages, $Folders = $script:FakeGmailFol
                     $selected = $null
                     while ($null -ne ($line = $reader.ReadLine())) {
                         $State.Commands.Enqueue($line)
+                        if ($State.DropOn -and $line -cmatch $State.DropOn) {
+                            $State.DropOn = $null
+                            $State.Dropped = $true
+                            break
+                        }
                         # The tagged answer, when it is not a plain OK ("continue" here would only leave the switch)
                         $answer = $null
                         $tag, $command, $arguments = $line -split ' ', 3
+                        if ($State.RefuseOn -and $line -cmatch $State.RefuseOn) {
+                            $writer.WriteLine("$tag NO Refused for the test (Failure)")
+                            continue
+                        }
                         $command = $command.ToUpperInvariant()
                         if ($command -eq 'UID') { $command, $arguments = $arguments -split ' ', 2; $command = "UID $($command.ToUpperInvariant())" }
                         switch ($command) {
                             'CAPABILITY' { $writer.WriteLine("* CAPABILITY $capabilities") }
                             'NAMESPACE' { if ($Namespace) { $writer.WriteLine("* NAMESPACE $Namespace") } }
                             'LIST' {
-                                $pattern = ($arguments -split ' ', 2)[1].Trim('"')
+                                # LIST "" <pattern>, and RETURN (STATUS (...)) after it from a client that saw LIST-STATUS
+                                $null = $arguments -cmatch '^(?:"[^"]*"|\S+) ("(?:[^"\\]|\\.)*"|\S+)(?: RETURN \((.*)\))?$'
+                                $pattern = $Matches[1].Trim('"')
+                                $withStatus = "$($Matches[2])" -clike '*STATUS*'
                                 if ($pattern -eq '') { $writer.WriteLine("* LIST (\Noselect) `"$Delimiter`" `"`"") }
                                 $regex = '^' + (([regex]::Escape($pattern) -creplace '\\\*', '.*') -creplace '%', "[^$([regex]::Escape($Delimiter))]*") + '$'
                                 foreach ($entry in $Folders.GetEnumerator()) {
                                     $listed = if ($Namespace) { $pattern -ne '' -and $entry.Key -cmatch $regex } else { $pattern -like '*[*%]*' -or $pattern -eq $entry.Key }
-                                    if ($listed) { $writer.WriteLine("* LIST ($($entry.Value)) `"$Delimiter`" $(Format-Quoted $entry.Key)") }
+                                    if (-not $listed) { continue }
+                                    $writer.WriteLine("* LIST ($($entry.Value)) `"$Delimiter`" $(Format-Quoted $entry.Key)")
+                                    if ($withStatus -and $entry.Value -cnotmatch '\\(Noselect|NonExistent)') { Write-Status $writer $entry.Key }
                                 }
                             }
-                            # The counts of a folder, which MailKit asks one folder at a time without LIST-STATUS
+                            # The counts of a folder, which a client asks one folder at a time without LIST-STATUS; refused
+                            # for a folder that holds no messages
                             'STATUS' {
                                 $name = ($arguments -creplace '\s*\([^)]*\)$').Trim('"') -creplace '\\(.)', '$1'
-                                $inFolder = Get-FolderMessage $Messages $name
-                                $writer.WriteLine("* STATUS $(Format-Quoted $name) (MESSAGES $($inFolder.Count) UNSEEN $(@($inFolder | Where-Object { -not $_.Seen }).Count))")
+                                if ("$($Folders[$name])" -cmatch '\\(Noselect|NonExistent)') { $answer = "$tag NO [NONEXISTENT] No such mailbox. (Failure)" }
+                                else { Write-Status $writer $name }
                             }
                             { $_ -in 'EXAMINE', 'SELECT' } {
                                 $selected = $arguments.Trim('"') -replace '\\(.)', '$1'

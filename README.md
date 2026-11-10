@@ -190,7 +190,7 @@ Gmail and Google Workspace come first, and their ways are followed where IMAP al
 
 ### Testing an Account
 
-`Test-ImapAccount` connects and authenticates, and shows how the connection was secured, the authentication mechanisms the server offers and its capabilities. It reads nothing from the mailbox:
+`Test-ImapAccount` connects and authenticates, and shows how the connection was secured, whether the server's certificate was checked (`CertificateChecked`, false with `SkipCertificateCheck`, and with `NoTls`, where there is none), the authentication mechanisms the server offers and its capabilities. It reads nothing from the mailbox:
 
 ```powershell
 Test-ImapAccount work            # the account "work"
@@ -200,9 +200,11 @@ Get-ImapAccount | Test-ImapAccount   # every account; one that fails is an error
 
 Failures are errors with an id that tells them apart: `ConnectionFailed`, `AuthenticationFailed`, `AccountNotFound`, `PasswordMissing` and `NoConfiguration`. Each one is a single error, also in `-ErrorVariable` and `$Error`. Ctrl+C stops a command at once, even while it waits for a server that does not answer.
 
+A connection that the server drops in the middle of any command is two errors: the one of what was being done (`FolderOpenFailed`, `MessageFetchFailed`...), and `ConnectionLost`. Whatever was left to do in that account is left out, with no error of its own, and the other accounts of `-Account` go on. Run the command again for that account.
+
 ### Listing Folders
 
-`Get-ImapFolder` lists the folders that can hold messages, with how many each holds and how many are unread. `-Account` takes several accounts and wildcards, and each folder carries the account it came from; an account that fails is an error, and the others go on:
+`Get-ImapFolder` lists the folders that can hold messages, with how many each holds and how many are unread. `-Account` takes several accounts and wildcards, and each folder carries the account it came from; an account that fails is an error, and the others go on. The counts of every folder come in one request from a server with LIST-STATUS, as Gmail is; from one without it, they are asked of each folder, which takes a while on a mailbox with hundreds of folders, and a folder that does not give them is a `FolderStatusFailed` error while the others are listed:
 
 ```powershell
 Get-ImapFolder                             # the folders of the default account

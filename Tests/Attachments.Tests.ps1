@@ -507,6 +507,23 @@ Describe 'Save-ImapAttachment on Gmail' {
         $warnings | Should -BeNullOrEmpty
     }
 
+    # Two errors, what was being done and that the rest was left out, and not one for each part left
+    It 'reports a connection lost at an attachment once, leaving out the other parts and messages' {
+        $directory = New-TestDirectory 'dropped'
+        # The first fetch of a part, which the summaries (with ENVELOPE) are not
+        $server.State.DropOn = '^(?!.*ENVELOPE)\S+ UID FETCH '
+        try {
+            $files = Save-ImapAttachment open -Folder All -Uid 10, 34 -Path $directory -ErrorVariable errors -ErrorAction SilentlyContinue
+        } finally {
+            $server.State.DropOn = $null
+        }
+
+        $files | Should -BeNullOrEmpty
+        @($errors.FullyQualifiedErrorId) | Should -Be 'AttachmentFetchFailed,Save-ImapAttachment', 'ConnectionLost,Save-ImapAttachment'
+        "$($errors[0])" | Should -BeLike "*'report.pdf'*"
+        @(Get-ChildItem -LiteralPath $directory -Force) | Should -BeNullOrEmpty
+    }
+
     It 'saves only the attachments named by -Name, by pattern or by name, as the message gives it or as the file gets it' {
         (Save-ImapAttachment open -Folder All -Uid 10 -Path (New-TestDirectory 'by-pattern') -Name *.pdf).Name | Should -Be 'report.pdf'
         (Save-ImapAttachment open -Folder All -Uid 10 -Path (New-TestDirectory 'by-name') -Name photo.jpg).Name | Should -Be 'photo.jpg'

@@ -9,6 +9,8 @@ BeforeDiscovery {
 
 BeforeAll {
     . (Join-Path $PSScriptRoot 'Smtp4dev.ps1')
+    . (Join-Path $PSScriptRoot 'FakeGmail.ps1')
+    . (Join-Path $PSScriptRoot 'TestAccounts.ps1')
     Import-Module (Join-Path (Split-Path $PSScriptRoot) 'ElektoImapPosh.psd1') -Force
 
     $variableNames = 'IMAP_CONFIG_DIR', 'IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_NO_TLS', 'IMAP_PASS_LOCAL', 'IMAP_PASS_CLOSED', 'IMAP_PASS_WRITER'
@@ -318,7 +320,9 @@ Describe 'Get-ImapFolder on a Gmail mailbox' {
             New-Folder '[Gmail]/E-mails enviados' 'HasNoChildren, Sent' 30
             New-Folder '[Gmail]/Todos os e-mails' 'HasNoChildren, All' 50
         )
-        Mock -ModuleName ElektoImapPosh Get-ImapSession { @{ Settings = @{ Account = 'gmail'; User = 'me@gmail.com' }; Client = $null } }
+        # A client still connected, of a server that gives the counts with the listing, as Gmail does
+        $client = [PSCustomObject]@{ IsConnected = $true; IsAuthenticated = $true; Capabilities = [MailKit.Net.Imap.ImapCapabilities]::ListStatus }
+        Mock -ModuleName ElektoImapPosh Get-ImapSession { @{ Settings = @{ Account = 'gmail'; User = 'me@gmail.com' }; Client = $client } }
         Mock -ModuleName ElektoImapPosh Get-ImapFolderList { , $mailbox }
         Mock -ModuleName ElektoImapPosh Close-ImapSession { }
     }
@@ -357,6 +361,83 @@ Describe 'Get-ImapFolder on a Gmail mailbox' {
         $result | Should -BeNullOrEmpty
         $errors.Count | Should -Be 1
         $errors[0].FullyQualifiedErrorId | Should -BeLike 'FolderNotFound,*'
+    }
+}
+
+# The counts of the folders: from a server with LIST-STATUS, in the listing; from one without it, asked of each folder
+# shown. MailKit asked them of "[Gmail]" too, which Gmail lists \Noselect to a plain LIST and which refuses them, and
+# the whole listing failed.
+Describe 'The counts of the folders, on Gmail' {
+    BeforeAll {
+        $now = [DateTimeOffset]::Now
+        $messages = @(
+            @{ Uid = 1; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'New'; Date = $now.AddHours(-2); Size = 1000 }
+            @{ Uid = 2; Folders = 'INBOX', '[Gmail]/All Mail', 'Finance'; Labels = '\Inbox', 'Finance'; From = 'Bank <alerts@bank.example>'; Subject = 'Read'; Date = $now.AddHours(-1); Size = 1000; Seen = $true }
+        )
+        $plain = Start-FakeGmail $messages
+        $listStatus = Start-FakeGmail $messages -Capabilities 'IMAP4rev1 X-GM-EXT-1 SPECIAL-USE CHILDREN LIST-STATUS'
+        $passwords = Set-TestAccount 'counts' $plain.Port -SavedEnvironment $savedEnvironment -Accounts @{ plain = @{}; liststatus = @{ Port = $listStatus.Port } }
+        $selectable = 'INBOX', '[Gmail]/All Mail', '[Gmail]/Sent Mail', '[Gmail]/Trash', '[Gmail]/Important', 'Finance', 'Finance/Bank', 'Sent'
+
+        # The STATUS commands a server got, apart from a LIST
+        function Get-StatusCommand($Server) { @($Server.State.Commands.ToArray() | Where-Object { $_ -cmatch '^\S+ STATUS ' }) }
+    }
+
+    AfterAll {
+        Stop-FakeGmail $plain
+        Stop-FakeGmail $listStatus
+        foreach ($name in $passwords) { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
+        $env:IMAP_CONFIG_DIR = $null
+    }
+
+    AfterEach {
+        $plain.State.DropOn = $plain.State.RefuseOn = $null
+        $plain.State.Commands.Clear()
+    }
+
+    It 'takes them from the listing of a server with LIST-STATUS, in one command' {
+        $result = Get-ImapFolder liststatus -ErrorVariable errors
+
+        $result.Folder | Should -Be $selectable
+        ($result | Where-Object Folder -EQ 'INBOX').Count | Should -Be 2
+        ($result | Where-Object Folder -EQ 'INBOX').Unread | Should -Be 1
+        ($result | Where-Object Folder -EQ 'Finance').Count | Should -Be 1
+        $errors | Should -BeNullOrEmpty
+        @($listStatus.State.Commands.ToArray() | Where-Object { $_ -clike '* LIST *RETURN (STATUS (*' }) | Should -Not -BeNullOrEmpty
+        Get-StatusCommand $listStatus | Should -BeNullOrEmpty
+    }
+
+    It 'asks them of each folder shown, from a server without LIST-STATUS, and never of a folder that holds no messages' {
+        $result = Get-ImapFolder plain -ErrorVariable errors
+
+        $result.Folder | Should -Be $selectable
+        ($result | Where-Object Folder -EQ 'INBOX').Count | Should -Be 2
+        ($result | Where-Object Folder -EQ 'INBOX').Unread | Should -Be 1
+        ($result | Where-Object Folder -EQ 'Finance').Count | Should -Be 1
+        $errors | Should -BeNullOrEmpty
+        $statuses = Get-StatusCommand $plain
+        $statuses.Count | Should -Be $selectable.Count
+        $statuses | Where-Object { $_ -clike '* STATUS "`[Gmail`]" *' } | Should -BeNullOrEmpty
+    }
+
+    It 'reports a folder that does not give them, and shows the others' {
+        $plain.State.RefuseOn = '^\S+ STATUS "?Finance"? \('
+
+        $result = Get-ImapFolder plain -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $result.Folder | Should -Be ($selectable | Where-Object { $_ -ne 'Finance' })
+        $errors.Count | Should -Be 1
+        $errors[0].FullyQualifiedErrorId | Should -Be 'FolderStatusFailed,Get-ImapFolder'
+    }
+
+    # Once, and not once for each folder left
+    It 'reports a connection lost while it asks them, once' {
+        $plain.State.DropOn = '^\S+ STATUS "?Finance"? \('
+
+        $result = Get-ImapFolder plain -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $result.Folder | Should -Be ($selectable | Select-Object -First 5)
+        @($errors.FullyQualifiedErrorId) | Should -Be 'FolderStatusFailed,Get-ImapFolder', 'ConnectionLost,Get-ImapFolder'
     }
 }
 

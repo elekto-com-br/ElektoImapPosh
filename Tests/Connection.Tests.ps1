@@ -21,14 +21,14 @@ BeforeAll {
     $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'config'
 
     # An IMAP server just enough for MailKit to log in, in a runspace of its own, which stays silent at the
-    # command named by -Hang (LOGIN or LOGOUT): a server that does not answer. State says what it received,
-    # and when the connection was closed.
-    function Start-FakeImapServer([ValidateSet('LOGIN', 'LOGOUT')][string]$Hang) {
+    # command named by -Hang (LOGIN or LOGOUT): a server that does not answer. With -LoginAnswer, it answers the
+    # login with that, after the tag. State says what it received, and when the connection was closed.
+    function Start-FakeImapServer([ValidateSet('LOGIN', 'LOGOUT')][string]$Hang, [string]$LoginAnswer) {
         $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
         $listener.Start()
         $state = [hashtable]::Synchronized(@{ Commands = [Collections.Concurrent.ConcurrentQueue[string]]::new(); Closed = $false; Client = $null })
         $runspace = [powershell]::Create().AddScript({
-            param($Listener, $State, $Hang)
+            param($Listener, $State, $Hang, $LoginAnswer)
             try {
                 $client = $Listener.AcceptTcpClient()
                 $State.Client = $client
@@ -43,6 +43,10 @@ BeforeAll {
                     $command = $command.ToUpperInvariant()
                     $State.Commands.Enqueue($command)
                     if ($command -eq $Hang) { continue }
+                    if ($command -eq 'LOGIN' -and $LoginAnswer) {
+                        $writer.WriteLine("$tag $LoginAnswer")
+                        continue
+                    }
                     switch ($command) {
                         'CAPABILITY' { $writer.WriteLine('* CAPABILITY IMAP4rev1') }
                         'LIST' { $writer.WriteLine($(if ($arguments -match 'INBOX') { '* LIST (\HasNoChildren) "/" INBOX' } else { '* LIST (\Noselect) "/" ""' })) }
@@ -56,7 +60,7 @@ BeforeAll {
             } finally {
                 $State.Closed = $true
             }
-        }).AddArgument($listener).AddArgument($state).AddArgument($Hang)
+        }).AddArgument($listener).AddArgument($state).AddArgument($Hang).AddArgument($LoginAnswer)
         $null = $runspace.BeginInvoke()
         [pscustomobject]@{ Port = $listener.LocalEndpoint.Port; Listener = $listener; Runspace = $runspace; State = $state }
     }
@@ -119,6 +123,64 @@ Describe 'How the connection is secured' {
 
     It 'is none at all with NoTls, on any port' {
         InModuleScope ElektoImapPosh { "$(Get-SecureSocketOption 993 -NoTls)" } | Should -Be 'None'
+    }
+
+    # No server of the tests has a certificate the machine trusts, so the connection is mocked: encrypted, and checked
+    # unless the setting says otherwise
+    It 'says that the certificate was checked, unless SkipCertificateCheck accepts any' {
+        Mock -ModuleName ElektoImapPosh Connect-ImapServer { [PSCustomObject]@{ IsSecure = $true; SslProtocol = 'Tls13'; AuthenticationMechanisms = @('PLAIN'); Capabilities = 'IMAP4rev1' } }
+        Mock -ModuleName ElektoImapPosh Invoke-ImapLogin { $true }
+        Mock -ModuleName ElektoImapPosh Disconnect-ImapClient { }
+        $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'no-accounts'
+        $env:IMAP_SERVER = 'imap.example'
+        $env:IMAP_USER = 'tester'
+        $env:IMAP_PASS = 'not-a-password'
+        try {
+            $result = Test-ImapAccount
+
+            $result.Security | Should -Be 'SslOnConnect'
+            $result.CertificateChecked | Should -BeTrue
+
+            $env:IMAP_SKIP_CERTIFICATE_CHECK = 'true'
+            (Test-ImapAccount).CertificateChecked | Should -BeFalse
+        } finally {
+            Reset-ImapEnvironment
+        }
+    }
+}
+
+Describe 'A failure is never taken for success' {
+    # The method that should give the task threw instead (OpenAsync, GetFoldersAsync on a connection lost)
+    It 'takes a task that is missing for a failure' {
+        InModuleScope ElektoImapPosh { Wait-ImapTask $null } | Should -Not -BeNullOrEmpty
+    }
+
+    It 'gives a failure whose exception has no message a text all the same' {
+        $failure = InModuleScope ElektoImapPosh { Wait-ImapTask ([System.Threading.Tasks.Task]::FromException([MailKit.Security.AuthenticationException]::new(''))) }
+
+        $failure | Should -BeLike '*gave no reason (AuthenticationException)*'
+    }
+
+    # MailKit gives such a refusal an exception with an empty message, and the login was taken for accepted
+    It 'reports a login refused with a response code and no text after it' {
+        $server = Start-FakeImapServer -LoginAnswer 'NO [AUTHENTICATIONFAILED]'
+        $env:IMAP_CONFIG_DIR = Join-Path $TestDrive 'no-accounts'
+        $env:IMAP_SERVER = '127.0.0.1'
+        $env:IMAP_PORT = "$($server.Port)"
+        $env:IMAP_USER = 'tester'
+        $env:IMAP_PASS = 'not-a-password'
+        $env:IMAP_NO_TLS = 'true'
+        try {
+            $result = Test-ImapAccount -ErrorVariable errors -ErrorAction SilentlyContinue
+
+            $result | Should -BeNullOrEmpty
+            $errors.Count | Should -Be 1
+            $errors[0].FullyQualifiedErrorId | Should -BeLike 'AuthenticationFailed,*'
+            @($server.State.Commands.ToArray()) | Should -Contain 'LOGIN'
+        } finally {
+            Stop-FakeImapServer $server
+            Reset-ImapEnvironment
+        }
     }
 }
 
@@ -269,6 +331,7 @@ Describe 'Test-ImapAccount against smtp4dev' -Skip:(-not $smtp4devInstalled) {
         $result.Port | Should -Be $server.ImapPort
         $result.Security | Should -Be 'None'
         $result.SslProtocol | Should -Be 'None'
+        $result.CertificateChecked | Should -BeFalse -Because 'there is no certificate to check'
         $result.Capabilities | Should -Contain 'IMAP4rev1'
     }
 
@@ -366,17 +429,21 @@ Describe 'Encrypted connections, through a TLS proxy in front of smtp4dev' -Skip
 
         $result.Security | Should -Be 'StartTls'
         $result.SslProtocol | Should -BeIn 'Tls12', 'Tls13'
+        $result.CertificateChecked | Should -BeFalse -Because 'encrypted, but nothing proved who answered'
         $result.User | Should -Be 'tester'
         $startTls.Handshakes | Should -BeGreaterThan 0
     }
 
+    # The module cannot tell a server with a certificate of its own from something in the place of a public server,
+    # so the error does not point at the setting that accepts any certificate
     It 'refuses a certificate that does not validate, for an account without SkipCertificateCheck' {
         $result = Test-ImapAccount checked -ErrorVariable errors -ErrorAction SilentlyContinue
 
         $result | Should -BeNullOrEmpty
         $errors.Count | Should -Be 1
         $errors[0].FullyQualifiedErrorId | Should -BeLike 'ConnectionFailed,*'
-        "$errors" | Should -BeLike '*certificate*Set-ImapAccount checked -SkipCertificateCheck accepts it.)'
+        "$errors" | Should -BeLike '*certificate*'
+        "$errors" | Should -Not -BeLike '*SkipCertificateCheck*'
     }
 
     It 'lists folders over TLS, SkipCertificateCheck going through the connection of the command' {
@@ -393,7 +460,8 @@ Describe 'Encrypted connections, through a TLS proxy in front of smtp4dev' -Skip
             $result = Test-ImapAccount -ErrorVariable errors -ErrorAction SilentlyContinue
 
             $result | Should -BeNullOrEmpty
-            "$errors" | Should -BeLike '*IMAP_SKIP_CERTIFICATE_CHECK=true accepts it.)'
+            $errors[0].FullyQualifiedErrorId | Should -BeLike 'ConnectionFailed,*'
+            "$errors" | Should -Not -BeLike '*SKIP_CERTIFICATE_CHECK*'
 
             $env:IMAP_SKIP_CERTIFICATE_CHECK = 'true'
             $result = Test-ImapAccount

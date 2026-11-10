@@ -86,12 +86,23 @@ function Find-ImapFolder($Cmdlet, $Session, [string]$Name, [switch]$Literal) {
     return , $found
 }
 
+# Whether the server gives the counts of the folders with their listing, in one command (LIST-STATUS, RFC 5819).
+# Without it, MailKit asks STATUS of each folder listed, those that hold no messages too ("[Gmail]", marked \Noselect
+# to a plain LIST), and the first that refuses (NO [NONEXISTENT]) failed the whole listing: Get-ImapFolder listed no
+# folder of such an account (Proton Mail Bridge, by its source; found in the review before the first release, and
+# measured on the fake Gmail). So the counts are asked with the listing only from a server that has it.
+function Test-ListStatus($Session) {
+    return $Session.Client.Capabilities.HasFlag([MailKit.Net.Imap.ImapCapabilities]::ListStatus)
+}
+
 # The folders of the session that can hold messages, in an array, as the server lists them; or $null after
-# reporting why not. With StatusItems, their counts come in the listing (one command, with LIST-STATUS).
+# reporting why not. With StatusItems, their counts come in the listing, in one command, which is asked only of a
+# server with LIST-STATUS (Test-ListStatus).
 # The folders do not change while a command runs, so they are listed once per session, unless the counts are
 # wanted with them: a pipeline of folders would otherwise list them all again for each one.
 function Get-ImapFolderList($Cmdlet, $Session, [MailKit.StatusItems]$StatusItems = 'None') {
     if ($StatusItems -eq 'None' -and $Session.ContainsKey('Folders')) { return , $Session.Folders }
+    if (-not (Test-ImapConnection $Cmdlet $Session)) { return $null }
     Write-Verbose "Listing the folders of $($Session.Settings.User)..."
     $client = $Session.Client
     $folders = [System.Collections.Generic.List[object]]::new()
@@ -151,10 +162,13 @@ function Test-ImapWriteAllowed($Cmdlet, $Session, [string]$Kind, [string]$Target
 # see Test-ImapWriteAllowed. Only a command that writes opens a folder with -ForWrite and the kind of change
 # it makes (SELECT), and only on an account that allows that kind. Returns $true, or $false after reporting
 # why not. A connection has one folder open at a time: opening another closes the one before.
+# Every message a command reads comes through here, so the connection is checked here first (Test-ImapConnection),
+# also when the folder is open already: once it is lost, nothing is left to do in the account.
 function Open-ImapFolder($Cmdlet, $Session, $Folder, [string]$ForWrite) {
     $settings = $Session.Settings
     if ($ForWrite -and -not (Test-ImapWriteAllowed $Cmdlet $Session $ForWrite $Folder.FullName)) { return $false }
     $access = if ($ForWrite) { [MailKit.FolderAccess]::ReadWrite } else { [MailKit.FolderAccess]::ReadOnly }
+    if (-not (Test-ImapConnection $Cmdlet $Session)) { return $false }
     if ($Folder.IsOpen -and $Folder.Access -eq $access) { return $true }
     $failure = Wait-ImapTask ($Folder.OpenAsync($access, [System.Threading.CancellationToken]::None))
     if ($failure) {

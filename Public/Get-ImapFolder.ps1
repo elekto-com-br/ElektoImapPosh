@@ -7,6 +7,11 @@ The `Get-ImapFolder` function connects to each account and returns its folders t
 messages, with their special use (Inbox, Sent, All, Drafts, Trash, Junk...), the number of
 messages and the number of unread ones. It only reads: nothing is marked as read.
 
+The counts of every folder come in one request from a server with LIST-STATUS, as Gmail is. From a
+server without it, they are asked of each folder, one request each, which takes a while on a
+mailbox with hundreds of folders; a folder that does not answer is reported as an error, and the
+others are listed.
+
 Gmail translates the names of its special folders ("[Gmail]/Sent Mail" in English), so the
 special use is the name that works in any language, with -Folder of this and the other commands.
 
@@ -71,15 +76,20 @@ Function Get-ImapFolder {
             if (-not $session) { continue }
             $settings = $session.Settings
 
-            # Without -Folder, the counts come with the listing; with it, only for the folders chosen
-            $folders = Get-ImapFolderList $PSCmdlet $session $(if (-not $Folder) { $statusItems } else { 'None' })
+            # Without -Folder, the counts come with the listing, from a server with LIST-STATUS (Test-ListStatus); with
+            # -Folder, or without LIST-STATUS, they are asked of each folder shown, one request each, and a folder that
+            # refuses is reported while the others are shown
+            $withListing = -not $Folder -and (Test-ListStatus $session)
+            $folders = Get-ImapFolderList $PSCmdlet $session $(if ($withListing) { $statusItems } else { 'None' })
             if ($null -eq $folders) { continue }
 
             $chosen = $folders
             if ($Folder) { $chosen = Select-ImapFolderList $PSCmdlet $session $folders $Folder -Literal:$folderFromPipeline }
 
             foreach ($item in $chosen) {
-                if ($Folder) {
+                if (-not $withListing) {
+                    # One request for each folder: a connection lost is reported once, not for each folder left
+                    if (-not (Test-ImapConnection $PSCmdlet $session)) { break }
                     $failure = Wait-ImapTask ($item.StatusAsync($statusItems, [System.Threading.CancellationToken]::None))
                     if ($failure) {
                         Write-ImapError $PSCmdlet "Could not read the folder '$($item.FullName)' of $($settings.User): $failure" 'FolderStatusFailed' ReadError $item.FullName
