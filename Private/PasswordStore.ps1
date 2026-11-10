@@ -147,9 +147,13 @@ function Read-StoredPassword([string]$Account, [ref]$Failure) {
 
     $path = Get-PasswordFilePath $Account
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    # Refused as a store that cannot be read is, through $Failure: thrown, it ended the whole command, so the accounts
+    # after this one were never read, and under -ErrorAction SilentlyContinue PowerShell skips a throw, so the password
+    # was used all the same (found in the review before the first release, measured)
     $othersAccess = [IO.UnixFileMode]'GroupRead, GroupWrite, GroupExecute, OtherRead, OtherWrite, OtherExecute'
     if ([IO.File]::GetUnixFileMode($path) -band $othersAccess) {
-        throw "The password file '$path' can be read by other users. Restrict it with: chmod 600 '$path'"
+        if ($Failure) { $Failure.Value = "the file '$path' can be read by other users; restrict it with: chmod 600 '$path'" }
+        return $null
     }
     # By a task, whose failure Wait-ImapTask gives as a message, where ReadAllText would throw
     $task = [IO.File]::ReadAllTextAsync($path, [System.Threading.CancellationToken]::None)

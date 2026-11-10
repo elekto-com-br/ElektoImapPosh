@@ -599,6 +599,60 @@ Describe 'A password file that cannot be read' -Skip:($IsWindows -or $isRoot) {
     }
 }
 
+# A password file that others can read, as a file written by hand gets under the usual umask (mode 644; root or not):
+# it was refused by a throw, so a command ended at that account, and under -ErrorAction SilentlyContinue PowerShell
+# skipped the throw and used the password (measured). The counts of errors come from a process of its own.
+Describe 'A password file that others can read' -Skip:$IsWindows {
+    BeforeAll {
+        Remove-Item -LiteralPath env:IMAP_PASS_WORK -ErrorAction Ignore
+        $file = Join-Path $env:IMAP_CONFIG_DIR 'secrets/work'
+    }
+
+    BeforeEach {
+        Set-Content -Path $accountsFile -Value '{ "Accounts": { "work": { "Server": "127.0.0.1", "Port": 9, "User": "me@example.com", "NoTls": true }, "other": { "Server": "127.0.0.1", "Port": 9, "User": "me@example.com", "NoTls": true } } }'
+        Set-ImapAccount -Name work -Password ([Net.NetworkCredential]::new('', 'not-a-password').SecurePassword)
+        [IO.File]::SetUnixFileMode($file, 'UserRead, UserWrite, GroupRead, OtherRead')
+    }
+
+    AfterEach {
+        [IO.File]::SetUnixFileMode($file, 'UserRead, UserWrite')
+    }
+
+    It 'is one error of the account that says why, PasswordUnreadable, and the other accounts go on, <Case>' -TestCases @(
+        @{ Case = 'by default'; Action = '' }
+        @{ Case = 'under -ErrorAction SilentlyContinue'; Action = '-ErrorAction SilentlyContinue' }
+    ) {
+        $output = Invoke-AsUserScript ([scriptblock]::Create(@"
+`$env:IMAP_PASS_OTHER = 'not-a-password'
+`$null = Get-ImapFolder -Account work, other -ErrorVariable failures $Action
+"folders: `$((`$failures | ForEach-Object { `$_.FullyQualifiedErrorId -replace ',.*' }) -join '|')"
+"message: `$(`$failures[0])"
+"@))
+
+        $output | Should -Contain 'imported ElektoImapPosh'
+        $output | Should -Contain 'folders: PasswordUnreadable|ConnectionFailed' -Because 'the password is not used, and the other account is connected to'
+        @($output | Where-Object { $_ -like 'message: *' })[0] | Should -BeLike "message: The password of account 'work' could not be read: the file '*work' can be read by other users; restrict it with: chmod 600 *"
+    }
+
+    It 'shows as Unusable in Get-ImapAccount, with a warning that says why, and no error' {
+        $output = Invoke-AsUserScript {
+            $account = Get-ImapAccount work -ErrorVariable failures -WarningVariable warnings -WarningAction SilentlyContinue
+            "account: $($account.PasswordSource), $(@($failures).Count) errors, $(@($warnings).Count) warnings"
+            "warning: $($warnings[0])"
+        }
+
+        $output | Should -Contain 'account: Unusable, 0 errors, 1 warnings'
+        @($output | Where-Object { $_ -like 'warning: *' })[0] | Should -BeLike "warning: The password of account 'work' could not be read: the file '*work' can be read by other users*"
+    }
+
+    It 'is warned of by Set-ImapAccount, which saves the account all the same' {
+        Set-ImapAccount -Name work -Port 143 -WarningVariable warnings -WarningAction SilentlyContinue
+
+        "$warnings" | Should -BeLike "The password of account 'work' could not be read: the file '*work' can be read by other users*"
+        (Get-Content -Raw -LiteralPath $accountsFile | ConvertFrom-Json).Accounts.work.Port | Should -Be 143
+    }
+}
+
 # The settings hold no password, but servers and users: a file the user made owner-only stays so
 Describe 'The mode of the accounts file' -Skip:$IsWindows {
     It 'is kept when the file is written, and the new file has it before anything is written to it' {

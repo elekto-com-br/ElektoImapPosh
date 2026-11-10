@@ -3,8 +3,8 @@
 # the size, the date the server received it, the structure of its parts (its text parts and attachments), on Gmail its
 # thread and labels, the Authentication-Results headers that tell an authenticated sender, and X-Original-From, where
 # a Google Group puts the sender it replaces. Then, when the policy
-# allows it, the text part alone (Get-ImapMessageText). Parts are fetched with BODY.PEEK from folders opened read-only,
-# so nothing is marked as read.
+# allows it, its text parts alone (Get-ImapMessageText). Parts are fetched with BODY.PEEK from folders opened
+# read-only, so nothing is marked as read.
 
 # Whether the server has the Gmail extensions (labels, threads, X-GM-RAW). They are used only when it announces them.
 function Test-GMailServer($Session) {
@@ -65,21 +65,29 @@ function Get-ImapMessageSummary($Cmdlet, $Session, $Folder, $Uids) {
 }
 
 # The addresses of a list as text, each as "Name <address>", or the address alone when it has no name, as
-# Format-ShownText shows a text; none for no list. At most the first $script:ShownAddressCount, and then how many more
-# there were ("... and 9900 more"), so that thousands of them do not flood the context of an AI, and a script that
-# answers them all fails on that line rather than leave some out unsaid.
+# Format-ShownText shows a text; none for no list. The name and the address are shown apart, the name cut to
+# $script:ShownNameLength: the sender writes the name, as long as it likes, and cut with the address it pushed out the
+# address, the one part that a policy goes by and a reader can check. At most the first $script:ShownAddressCount
+# addresses, and then how many more there were ("... and 9900 more"), so that thousands of them do not flood the
+# context of an AI, and a script that answers them all fails on that line rather than leave some out unsaid.
 function Format-ImapAddress($List) {
     $all = @(foreach ($address in $List) { $address })
     $count = [Math]::Min($all.Count, $script:ShownAddressCount)
-    $texts = [string[]]::new($count)
+    $names = [string[]]::new($count)
+    $addresses = [string[]]::new($count)
     for ($index = 0; $index -lt $count; $index++) {
         $address = $all[$index]
-        $texts[$index] = if ($address -is [MimeKit.MailboxAddress] -and $address.Name) { "$($address.Name) <$($address.Address)>" }
-        elseif ($address -is [MimeKit.MailboxAddress]) { $address.Address }
-        else { "$address" }
+        if ($address -is [MimeKit.MailboxAddress]) {
+            $names[$index] = $address.Name
+            $addresses[$index] = $address.Address
+        } else { $addresses[$index] = "$address" }
     }
-    # All of them in one call
-    $shown = [string[]]@(Format-ShownText $texts)
+    # The names in one call, and the addresses in another
+    $names = [string[]]@(Format-ShownText $names $script:ShownNameLength)
+    $addresses = [string[]]@(Format-ShownText $addresses)
+    $shown = [string[]]@(for ($index = 0; $index -lt $count; $index++) {
+            if ($names[$index]) { "$($names[$index]) <$($addresses[$index])>" } else { $addresses[$index] }
+        })
     if ($all.Count -gt $count) { $shown += "`u{2026} and $($all.Count - $count) more" }
     return , $shown
 }
@@ -323,19 +331,98 @@ function Read-ImapMessageBatch($Cmdlet, [object[]]$Requests, [switch]$Html, [int
 }
 
 # The text of a message, in a hashtable with Text and Format (Text or Html, both $null when the message has no text):
-# its text/plain part, or else its text/html part, as they are; with -Html, the other way round. MimeKit decodes them
-# (base64 or quoted-printable, and their charset); nothing converts the HTML. Only that part is fetched, by BODY.PEEK:
-# of a multipart message, never its attachments; of a message of one part, all of it, which is that part and its
-# headers. $null after reporting why not.
+# its text parts (Get-ImapTextPart), text/plain or else text/html, as they are, one after another with an empty line
+# between them, as a client shows them; with -Html, the other way round. MimeKit decodes them (base64 or
+# quoted-printable, and their charset), with the line ends of the platform (measured: LF on Linux), which join them
+# too; nothing converts the HTML. Only those parts are fetched, one by one, by BODY.PEEK: of a multipart message, never
+# its attachments; of a message of one part, all of it, which is that part and its headers. $null after reporting why
+# not.
 function Get-ImapMessageText($Cmdlet, $Session, $Folder, $Summary, [switch]$Html) {
-    $parts = if ($Html) { $Summary.HtmlBody, $Summary.TextBody } else { $Summary.TextBody, $Summary.HtmlBody }
-    $part = @($parts | Where-Object { $_ })[0]
-    if (-not $part) { return @{ Text = $null; Format = $null } }
-    $task = $Folder.GetBodyPartAsync($Summary.UniqueId, $part, [System.Threading.CancellationToken]::None, $null)
-    $failure = Wait-ImapTask $task
-    if ($failure) {
-        Write-ImapError $Cmdlet "Could not read the message $($Summary.UniqueId.Id) of the folder '$($Folder.FullName)' of $($Session.Settings.User): $failure" 'MessageFetchFailed' ReadError $Summary.UniqueId.Id
-        return $null
+    $chosen = Get-ImapTextPart $Summary -Html:$Html
+    if (-not $chosen.Parts.Count) { return @{ Text = $null; Format = $null } }
+    $texts = [System.Collections.Generic.List[string]]::new()
+    foreach ($part in $chosen.Parts) {
+        $task = $Folder.GetBodyPartAsync($Summary.UniqueId, $part, [System.Threading.CancellationToken]::None, $null)
+        $failure = Wait-ImapTask $task
+        if ($failure) {
+            Write-ImapError $Cmdlet "Could not read the message $($Summary.UniqueId.Id) of the folder '$($Folder.FullName)' of $($Session.Settings.User): $failure" 'MessageFetchFailed' ReadError $Summary.UniqueId.Id
+            return $null
+        }
+        $texts.Add($task.Result.Text)
     }
-    return @{ Text = $task.Result.Text; Format = if ($part.IsHtml) { 'Html' } else { 'Text' } }
+    return @{ Text = $texts -join ([Environment]::NewLine * 2); Format = $chosen.Format }
+}
+
+# The text parts of a message, told from its structure (nothing fetched), in a hashtable with Parts, in the order of
+# the message, and Format, Text or Html ($null, with no part, when it has no text): those of the kind asked
+# (text/plain, or text/html with -Html), or else those of the other kind. Never a part that is a file, which
+# Get-ImapFilePart lists as an attachment (a text with a name, as Apple Mail sends a .txt dragged into a message, or a
+# system a log as the whole of a message), so that a message whose only text is a file has none, as one whose body is
+# an image; and a file the policy withholds is never read as text. Of a multipart/alternative, the last version that
+# has a text of the kind, as MailKit takes it; of a multipart/related, its root; of any other multipart, every text in
+# it, as a client shows a message whose text goes on after an attachment (Apple Mail puts a file where it was dragged).
+# A message attached is a file, not text. Before, the part of MailKit was taken (TextBody, HtmlBody), which takes a
+# named text for the text of the message, and stops at the first text of a multipart/mixed, so that what came after an
+# attachment was left out unsaid (both found in the review before the first release).
+function Get-ImapTextPart($Summary, [switch]$Html) {
+    $files = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($part in (Get-ImapFilePart $Summary).Attachments) { $null = $files.Add([string]$part.PartSpecifier) }
+    $plainParts = [System.Collections.Generic.List[object]]::new()
+    $htmlParts = [System.Collections.Generic.List[object]]::new()
+    Add-ImapTextPart $Summary.Body $files $plainParts $htmlParts
+    $first, $second = if ($Html) { $htmlParts, $plainParts } else { $plainParts, $htmlParts }
+    if ($first.Count) { return @{ Parts = $first; Format = if ($Html) { 'Html' } else { 'Text' } } }
+    if ($second.Count) { return @{ Parts = $second; Format = if ($Html) { 'Text' } else { 'Html' } } }
+    return @{ Parts = $first; Format = $null }
+}
+
+# Adds to $PlainParts and to $HtmlParts the text parts of a part of the structure, for Get-ImapTextPart. The parts of a
+# multipart/alternative are versions of one text, so of them the last that has a plain text and the last that has an
+# HTML are taken, each with what it holds of that kind. A text of another kind (text/calendar, text/csv) is left out.
+function Add-ImapTextPart($Part, $Files, $PlainParts, $HtmlParts) {
+    if ($Part -is [MailKit.BodyPartText]) {
+        if ($Files.Contains([string]$Part.PartSpecifier)) { return }
+        if ($Part.IsPlain) { $PlainParts.Add($Part) } elseif ($Part.IsHtml) { $HtmlParts.Add($Part) }
+        return
+    }
+    if ($Part -isnot [MailKit.BodyPartMultipart]) { return }
+    if ($Part.ContentType.IsMimeType('multipart', 'related')) {
+        Add-ImapTextPart (Get-MultipartRelatedRoot $Part) $Files $PlainParts $HtmlParts
+        return
+    }
+    if (-not $Part.ContentType.IsMimeType('multipart', 'alternative')) {
+        foreach ($child in $Part.BodyParts) { Add-ImapTextPart $child $Files $PlainParts $HtmlParts }
+        return
+    }
+    $chosenPlain = $null
+    $chosenHtml = $null
+    for ($index = $Part.BodyParts.Count - 1; $index -ge 0; $index--) {
+        $versionPlain = [System.Collections.Generic.List[object]]::new()
+        $versionHtml = [System.Collections.Generic.List[object]]::new()
+        Add-ImapTextPart $Part.BodyParts[$index] $Files $versionPlain $versionHtml
+        if (-not $chosenPlain -and $versionPlain.Count) { $chosenPlain = $versionPlain }
+        if (-not $chosenHtml -and $versionHtml.Count) { $chosenHtml = $versionHtml }
+    }
+    if ($chosenPlain) { $PlainParts.AddRange($chosenPlain) }
+    if ($chosenHtml) { $HtmlParts.AddRange($chosenHtml) }
+}
+
+# The root of a multipart/related, as MailKit finds it: the part whose Content-ID its parameter "start" names, or else
+# its first part. Content-IDs compared without their angle brackets, which either side may carry.
+function Get-MultipartRelatedRoot($Part) {
+    $start = Get-BareContentId $Part.ContentType.Parameters['start']
+    if ($start) {
+        foreach ($child in $Part.BodyParts) {
+            if ([string]::Equals((Get-BareContentId $child.ContentId), $start, [StringComparison]::Ordinal)) { return $child }
+        }
+    }
+    if ($Part.BodyParts.Count) { return $Part.BodyParts[0] }
+    return $null
+}
+
+# A Content-ID without the angle brackets around it
+function Get-BareContentId([string]$Id) {
+    $Id = $Id.Trim()
+    if ($Id.StartsWith('<', [StringComparison]::Ordinal) -and $Id.EndsWith('>', [StringComparison]::Ordinal)) { return $Id.Substring(1, $Id.Length - 2) }
+    return $Id
 }

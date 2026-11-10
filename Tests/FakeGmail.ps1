@@ -105,10 +105,11 @@ function Start-FakeGmail([hashtable[]]$Messages, $Folders = $script:FakeGmailFol
                 if ($Message.Attachment) { return , @(@{ Name = $Message.Attachment; Type = 'application/pdf'; Data = "%PDF-1.4`n" }) }
                 return , @()
             }
-            # The content of an attachment as the message carries it: in base64, or as it is with Encoding 7bit
+            # The content of an attachment as the message carries it: in base64, or as it is with Encoding 7bit; nothing
+            # for an empty file, either way
             function Get-PartBody($Attachment) {
-                if ($Attachment.Encoding -eq '7bit') { return $Attachment.Data }
-                return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Attachment.Data))
+                if ($Attachment.Encoding -eq '7bit') { return [string]$Attachment.Data }
+                return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$Attachment.Data))
             }
             # The disposition of an attachment: attachment, unless it says inline, or none (no Content-Disposition)
             function Get-Disposition($Attachment) { if ($Attachment.Disposition) { return $Attachment.Disposition }; return 'attachment' }
@@ -146,8 +147,9 @@ function Start-FakeGmail([hashtable[]]$Messages, $Folders = $script:FakeGmailFol
                 if ($Section -match '^(\d+)(\.MIME)?$' -and [int]$Matches[1] -ge 2 -and [int]$Matches[1] -le $attachments.Count + 1) {
                     $attachment = $attachments[[int]$Matches[1] - 2]
                     if ($Matches[2]) { return Get-AttachmentHeader $attachment }
-                    # The CRLF before the boundary is not part of the content, which base64 does not mind
-                    if ($attachment.Encoding -eq '7bit') { return $attachment.Data }
+                    # The CRLF before the boundary is not part of the content, which base64 does not mind; an empty file
+                    # comes as nothing, as a server gives it
+                    if ($attachment.Encoding -eq '7bit' -or -not $attachment.Data) { return [string]$attachment.Data }
                     return "$(Get-PartBody $attachment)`r`n"
                 }
                 return ''
@@ -163,7 +165,7 @@ function Start-FakeGmail([hashtable[]]$Messages, $Folders = $script:FakeGmailFol
                 $disposition = if ($kind -eq 'NONE') { 'NIL' } elseif ($Attachment.Name) { "(`"$kind`" (`"FILENAME`" $name))" } else { "(`"$kind`" NIL)" }
                 $id = if ($Attachment.ContentId) { Format-Quoted "<$($Attachment.ContentId)>" } else { 'NIL' }
                 $seven = $Attachment.Encoding -eq '7bit'
-                $octets = if ($Attachment.Octets) { $Attachment.Octets } elseif ($seven) { [Text.Encoding]::UTF8.GetByteCount($Attachment.Data) } else { (Get-PartBody $Attachment).Length + 2 }
+                $octets = if ($Attachment.Octets) { $Attachment.Octets } elseif ($seven -or -not $Attachment.Data) { [Text.Encoding]::UTF8.GetByteCount([string]$Attachment.Data) } else { (Get-PartBody $Attachment).Length + 2 }
                 # A part of type TEXT also gives its number of lines, after its size; one of type MESSAGE/RFC822 the
                 # envelope and the structure of the message it carries, and then its number of lines
                 $size = if ($type -eq 'text') { "$octets 1" }

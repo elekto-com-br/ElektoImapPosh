@@ -27,13 +27,21 @@ dots and spaces Windows drops at the end ("x.exe." is saved as "x.exe"), nor cha
 hide text (an override of direction can show "fdp.exe" as "exe.pdf"), nor invisible ones such as the soft
 hyphen; with "_" before a name Windows keeps for a device ("_CON.txt", "_NUL .txt"), and for
 the "~" of a name shaped as the short name Windows gives a long one ("REPORT~1.PDF" is saved as
-"REPORT_1.PDF", since it could stand for another file of the directory). A part without a name is
-"attachment", with the extension of its type ("attachment.png"). A name that comes more than once in a
-message is numbered, attachments first, then inline parts: Gmail names every print pasted in a message
+"REPORT_1.PDF", since it could stand for another file of the directory). Names that the shell of Windows
+acts on by their look alone, whatever the Mark of the Web says, are changed too: Explorer hides the
+extension of a shortcut, so "Invoice.pdf.lnk" shows as "Invoice.pdf", and showing a folder is enough for it
+to read the icon of a shortcut, which may be on a server of the sender's that Windows then logs in to, and
+a desktop.ini, which customizes the folder. So a file ending in .lnk, .url, .pif, .scf, .website,
+.library-ms, .search-ms, .searchConnector-ms, .appref-ms and the like, in .exe.local or in an extension
+{CLSID} gets ".download" after its name ("Invoice.pdf.lnk.download"), and desktop.ini and Thumbs.db get "_"
+before theirs. A part without a name is "attachment", with the extension of its type ("attachment.png"). A
+name that comes more than once in a message is numbered, attachments first, then inline parts: Gmail names
+every print pasted in a message
 "image.png", saved as "image.png", "image (2).png"... A part whose content is the same as one saved before
 from the same message, as a message forwarded by Gmail carries an image both shown and attached, or as
 Outlook repeats the logos of a signature, is not saved again: -Verbose says so, and a warning when the file
-with that content was already in the directory. Read-ImapMessage shows the name of each file as the
+with that content was already in the directory; empty files are no copies of each other, and each is saved
+under its name. Read-ImapMessage shows the name of each file as the
 FileName of each attachment and inline part. -UniqueName puts the UID of the message before it
 ("12045-image.png"), so that the files of several messages do not take each other's names. A message
 attached is saved as the server keeps it, an .eml.
@@ -52,12 +60,13 @@ When the account follows a policy (Set-ImapAccount -Policy), the attachments of 
 withholds are not saved (the error MessageWithheld says why), and each attachment must also pass the rules
 of the policy on attachments: AllowAttachmentsFrom (an authenticated sender, or the user's own message),
 DenyAttachmentTypes and AllowAttachmentTypes (by MIME type, as the sender declares it, or by file name), and
-MaxAttachmentSize, checked before anything is downloaded. The rules on names take the name the file gets
-and, when a number or -UniqueName changes it, the name written too: both must pass. An attachment withheld
-is the error AttachmentWithheld, which says why. The rules see each file as a whole: a message attached
-(.eml) carries the body and the attachments of another message, whatever its sender, and a zip file other
-files. MaxMessages limits how many messages of each account one command handles, with a warning that says
-how many were left out.
+MaxAttachmentSize, checked before anything is downloaded. The rules on names take the name the file gets;
+when a number or -UniqueName changes it, the name written too; and for a name the shell acts on, the name
+before the change: all must pass, so DenyAttachmentTypes '*.url' withholds "Invoice.url", which would be
+saved as "Invoice.url.download". An attachment withheld is the error AttachmentWithheld, which says why.
+The rules see each file as a whole: a message attached (.eml) carries the body and the attachments of
+another message, whatever its sender, and a zip file other files. MaxMessages limits how many messages of
+each account one command handles, with a warning that says how many were left out.
 
 .PARAMETER Account
 The account to read from, kept by Set-ImapAccount. If not provided, reads from the default account, if there

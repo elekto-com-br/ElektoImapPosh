@@ -623,8 +623,175 @@ Describe 'Addresses as the commands return them' {
         }
 
         [string]::Equals($result[0], "Evil`u{FFFD}]52;c;aGk=`u{FFFD} Name <evil@bad.example>", [StringComparison]::Ordinal) | Should -BeTrue -Because "it is shown as '$($result[0])'"
-        $result[1].Length | Should -Be 1000
-        $result[1] | Should -BeLikeExactly "xxx*`u{2026}"
+        # The name cut apart, to 200 characters, so that the address stays whole
+        [string]::Equals($result[1], ('x' * 199) + "`u{2026} <long@bad.example>", [StringComparison]::Ordinal) | Should -BeTrue -Because "it is shown as '$($result[1])'"
+    }
+}
+
+# Which parts of a message are its text, told from its structure, built here as MailKit gives it
+Describe 'The text parts of a message' {
+    BeforeAll {
+        # A leaf part: its type, its number in the message, and its name and disposition, if any
+        function New-Part([string]$Type, [string]$Specifier, [string]$Name, [string]$Disposition, [string]$ContentId) {
+            $media, $subtype = $Type -split '/'
+            $part = if ($media -eq 'text') { [MailKit.BodyPartText]::new() } else { [MailKit.BodyPartBasic]::new() }
+            $part.ContentType = [MimeKit.ContentType]::new($media, $subtype)
+            if ($Name) { $part.ContentType.Name = $Name }
+            if ($Disposition) {
+                $part.ContentDisposition = [MimeKit.ContentDisposition]::new($Disposition)
+                if ($Name) { $part.ContentDisposition.FileName = $Name }
+            }
+            if ($ContentId) { $part.ContentId = $ContentId }
+            $part.PartSpecifier = $Specifier
+            $part
+        }
+        function New-Multipart([string]$Subtype, [object[]]$Parts, [string]$Start) {
+            $multipart = [MailKit.BodyPartMultipart]::new()
+            $multipart.ContentType = [MimeKit.ContentType]::new('multipart', $Subtype)
+            if ($Start) { $multipart.ContentType.Parameters.Add('start', $Start) }
+            foreach ($part in $Parts) { $multipart.BodyParts.Add($part) }
+            $multipart
+        }
+        # The numbers of the text parts chosen, and their format
+        function Get-TextPart($Body, [switch]$Html) {
+            $summary = [MailKit.MessageSummary]::new(0)
+            $summary.Body = $Body
+            $chosen = InModuleScope ElektoImapPosh -Parameters @{ Summary = $summary; Html = [bool]$Html } { param($Summary, $Html) Get-ImapTextPart $Summary -Html:$Html }
+            [PSCustomObject]@{ Parts = @($chosen.Parts | ForEach-Object { $_.PartSpecifier }) -join ','; Format = $chosen.Format }
+        }
+    }
+
+    # MailKit's TextBody stopped at the first text: what came after an attachment was left out unsaid
+    It 'takes every text of a message whose text goes on after an attachment, and no file' {
+        $body = New-Multipart 'mixed' @((New-Part 'text/plain' '1'), (New-Part 'application/pdf' '2' 'contract.pdf' 'attachment'), (New-Part 'text/plain' '3'))
+
+        $chosen = Get-TextPart $body
+        $chosen.Parts | Should -Be '1,3'
+        $chosen.Format | Should -Be 'Text'
+    }
+
+    # MailKit took a named text for the text of the message, though the module lists it as an attachment
+    It 'takes no text that is a file, <Case>' -TestCases @(
+        @{ Case = 'attached as the whole of the message'; Disposition = 'attachment' }
+        @{ Case = 'shown inline as the whole of the message'; Disposition = 'inline' }
+        @{ Case = 'without a disposition, as the whole of the message'; Disposition = $null }
+    ) {
+        $chosen = Get-TextPart (New-Part 'text/plain' '' 'notes.txt' $Disposition)
+
+        $chosen.Parts | Should -BeNullOrEmpty
+        $chosen.Format | Should -BeNullOrEmpty
+    }
+
+    It 'takes the text after a named text shown first, and not the file' {
+        $body = New-Multipart 'mixed' @((New-Part 'text/plain' '1' 'log.txt' 'inline'), (New-Part 'text/plain' '2'))
+
+        (Get-TextPart $body).Parts | Should -Be '2'
+        (Get-TextPart $body -Html).Parts | Should -Be '2'
+    }
+
+    # Apple Mail's rich text with a file in the middle: alternative(plain, mixed(html, pdf, html))
+    It 'takes of an alternative the version of the kind asked, each with all its texts' {
+        $body = New-Multipart 'alternative' @(
+            (New-Part 'text/plain' '1')
+            (New-Multipart 'mixed' @((New-Part 'text/html' '2.1'), (New-Part 'application/pdf' '2.2' 'contract.pdf' 'inline'), (New-Part 'text/html' '2.3')))
+        )
+
+        $plain = Get-TextPart $body
+        $html = Get-TextPart $body -Html
+        $plain.Parts | Should -Be '1'
+        $plain.Format | Should -Be 'Text'
+        $html.Parts | Should -Be '2.1,2.3'
+        $html.Format | Should -Be 'Html'
+    }
+
+    It 'takes the last version of an alternative that has a text of the kind, and of a related its root' {
+        $body = New-Multipart 'alternative' @(
+            (New-Part 'text/plain' '1')
+            (New-Part 'text/html' '2')
+            (New-Multipart 'related' @((New-Part 'text/html' '3.1'), (New-Part 'image/png' '3.2' $null 'inline' 'logo@x')))
+        )
+
+        (Get-TextPart $body -Html).Parts | Should -Be '3.1'
+        (Get-TextPart $body).Parts | Should -Be '1'
+    }
+
+    # Only the root is the text: another HTML of a related is a resource of it, as a frame
+    It 'takes as the root of a related the part its start names, with or without angle brackets, or else its first' {
+        $body = New-Multipart 'related' @((New-Part 'text/html' '1' $null $null 'frame@x'), (New-Part 'text/html' '2' $null $null 'root@x'), (New-Part 'image/png' '3' $null 'inline' 'logo@x')) '<root@x>'
+        $bare = New-Multipart 'related' @((New-Part 'text/html' '1' $null $null '<frame@x>'), (New-Part 'text/html' '2' $null $null '<root@x>')) 'root@x'
+        $first = New-Multipart 'related' @((New-Part 'text/html' '1'), (New-Part 'text/html' '2' $null $null 'frame@x'), (New-Part 'image/png' '3' $null 'inline' 'logo@x'))
+
+        (Get-TextPart $body -Html).Parts | Should -Be '2'
+        (Get-TextPart $bare -Html).Parts | Should -Be '2'
+        (Get-TextPart $first -Html).Parts | Should -Be '1'
+    }
+
+    It 'gives the texts of the kind asked, or else those of the other kind, saying which' {
+        $both = New-Multipart 'mixed' @((New-Part 'text/plain' '1'), (New-Part 'text/html' '2' $null 'inline'))
+        $html = New-Multipart 'mixed' @((New-Part 'text/csv' '1'), (New-Part 'text/html' '2'), (New-Part 'message/rfc822' '3' 'original.eml' 'attachment'))
+
+        (Get-TextPart $both).Parts | Should -Be '1'
+        (Get-TextPart $both -Html).Parts | Should -Be '2'
+        $chosen = Get-TextPart $html
+        $chosen.Parts | Should -Be '2' -Because 'a text of another kind is no text of the message, and a message attached is a file'
+        $chosen.Format | Should -Be 'Html'
+    }
+}
+
+# What Read-ImapMessage fetches of the text parts, against a fake Gmail of its own
+Describe 'Read-ImapMessage on Gmail, the text parts' {
+    BeforeAll {
+        $now = [DateTimeOffset]::Now
+        $common = @{ Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Size = 3000 }
+        $server = Start-FakeGmail @(
+            ($common + @{ Uid = 1; Subject = 'Whole attached'; Date = $now.AddHours(-3); Whole = @{ Name = 'notes.txt'; Type = 'text/plain'; Data = 'SECRET LOG LINE' } })
+            ($common + @{ Uid = 2; Subject = 'Whole inline'; Date = $now.AddHours(-2); Whole = @{ Name = 'notes.txt'; Type = 'text/plain'; Data = 'SECRET LOG LINE'; Disposition = 'inline' } })
+            ($common + @{ Uid = 3; Subject = 'Two texts'; Date = $now.AddHours(-1); Text = 'PART A: the contract is attached.'
+                    Attachments = @(@{ Name = 'contract.pdf'; Type = 'application/pdf'; Data = '%PDF contract' }, @{ Type = 'text/plain'; Data = 'PART B: do not sign.'; Disposition = 'none' })
+                })
+        )
+        $passwords = Set-TestAccount 'gmail-texts' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; txt = @{ Policy = 'txt' } } -Policies @{ txt = @{ DenyAttachmentTypes = @('*.txt') } }
+        function Get-CommandSince([int]$Count) { @($server.State.Commands.ToArray() | Select-Object -Skip $Count) }
+    }
+
+    AfterAll {
+        Stop-FakeGmail $server
+        foreach ($name in $passwords) { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
+        $env:IMAP_CONFIG_DIR = $null
+    }
+
+    It 'reads every text of a message, an empty line between them, fetching no attachment' {
+        $before = $server.State.Commands.Count
+        $read = Read-ImapMessage open -Uid 3
+
+        # MimeKit gives the line ends of the platform
+        ($read.Text -creplace "`r`n", "`n") | Should -BeExactly "PART A: the contract is attached.`n`nPART B: do not sign."
+        $read.Format | Should -Be 'Text'
+        $read.Truncated | Should -BeFalse
+        $read.Attachments.FileName | Should -Be 'contract.pdf'
+        $fetched = @(Get-CommandSince $before | Where-Object { $_ -like '* UID FETCH *BODY.PEEK`[*' -and $_ -notlike '*HEADER.FIELDS*' })
+        $fetched | Where-Object { $_ -like '*BODY.PEEK`[1`]*' } | Should -Not -BeNullOrEmpty
+        $fetched | Where-Object { $_ -like '*BODY.PEEK`[3`]*' } | Should -Not -BeNullOrEmpty
+        $fetched | Where-Object { $_ -like '*BODY.PEEK`[2`]*' } | Should -BeNullOrEmpty -Because 'the PDF is not fetched'
+    }
+
+    It 'reads no text of a message whose only text is a file, which it lists, <Case>' -TestCases @(
+        @{ Case = 'attached'; Uid = 1 }
+        @{ Case = 'shown inline'; Uid = 2 }
+    ) {
+        $before = $server.State.Commands.Count
+        $open = Read-ImapMessage open -Uid $Uid -ErrorVariable failures
+        $withheld = Read-ImapMessage txt -Uid $Uid -ErrorVariable moreFailures
+
+        @($failures) + @($moreFailures) | Should -BeNullOrEmpty
+        foreach ($read in $open, $withheld) {
+            $read.Text | Should -BeNullOrEmpty
+            $read.Format | Should -BeNullOrEmpty
+            $read.Attachments.FileName | Should -Be 'notes.txt'
+        }
+        $open.Attachments[0].Withheld | Should -BeNullOrEmpty
+        $withheld.Attachments[0].Withheld | Should -BeLike "*matches '`*.txt' in DenyAttachmentTypes*"
+        Get-CommandSince $before | Where-Object { $_ -like '* UID FETCH *BODY.PEEK`[*' -and $_ -notlike '*HEADER.FIELDS*' } | Should -BeNullOrEmpty -Because 'the file is not read as text'
     }
 }
 
@@ -1346,6 +1513,11 @@ Describe 'What the commands return of what a sender writes, on Gmail' {
             }
             # An address with an override of direction, which MailKit takes (one with a control character it drops)
             @{ Uid = 2; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); Date = $now.AddHours(-1); Size = 3000; Subject = 'y' * 3000; From = "bad`u{202E}fdp.exe@x.example" }
+            # Names long enough to push out the address, were they cut with it
+            @{ Uid = 3; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); Date = $now.AddMinutes(-30); Size = 3000; Subject = 'Long names'
+                From = ('Finance Department ' * 60) + '<attacker@evil.example>'
+                To = @(('Board of Directors ' * 60) + '<victim@example.com>')
+            }
         )
         $passwords = Set-TestAccount 'gmail-shown' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; deny = @{ Policy = 'deny' } } -Policies @{
             deny = @{ DenyReadFrom = @('*@x.example') }
@@ -1380,6 +1552,14 @@ Describe 'What the commands return of what a sender writes, on Gmail' {
         $many.MessageId | Should -BeLikeExactly "xxx*`u{2026}"
         $many.InReplyTo.Length | Should -Be 1000
         $many.InReplyTo | Should -BeLikeExactly "zzz*`u{2026}"
+    }
+
+    It 'keeps the address of a sender or recipient whose name would push it out' {
+        $message = Get-ImapMessage open | Where-Object Uid -EQ 3
+
+        $message.From | Should -BeLikeExactly "Finance Department *`u{2026} <attacker@evil.example>"
+        $message.From.Length | Should -Be (200 + ' <attacker@evil.example>'.Length)
+        $message.To[0] | Should -BeLikeExactly "Board of Directors *`u{2026} <victim@example.com>"
     }
 
     It 'reads the text of a message with its lines, and without what drives a terminal or hides text' {
@@ -1512,6 +1692,69 @@ Describe 'Read-ImapMessage against smtp4dev' -Skip:(-not $smtp4devInstalled) {
 
         $result.Uid | Should -Be $messages.Uid[0..1] -Because 'the messages are read in the order of -Uid'
         "$warnings" | Should -Be "The policy 'two' lets one command read 2 messages of tester: 2 more were not read."
+    }
+}
+
+# The text parts of messages as MimeKit writes them and a real IMAP server gives their structure: a text file shown
+# before the text, and Apple Mail's rich text with a file in the middle
+Describe 'Read-ImapMessage against smtp4dev, the text parts' -Skip:(-not $smtp4devInstalled) {
+    BeforeAll {
+        $server = Start-Smtp4dev -LogDirectory (Join-Path $TestDrive 'smtp4dev-texts')
+        function New-Text([string]$Subtype, [string]$Text, [string]$FileName) {
+            $part = [MimeKit.TextPart]::new($Subtype)
+            $part.Text = $Text
+            if ($FileName) {
+                $part.ContentDisposition = [MimeKit.ContentDisposition]::new('inline')
+                $part.FileName = $FileName
+            }
+            $part
+        }
+        $mixed = [MimeKit.Multipart]::new('mixed')
+        $mixed.Add((New-Text 'plain' 'CONTENT OF THE LOG' 'log.txt'))
+        $mixed.Add((New-Text 'plain' 'Hi, the log is above.'))
+        Send-Smtp4devMessage $server 'Inline file first' -Body $mixed
+        $rich = [MimeKit.MultipartAlternative]::new()
+        $rich.Add((New-Text 'plain' "Before the file.`r`n`r`nAfter the file."))
+        $inner = [MimeKit.Multipart]::new('mixed')
+        $inner.Add((New-Text 'html' '<p>Before the file.</p>'))
+        $pdf = [MimeKit.MimePart]::new('application', 'pdf')
+        $pdf.FileName = 'contract.pdf'
+        $pdf.Content = [MimeKit.MimeContent]::new([IO.MemoryStream]::new([Text.Encoding]::ASCII.GetBytes('%PDF-1.4')))
+        $pdf.ContentTransferEncoding = 'Base64'
+        $inner.Add($pdf)
+        $inner.Add((New-Text 'html' '<p>After the file.</p>'))
+        $rich.Add($inner)
+        Send-Smtp4devMessage $server 'Rich text with a file' -Body $rich
+
+        $passwords = Set-TestAccount 'config-texts' $server.ImapPort -SavedEnvironment $savedEnvironment -Accounts @{ local = @{ Policy = 'txt' } } -Policies @{ txt = @{ DenyAttachmentTypes = @('*.txt') } }
+        $messages = Get-ImapMessage local
+        function Get-TestUid([string]$Subject) { ($messages | Where-Object Subject -EQ $Subject).Uid }
+    }
+
+    AfterAll {
+        Stop-Smtp4dev $server
+        foreach ($name in $passwords) { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
+        $env:IMAP_CONFIG_DIR = $null
+    }
+
+    It 'reads the text after a text file shown first, and lists the file, withheld' {
+        foreach ($read in (Read-ImapMessage local -Uid (Get-TestUid 'Inline file first')), (Read-ImapMessage local -Uid (Get-TestUid 'Inline file first') -Html)) {
+            $read.Text | Should -BeExactly 'Hi, the log is above.'
+            $read.Format | Should -Be 'Text'
+            $read.Attachments.FileName | Should -Be 'log.txt'
+            $read.Attachments[0].Withheld | Should -BeLike "*matches '`*.txt' in DenyAttachmentTypes*"
+        }
+    }
+
+    It 'reads both texts of the HTML of a rich text with a file in the middle, and the plain version alone without -Html' {
+        $html = Read-ImapMessage local -Uid (Get-TestUid 'Rich text with a file') -Html
+        $plain = Read-ImapMessage local -Uid (Get-TestUid 'Rich text with a file')
+
+        ($html.Text -creplace "`r`n", "`n") | Should -BeExactly "<p>Before the file.</p>`n`n<p>After the file.</p>"
+        $html.Format | Should -Be 'Html'
+        $html.Attachments.FileName | Should -Be 'contract.pdf'
+        ($plain.Text -creplace "`r`n", "`n") | Should -BeExactly "Before the file.`n`nAfter the file."
+        $plain.Format | Should -Be 'Text'
     }
 }
 

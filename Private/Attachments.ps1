@@ -11,15 +11,16 @@
 # with "_" for those Windows refuses in a file name and for those that hide, reorder or drive (control characters,
 # the overrides of direction that can show "exe.pdf" for "fdp.exe", the tags of Unicode), as Format-ShownText takes
 # them out of a text; without the spaces and dots Windows drops at the end ("x.exe." would be saved as "x.exe"); at
-# most 200 bytes of UTF-8, keeping the extension (Linux takes 255 bytes in a name, and the number, the UID and the
-# temporary suffix need some); "_" for the
+# most 200 bytes of UTF-8 before the ".download" of a name the shell acts on, keeping the extension (Linux takes 255
+# bytes in a name, and the number, the UID and the temporary suffix need some); "_" for the
 # "~" of a name shaped as the short name (8.3) Windows gives a long one, since "REPORT~1.PDF" can stand for the
 # "report-final.pdf" of the directory, which -Force would replace; "_" before a name Windows keeps for a device (CON,
 # NUL, COM1, COM with a superscript digit, CONIN$...), also followed by spaces or an extension ("NUL .txt", which
-# Windows 10 reads as NUL); and "attachment", with the extension of its MIME type (attachment.png), when nothing is
-# left. The same on every platform, so that a file saved on Linux keeps its name on Windows. The sender writes the
-# name, of any length: it is cut in a few steps, not one for each character.
-function Get-AttachmentFileName([string]$Name, [string]$ContentType) {
+# Windows 10 reads as NUL); "attachment", with the extension of its MIME type (attachment.png), when nothing is left;
+# and, but with -KeepShellName, a name that the shell of Windows acts on renamed (Get-ShellSafeFileName). The same on
+# every platform, so that a file saved on Linux keeps its name on Windows. The sender writes the name, of any length:
+# it is cut in a few steps, not one for each character.
+function Get-AttachmentFileName([string]$Name, [string]$ContentType, [switch]$KeepShellName) {
     $leaf = ConvertTo-ComposedText ($Name -csplit '[\\/]')[-1]
     $leaf = (($leaf -creplace $script:InvisibleCharacter, '') -creplace ('[<>:"|?*]|' + $script:HiddenCharacter), '_').Trim().TrimEnd('.', ' ')
     if ([Text.Encoding]::UTF8.GetByteCount($leaf) -gt 200) {
@@ -41,10 +42,32 @@ function Get-AttachmentFileName([string]$Name, [string]$ContentType) {
     if ([regex]::IsMatch($leaf, '^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[\d\xB9\xB2\xB3]|LPT[\d\xB9\xB2\xB3]) *(\.|$)', 'IgnoreCase, CultureInvariant')) { $leaf = "_$leaf" }
     if (-not $leaf) {
         $extension = $null
-        if ($ContentType -and [MimeKit.MimeTypes]::TryGetExtension($ContentType, [ref]$extension)) { return "attachment$extension" }
-        return 'attachment'
+        $leaf = if ($ContentType -and [MimeKit.MimeTypes]::TryGetExtension($ContentType, [ref]$extension)) { "attachment$extension" } else { 'attachment' }
     }
-    return $leaf
+    if ($KeepShellName) { return $leaf }
+    return Get-ShellSafeFileName $leaf
+}
+
+# The extensions of the files that the shell of Windows shows otherwise than they are, or reads by only showing their
+# folder, as a pattern of the end of a name (see Get-ShellSafeFileName)
+$script:ShellExtension = '\.(lnk|url|pif|scf|website|appref-ms|library-ms|search-ms|searchconnector-ms|accountpicture-ms|desklink|mapimail|mydocs|zfsendtotarget|(exe|com|scr)\.local|\{[^.]*\})$'
+
+# A file name made safe from the shell of Windows, which acts on some names by their look alone, whatever the Mark of
+# the Web says. Explorer hides the extension of some types even when it shows the others (NeverShowExt in the
+# registry: .lnk, .url, .pif, .scf, .website, .library-ms, .search-ms, .searchConnector-ms and a few more, measured on
+# Windows 11), so "invoice.pdf.lnk" shows as "invoice.pdf", with the icon the shortcut names, and "invoice.pdf.pif" is
+# a program; and it reads some files by only showing their folder: the icon of a shortcut, which can be on a server of
+# the sender's, which Windows then logs in to, giving away a hash of the user's password; desktop.ini, which customizes
+# its folder; Thumbs.db, its thumbnails. An "app.exe.local" beside app.exe changes where that program loads its
+# libraries from (not ".env.local", which no program reads so), and an extension "{CLSID}" shows a file as an object of
+# the shell, hiding its type. So such a file gets ".download" after
+# its own extension, which Chromium gives such a download in place of its own, and Windows does not know (measured), so
+# Explorer shows the whole name: "invoice.pdf.lnk.download". desktop.ini and Thumbs.db get "_" before them, as Chromium
+# names them. Ignoring case as Windows does, whatever the culture of the session.
+function Get-ShellSafeFileName([string]$Name) {
+    if ([regex]::IsMatch($Name, '^(desktop\.ini|thumbs\.db)$', 'IgnoreCase, CultureInvariant')) { return "_$Name" }
+    if ([regex]::IsMatch($Name, $script:ShellExtension, 'IgnoreCase, CultureInvariant')) { return "$Name.download" }
+    return $Name
 }
 
 # The name a message saved whole is written under (Save-ImapMessage): its UID, then its subject, by the rules of the
@@ -101,8 +124,10 @@ function Get-ImapFilePart($Summary) {
 # keeps its own), the MIME type, the most the file takes (Get-AttachmentSize), why the policy keeps it from being
 # saved, if it does, and Part, the part of MailKit, to fetch it. The policy takes the name of the file and, when a
 # number changes it, the name written too, both having to pass, as with -UniqueName: a second "secret.pdf", written as
-# "secret (2).pdf", is a "secret.pdf" all the same. A part that is the same file as another is listed all the same:
-# only its content tells (Save-AttachmentFile).
+# "secret (2).pdf", is a "secret.pdf" all the same. And so the name before the rename of a name the shell acts on
+# (Get-ShellSafeFileName): DenyAttachmentTypes '*.url' withholds "invoice.url", which would be saved as
+# "invoice.url.download". A part that is the same file as another is listed all the same: only its content tells
+# (Save-AttachmentFile).
 function Get-ImapPartList($Session, $Folder, $Summary) {
     $files = Get-ImapFilePart $Summary
     $used = [System.Collections.Generic.Dictionary[string, int]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -110,9 +135,11 @@ function Get-ImapPartList($Session, $Folder, $Summary) {
             foreach ($part in $(if ($inline) { $files.Inline } else { $files.Attachments })) {
                 # In lower case: a part without parameters keeps the case of the server, upper case on Gmail
                 $type = $part.ContentType.MimeType.ToLowerInvariant()
-                $own = Get-AttachmentFileName $part.FileName $type
+                $plain = Get-AttachmentFileName $part.FileName $type -KeepShellName
+                $own = Get-ShellSafeFileName $plain
                 $fileName = Get-UniqueFileName $own $used
                 $withheld = Get-AttachmentWithheldReason $Session $Folder $Summary $part $own
+                if (-not $withheld -and $plain -cne $own) { $withheld = Get-AttachmentWithheldReason $Session $Folder $Summary $part $plain }
                 if (-not $withheld -and $fileName -cne $own) { $withheld = Get-AttachmentWithheldReason $Session $Folder $Summary $part $fileName }
                 [PSCustomObject]@{
                     Name        = Format-ShownText $part.FileName
@@ -137,10 +164,13 @@ function Get-AttachmentSize($Part) {
 
 # Writes the content of an attachment, as MimeKit fetched it, to a stream: a file decoded (base64, quoted-printable),
 # or a message attached that MimeKit parsed, as MimeKit writes it. Save-AttachmentFile fetches a message attached as
-# the server keeps it instead, unless it comes encoded, which MimeKit gives as a file.
+# the server keeps it instead, unless it comes encoded, which MimeKit gives as a file. MimeKit gives a part whose body
+# is empty no Content (measured), whose file is then an empty file: before, the call on the Content that was not
+# there failed, with an error of PowerShell, and with a try up the stack the whole command ended there (found in the
+# review before the first release).
 function Write-AttachmentContent($Entity, [IO.Stream]$Stream) {
     if ($Entity -is [MimeKit.MessagePart]) { $Entity.Message.WriteTo($Stream) }
-    else { $Entity.Content.DecodeTo($Stream) }
+    elseif ($null -ne $Entity.Content) { $Entity.Content.DecodeTo($Stream) }
 }
 
 # The Mark of the Web, as Outlook and the browsers write it in the stream Zone.Identifier of a file they save on
@@ -351,15 +381,20 @@ function Save-AttachmentFile($Cmdlet, $Session, $Folder, $Summary, $Part, [strin
         return $null
     }
     $content.Position = 0
-    $hash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([IO.Stream]$content))
-    $same = $null
-    if ($Saved.TryGetValue($hash, [ref]$same)) {
-        if ($same.Before) { Write-Warning "The part '$Shown' of $where was not saved: it is the same file as '$($same.Path)', which was already in the directory." }
-        else { Write-Verbose "The part '$Shown' of $where is the same file as '$($same.Path)', saved from it, and was not saved again." }
-        return $null
+    # An empty file is no copy of another: every one has the same hash, so the second of two empty files of a message,
+    # an export with no rows and an empty log, was not saved
+    $hash = $null
+    if ($content.Length) {
+        $hash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([IO.Stream]$content))
+        $same = $null
+        if ($Saved.TryGetValue($hash, [ref]$same)) {
+            if ($same.Before) { Write-Warning "The part '$Shown' of $where was not saved: it is the same file as '$($same.Path)', which was already in the directory." }
+            else { Write-Verbose "The part '$Shown' of $where is the same file as '$($same.Path)', saved from it, and was not saved again." }
+            return $null
+        }
     }
     $file = Write-ImapFile $Cmdlet $content $path $Directory $what 'Attachment' $Unmarked -Force:$Force
-    if ($null -ne $file) { $Saved[$hash] = @{ Path = $path; Before = $false } }
+    if ($null -ne $file -and $hash) { $Saved[$hash] = @{ Path = $path; Before = $false } }
     return $file
 }
 
