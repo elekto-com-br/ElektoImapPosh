@@ -1,11 +1,13 @@
 # ElektoImapPosh
 
+[![PowerShell Gallery](https://img.shields.io/powershellgallery/v/ElektoImapPosh)](https://www.powershellgallery.com/packages/ElektoImapPosh)
+[![PowerShell Gallery Downloads](https://img.shields.io/powershellgallery/dt/ElektoImapPosh)](https://www.powershellgallery.com/packages/ElektoImapPosh)
 [![License](https://img.shields.io/github/license/elekto-com-br/ElektoImapPosh)](LICENSE)
 
 A PowerShell module for reading email by IMAP, from several accounts on the same machine: list folders, search messages and Gmail conversations, read their text, save their attachments or a message whole, without marking anything as read. Gmail and Google Workspace come first. It is the reading companion of [ElektoMailPosh](https://github.com/elekto-com-br/ElektoMailPosh), which sends.
 
 > [!NOTE]
-> Under development: the first version, 0.1.0, is not on the PowerShell Gallery yet.
+> 0.9.0 is the first version: it reads, and changes nothing in the mailbox. Until 1.0, commands, parameters and settings may still change, as use shows what they should be.
 
 ## Before Giving It to an AI Agent
 
@@ -41,7 +43,7 @@ Install-Module -Name ElektoImapPosh
 Each version has a [release](https://github.com/elekto-com-br/ElektoImapPosh/releases) with the package as `ElektoImapPosh-<version>.zip`: extract it into a folder listed in `$env:PSModulePath`. On Windows, unblock the zip first:
 
 ```powershell
-Unblock-File ./ElektoImapPosh-0.1.0.zip
+Unblock-File ./ElektoImapPosh-*.zip
 ```
 
 The files of the module are not signed, and a zip downloaded by a browser carries the Mark of the Web, which Explorer's "Extract All" passes on to every file in it. Under the default execution policy (`RemoteSigned`), PowerShell then refuses to load the module, with an error about `ElektoImapPosh.Format.ps1xml` that says nothing of the zip. PowerShell's own `Expand-Archive` passes no mark on.

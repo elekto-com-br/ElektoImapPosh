@@ -32,7 +32,7 @@ Does not run the Pester tests.
 ./Build.ps1
 
 .EXAMPLE
-./Build.ps1 -ExpectedVersion 0.1.0
+./Build.ps1 -ExpectedVersion 0.9.0
 #>
 param (
     [string]$ExpectedVersion,
