@@ -1061,11 +1061,12 @@ Describe 'Get-ImapMessage on Gmail' {
             # Only in the folder of important messages, so that the others list the same
             @{ Uid = 5; Folders = '[Gmail]/Important'; Labels = @('\Important'); ThreadId = 555; From = 'Airline <news@airline.example>'; Subject = 'Flight'; Date = $now.AddMinutes(-30); Size = 1000 }
         )
-        $passwords = Set-TestAccount 'gmail' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; agent = @{ Policy = 'agent' }; recent = @{ Policy = 'recent' }; one = @{ Policy = 'one' }; important = @{ Policy = 'important' } } -Policies @{
+        $passwords = Set-TestAccount 'gmail' $server.Port -SavedEnvironment $savedEnvironment -Accounts @{ open = @{}; agent = @{ Policy = 'agent' }; recent = @{ Policy = 'recent' }; one = @{ Policy = 'one' }; important = @{ Policy = 'important' }; noquery = @{ Policy = 'noquery' } } -Policies @{
             agent     = @{ DenyFolders = @('Finance/*'); AllowReadFrom = @('*@client.example', 'me@gmail.com'); TrustAuthenticationResults = 'mx.google.com' }
             recent    = @{ MaxAgeDays = 30 }
             one       = @{ MaxMessages = 1 }
             important = @{ DenyFolders = @('Important') }
+            noquery   = @{ DenyFolders = @('Finance/*'); DenyQuery = $true }
         }
 
         # The SINCE of the last search the server got, as a date
@@ -1122,6 +1123,28 @@ Describe 'Get-ImapMessage on Gmail' {
         (Get-ImapMessage agent | Where-Object Subject -EQ 'Statement').Withheld | Should -Be $denied
         (Get-ImapMessage agent -Folder All | Where-Object Subject -EQ 'Statement').Withheld | Should -Be $denied
         (Get-ImapMessage agent -Folder 'Finance/Bank').Withheld | Should -Be "The folder 'Finance/Bank' is in DenyFolders of the policy 'agent'."
+    }
+
+    # -Query searches the text of the messages withheld too, so DenyQuery refuses it before any folder is opened
+    It 'refuses -Query for an account whose policy has DenyQuery, and opens no folder' {
+        $before = $server.State.Commands.Count
+        $result = Get-ImapMessage noquery -Query 'has:attachment' -ErrorVariable errors -ErrorAction SilentlyContinue
+
+        $result | Should -BeNullOrEmpty
+        $errors.Count | Should -Be 1
+        $errors[0].FullyQualifiedErrorId | Should -BeLike 'QueryNotAllowed,*'
+        "$($errors[0])" | Should -BeLike "*policy 'noquery'*(DenyQuery)*-From, -Subject*"
+        $commands = @($server.State.Commands.ToArray() | Select-Object -Skip $before)
+        $commands | Where-Object { $_ -like '* EXAMINE *' -or $_ -like '*X-GM-RAW*' } | Should -BeNullOrEmpty
+    }
+
+    # The fake ignores FROM and SUBJECT, so the search sent is what is checked
+    It 'searches the headers for an account whose policy has DenyQuery, and lists what it withholds' {
+        $result = Get-ImapMessage noquery -From bank.example -Subject statement -ErrorVariable errors
+
+        $errors.Count | Should -Be 0
+        @($server.State.Commands.ToArray() | Where-Object { $_ -like '* UID SEARCH *' })[-1] | Should -BeLike '*FROM*bank.example*SUBJECT*statement*'
+        ($result | Where-Object Subject -EQ 'Statement').Withheld | Should -Be "It has the label 'Finance/Bank', and the folder 'Finance/Bank' is in DenyFolders of the policy 'noquery'."
     }
 
     # Gmail lists its folder of \Important without that mark, and leaves the label of the folder open out of the labels

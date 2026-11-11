@@ -25,7 +25,9 @@ folder it returns, the newest first.
 When the account follows a policy (Set-ImapAccount -Policy), every message found is still listed, and
 the property Withheld says why its body and attachments may not be read; it is empty when they may.
 The policy also narrows the search: to the days of its MaxAgeDays, and to the MaxMessages of each
-account in a command, with a warning that says how many were left out.
+account in a command, with a warning that says how many were left out. It keeps bodies from being
+read, not from being searched: the server matches -From, -Subject and -Query against every message,
+withheld or not.
 
 .PARAMETER Account
 The accounts to read from, kept by Set-ImapAccount: names or wildcard patterns. If not provided,
@@ -60,7 +62,9 @@ Only the messages whose subject has this text. The server compares it, ignoring 
 .PARAMETER Query
 A Gmail search, as typed in the search box of Gmail, such as "from:bank.example has:attachment
 newer_than:7d" (sent as X-GM-RAW). Without -Folder, it searches All Mail. Only for servers with the
-Gmail extensions, Gmail and Google Workspace; with any other it is an error.
+Gmail extensions, Gmail and Google Workspace; with any other it is an error. It searches the text of
+every message of the account, those a policy withholds included: a withheld message that matches is
+listed, with its reason in Withheld, and its body stays unread. A policy with DenyQuery refuses it.
 
 .PARAMETER First
 How many messages of each folder to return, the newest first. Default is 50. A policy with
@@ -129,6 +133,12 @@ Function Get-ImapMessage {
 
             if ($Query -and -not (Test-GMailServer $session)) {
                 Write-ImapError $PSCmdlet "-Query is a Gmail search, and $($settings.Server) does not offer it (X-GM-EXT-1): use -From, -Subject, -Since and -Unread." 'QueryNotSupported' InvalidOperation $Query
+                continue
+            }
+            # -Query searches the text of every message, those the policy withholds included, and lists the withheld
+            # ones that match: the search would tell what the body has. Refused before any folder is opened.
+            if ($Query -and $policy -and $policy.DenyQuery) {
+                Write-ImapError $PSCmdlet "-Query searches the text of every message, those withheld included, and the policy '$($policy.Name)' of $($settings.User) denies it (DenyQuery): use -From, -Subject, -Since and -Unread." 'QueryNotAllowed' PermissionDenied $Query
                 continue
             }
 

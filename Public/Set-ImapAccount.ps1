@@ -11,7 +11,8 @@ These accounts are not those of ElektoMailPosh: each module keeps its own, so re
 password of its own, apart from the one for sending.
 
 The settings are kept in accounts.json, in the folder ElektoImapPosh of the user's configuration
-folder (%APPDATA% on Windows, ~/.config elsewhere), or in the folder named by IMAP_CONFIG_DIR.
+folder (%APPDATA% on Windows; elsewhere $XDG_CONFIG_HOME when it is an absolute path, or else
+~/.config), or in the folder named by IMAP_CONFIG_DIR.
 Passwords are never written there:
 - On Windows they go to the Credential Manager, as the generic credential "ElektoImapPosh:<name>",
   encrypted with the user's logon (DPAPI).

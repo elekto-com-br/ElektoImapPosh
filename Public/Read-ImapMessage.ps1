@@ -7,7 +7,9 @@ The `Read-ImapMessage` function returns the text of each message given, besides 
 returns of it: its text/plain parts, or, when it has none, its HTML as it is; with -Html, the HTML
 parts first. The property Format says which one came (Text or Html). The text is decoded (base64 or
 quoted-printable, and its character set), but HTML is never converted: whoever wants plain text from
-it pipes it to a converter of its own.
+it pipes it to a converter of its own. The plain text and the HTML are two versions that the sender
+writes, and they may differ: mail clients show the HTML, which keeps whatever its comments and styles
+hide (display:none, white on white).
 
 A message may have its text in several parts, as Apple Mail sends a file dragged into the middle of the
 text: Text holds all of them, one after another, with an empty line between them, as a mail client shows

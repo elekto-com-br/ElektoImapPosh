@@ -8,8 +8,8 @@ accounts that follow each one (given to Set-ImapAccount -Policy). A setting not 
 policy has no such rule, or no such limit. See Set-ImapPolicy for what each setting does.
 
 The policies are kept in accounts.json, with the accounts, in the folder ElektoImapPosh of the user's
-configuration folder (%APPDATA% on Windows, ~/.config elsewhere), or in the folder named by
-IMAP_CONFIG_DIR.
+configuration folder (%APPDATA% on Windows; elsewhere $XDG_CONFIG_HOME when it is an absolute path, or
+else ~/.config), or in the folder named by IMAP_CONFIG_DIR.
 
 .PARAMETER Name
 The name of the policy, or a wildcard pattern. If not provided, lists all policies.

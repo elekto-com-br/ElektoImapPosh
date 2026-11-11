@@ -152,6 +152,19 @@ Describe 'The policy commands' {
         (Get-ImapPolicy agent).TrustSameDomain | Should -BeNullOrEmpty
     }
 
+    It 'keep DenyQuery as true, and take it away with -DenyQuery:$false' {
+        Set-ImapPolicy agent -DenyQuery
+
+        (Read-Json).Policies.agent.DenyQuery | Should -BeTrue
+        (Get-Content -Path $accountsFile -Raw) | Should -Match '"DenyQuery": true'
+        (Get-ImapPolicy agent).DenyQuery | Should -BeTrue
+
+        Set-ImapPolicy agent -DenyQuery:$false
+
+        (Read-Json).Policies.agent.Keys | Should -Not -Contain 'DenyQuery'
+        (Get-ImapPolicy agent).DenyQuery | Should -BeNullOrEmpty
+    }
+
     It 'warn that TrustSameDomain takes no sender without TrustAuthenticationResults' {
         Set-ImapPolicy agent -TrustSameDomain -WarningVariable warnings -WarningAction SilentlyContinue
 

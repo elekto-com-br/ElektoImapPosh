@@ -441,6 +441,74 @@ Describe 'The counts of the folders, on Gmail' {
     }
 }
 
+# An entry of DenyFolders that names no folder withholds nothing, and only Test-ImapAccount, which knows the mailbox,
+# can tell
+Describe 'Entries of DenyFolders that name no folder' {
+    BeforeAll {
+        $messages = @(@{ Uid = 1; Folders = 'INBOX', '[Gmail]/All Mail'; Labels = @('\Inbox'); From = 'Client <client@client.example>'; Subject = 'New'; Date = [DateTimeOffset]::Now; Size = 1000 })
+        $gmail = Start-FakeGmail $messages
+        $other = Start-FakeGmail $messages -Capabilities 'IMAP4rev1 SPECIAL-USE CHILDREN'
+        $passwords = Set-TestAccount 'deny' $gmail.Port -SavedEnvironment $savedEnvironment -Accounts @{
+            typo = @{ Policy = 'typo' }; several = @{ Policy = 'several' }; right = @{ Policy = 'right' }
+            offgmail = @{ Policy = 'labels'; Port = $other.Port }; open = @{}; limits = @{ Policy = 'limits' }
+        } -Policies @{
+            typo    = @{ DenyFolders = @('Finace/*') }
+            several = @{ DenyFolders = @('Finace/*', 'Finance', 'Archive') }
+            # Important and Junk name no folder of the fake Gmail, and still withhold, by the labels \Important and \Spam
+            right   = @{ DenyFolders = @('Finance/*', '[Gmail]/Trash', 'Important', 'Junk') }
+            labels  = @{ DenyFolders = @('Important') }
+            limits  = @{ MaxMessages = 10 }
+        }
+        # The listing of the folders, which MailKit does not send at the login (it lists the special uses and the inbox)
+        $listing = '^\S+ LIST "" "\*"'
+    }
+
+    AfterAll {
+        Stop-FakeGmail $gmail
+        Stop-FakeGmail $other
+        foreach ($name in $passwords) { Remove-Item -LiteralPath "env:$name" -ErrorAction Ignore }
+        $env:IMAP_CONFIG_DIR = $null
+    }
+
+    It 'are told by Test-ImapAccount, in one warning, with its result' {
+        $before = $gmail.State.Commands.Count
+        $result = Test-ImapAccount typo -WarningVariable warnings -WarningAction SilentlyContinue
+
+        $result.Account | Should -Be 'typo'
+        @($gmail.State.Commands.ToArray() | Select-Object -Skip $before | Where-Object { $_ -cmatch $listing }).Count | Should -Be 1
+        $warnings.Count | Should -Be 1
+        "$warnings" | Should -BeExactly "The entry 'Finace/*' of DenyFolders of the policy 'typo' names no folder of tester, so it withholds nothing there. Get-ImapFolder lists the folders."
+
+        $null = Test-ImapAccount several -WarningVariable warnings -WarningAction SilentlyContinue
+
+        $warnings.Count | Should -Be 1
+        "$warnings" | Should -BeExactly "The entries 'Finace/*', 'Archive' of DenyFolders of the policy 'several' name no folder of tester, so they withhold nothing there. Get-ImapFolder lists the folders."
+    }
+
+    It 'are not the special uses that Gmail stands for by a label, though no folder is marked with them' {
+        $result = Test-ImapAccount right -WarningVariable warnings
+
+        $result.Account | Should -Be 'right'
+        $warnings | Should -BeNullOrEmpty
+    }
+
+    It 'are the special uses that no folder is marked with, off Gmail' {
+        $null = Test-ImapAccount offgmail -WarningVariable warnings -WarningAction SilentlyContinue
+
+        "$warnings" | Should -BeLike "The entry 'Important' of DenyFolders of the policy 'labels' names no folder of tester*"
+    }
+
+    It 'are not looked for without DenyFolders, so the folders are not listed' {
+        $before = $gmail.State.Commands.Count
+        $null = Test-ImapAccount open -WarningVariable openWarnings
+        $null = Test-ImapAccount limits -WarningVariable limitsWarnings
+
+        $openWarnings | Should -BeNullOrEmpty
+        $limitsWarnings | Should -BeNullOrEmpty
+        @($gmail.State.Commands.ToArray() | Select-Object -Skip $before | Where-Object { $_ -cmatch $listing }) | Should -BeNullOrEmpty
+    }
+}
+
 Describe 'Folders against smtp4dev' -Skip:(-not $smtp4devInstalled) {
     BeforeAll {
         $server = Start-Smtp4dev -LogDirectory (Join-Path $TestDrive 'smtp4dev') -ArgumentList '--authenticationrequired', '--user=tester=not-a-password'
