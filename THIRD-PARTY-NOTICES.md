@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-ElektoImapPosh ships, in its `lib` folder, the assemblies of the following packages, under their own licenses.
+ElektoImapPosh is Copyright (c) 2026 Elekto Produtos Financeiros, under the MIT License (see [LICENSE](LICENSE)). It ships, in its `lib` folder, the assemblies of the following packages, under their own licenses.
 
 ## MailKitLite
 

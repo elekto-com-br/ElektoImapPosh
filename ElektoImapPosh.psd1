@@ -12,7 +12,7 @@
 RootModule = 'ElektoImapPosh.psm1'
 
 # Version number of this module.
-ModuleVersion = '0.1.0'
+ModuleVersion = '0.9.0'
 
 # Supported PSEditions
 CompatiblePSEditions = @('Core')
@@ -70,8 +70,15 @@ PrivateData = @{
 
         # ReleaseNotes of this module
         ReleaseNotes = @'
-## 0.1.0
-- First version (in development)
+## 0.9.0
+- The first version. It reads mail by IMAP and changes nothing in the mailbox: folders are opened read-only and bodies fetched without setting \Seen, so nothing is marked as read. Until 1.0, commands, parameters and settings may still change, as use shows what they should be
+- Accounts apart from those of ElektoMailPosh, each with an app password of its own, kept in the Windows Credential Manager or in a file only its owner can read: Set-ImapAccount, Get-ImapAccount, Remove-ImapAccount, and Test-ImapAccount, which connects and shows how. Without accounts, the IMAP_* environment variables
+- Always TLS, unless an account says NoTls, meant for tests; SkipCertificateCheck for a server with a certificate of its own
+- Get-ImapFolder lists the folders with their counts; Get-ImapMessage searches them by sender, subject, date and unread, newest first, and Gmail by its own search (-Query); Get-ImapThread lists the messages of a Gmail conversation
+- Read-ImapMessage returns the text of a message without downloading its attachments; Save-ImapAttachment saves its attachments, and with -Inline the images shown in its body, under names safe on every platform and, on Windows, with the Mark of the Web; Save-ImapMessage saves one message whole, as an .eml
+- Policies, for giving the module to an AI agent: folders that may not be read, senders whose messages and attachments may be read (as authenticated by the receiving server), attachments by type and by name, sizes, age and counts. A message withheld still shows its metadata, and why it is withheld. The README says what a policy does not do
+- What a sender writes comes back without the characters that drive a terminal or hide text, and cut where it would flood the context of an AI agent
+- Gmail and Google Workspace first (labels, conversations, the folders whose names Gmail translates), on standard IMAP, so that other servers work too
 '@
 
     } # End of PSData hashtable
