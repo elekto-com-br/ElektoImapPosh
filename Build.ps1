@@ -22,7 +22,8 @@ before committing or tagging.
 
 .PARAMETER ExpectedVersion
 When given (the publish workflow passes the tag version), fails unless the manifest declares this
-version.
+version, and, unless -SkipTests, when smtp4dev is not on the PATH, so that a release is never built with
+the tests against it skipped.
 
 .PARAMETER SkipTests
 Does not run the Pester tests.
@@ -159,12 +160,19 @@ $syntaxErrors = foreach ($script in $scripts) {
 if ($syntaxErrors) { throw "Syntax errors:`n$($syntaxErrors -join "`n")" }
 Write-Host "Syntax OK ($($scripts.Count) files)."
 
-# 3. Manifest, and version against the tag
+# 3. Manifest, version against the tag, and the notes of that version. The release job takes its '## <version>'
+#    section from ReleaseNotes after the publish to the Gallery, which cannot be undone, so a missing section fails here,
+#    on every build: the CI of the pull request that changes the version, days before the tag (found in the review
+#    before the first release, which saw the check only after the publish).
 $manifest = Test-ModuleManifest -Path $manifestPath
 if ($ExpectedVersion -and $manifest.Version.ToString() -ne $ExpectedVersion) {
     throw "Tag means version '$ExpectedVersion', but the manifest declares '$($manifest.Version)'. Set them to the same value and re-tag."
 }
-Write-Host "Manifest OK (version $($manifest.Version))."
+$notesPattern = '(?ms)^## ' + [regex]::Escape($manifest.Version.ToString()) + '[ \t]*\r?\n(.*?)(?=^## |\z)'
+if (-not [regex]::Match([string]$manifest.ReleaseNotes, $notesPattern).Groups[1].Value.Trim()) {
+    throw "The manifest has no notes for $($manifest.Version) in ReleaseNotes, under '## $($manifest.Version)', where the release takes them from."
+}
+Write-Host "Manifest OK (version $($manifest.Version), with its release notes)."
 
 # 4. Static analysis: errors fail the build, warnings are only shown. In the tests, Pester's blocks share
 #    variables in ways the analyzer cannot follow, and the helpers that write files need no ShouldProcess.
@@ -198,6 +206,11 @@ if ($SkipTests) {
     Write-Warning 'Skipping the tests (-SkipTests).'
 }
 elseif ($pester = Get-Module -ListAvailable Pester | Where-Object Version -GE '5.0' | Sort-Object Version -Descending | Select-Object -First 1) {
+    # The tests against smtp4dev, those of TLS among them, skip themselves where it is not installed; a release must not
+    # be built with them skipped (found in the review before the first release: the publish workflow did not install it)
+    if ($ExpectedVersion -and -not (Get-Command smtp4dev -CommandType Application -ErrorAction Ignore)) {
+        throw 'A release build (-ExpectedVersion) runs every test, and smtp4dev, which the tests against an IMAP server need, is not on the PATH: dotnet tool install --global Rnwood.Smtp4dev --version 3.15.0'
+    }
     # The folders in which the module keeps the accounts of this machine, as it finds them: that of IMAP_CONFIG_DIR, when
     # set, and the default one
     $find = "Import-Module '$manifestPath' -ErrorAction Stop; & (Get-Module $moduleName) { Get-AccountDirectory; Remove-Item -LiteralPath env:IMAP_CONFIG_DIR -ErrorAction Ignore; Get-AccountDirectory }"
@@ -211,7 +224,7 @@ elseif ($pester = Get-Module -ListAvailable Pester | Where-Object Version -GE '5
     $testRun = "Import-Module '$($pester.Path)' -Force -ErrorAction Stop; `$configuration = New-PesterConfiguration; " +
     "`$configuration.Run.Path = '$(Join-Path $PSScriptRoot 'Tests')'; `$configuration.Run.PassThru = `$true; `$configuration.Output.Verbosity = 'Normal'; " +
     "`$result = Invoke-Pester -Configuration `$configuration; " +
-    "`$result | Select-Object PassedCount, FailedCount, TotalCount, Result | ConvertTo-Json | Set-Content -LiteralPath '$resultPath'"
+    "`$result | Select-Object PassedCount, FailedCount, SkippedCount, TotalCount, Result | ConvertTo-Json | Set-Content -LiteralPath '$resultPath'"
     $savedEnvironment = @{}
     foreach ($name in 'HOME', 'XDG_CONFIG_HOME', 'IMAP_CONFIG_DIR') { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
     try {
@@ -239,7 +252,7 @@ elseif ($pester = Get-Module -ListAvailable Pester | Where-Object Version -GE '5
     if ($strays) { throw "A test kept accounts outside its test drive: $($strays -join ', ')." }
     if (-not $result) { throw 'The tests did not run to their end (see above).' }
     if ($result.FailedCount -gt 0 -or $result.Result -ne 'Passed') { throw "Tests failed: $($result.FailedCount) of $($result.TotalCount)." }
-    Write-Host "Tests OK ($($result.PassedCount) passed, Pester $($pester.Version)), and the accounts of this machine untouched."
+    Write-Host "Tests OK ($($result.PassedCount) passed, $($result.SkippedCount) skipped, Pester $($pester.Version)), and the accounts of this machine untouched."
 }
 else {
     Write-Warning 'Pester 5 or later not installed; skipping the tests.'

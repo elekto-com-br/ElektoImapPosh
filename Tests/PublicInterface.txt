@@ -109,6 +109,7 @@ Set-ImapPolicy
     -Confirm SwitchParameter, alias cf, ConfirmImpact Medium
     -DenyAttachmentTypes String[]
     -DenyFolders String[]
+    -DenyQuery SwitchParameter
     -DenyReadFrom String[]
     -MaxAgeDays Int32, ValidateRange('NonNegative')
     -MaxAttachmentSize Int64, ValidateRange('NonNegative')

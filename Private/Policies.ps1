@@ -22,6 +22,9 @@
 #   results of the trusted server: mail from inside the domain, which Google Workspace delivers without them
 #   (Test-InsideSender). Off by default, as a server that does not stamp every message from outside would let a
 #   forged sender through.
+# - DenyQuery: Get-ImapMessage refuses -Query, the search of Gmail, which searches the text of every message, those
+#   the policy withholds included: a withheld message that matches is listed, so the search tells whether its body
+#   has a phrase without reading it. Off by default, as -Query is the only way to search All Mail and the categories.
 # An allow list, when present, denies what it does not name; a deny list wins. Folders, senders and attachments are
 # wildcard patterns, matched by Test-Wildcard (ignoring case alike in every culture, and a name written composed or
 # decomposed alike): senders such as *@example.com, attachments a MIME type when they have a "/" (image/*) and a file
@@ -47,6 +50,7 @@ $script:PolicySettings = [ordered]@{
     TrustAuthenticationResults = 'Server'
     UseXOriginalFrom           = 'Switch'
     TrustSameDomain            = 'Switch'
+    DenyQuery                  = 'Switch'
 }
 
 # Why a value cannot be the setting of a policy, to follow its name in a message; $null when it can. A list may be
@@ -225,6 +229,23 @@ function Get-PolicyFolderSet($Session) {
     }
     $Session.PolicyFolders = @{ Denied = $denied; DeniedUses = $deniedUses; UnmarkedLabels = $unmarked; Sent = $sent; ByName = $byName; BySpecialUse = $bySpecialUse }
     return $Session.PolicyFolders
+}
+
+# The entries of DenyFolders that withhold nothing in the mailbox of a session, in an array: those that name no folder
+# of it (a typo, a folder renamed since, a name in another language), but for a special use that a system label of
+# Gmail stands for, which withholds the messages with that label though no folder is marked with it (Important, see
+# Get-PolicyFolderSet, whose comparison this is). A deny list that names nothing fails open, and a policy, apart from
+# the accounts, knows no mailbox, so Set-ImapPolicy cannot tell: Test-ImapAccount warns of them (decided with JP,
+# 2026-11-10, after the review before the first release). One pass over the entries, each matched against the folders.
+function Get-UnmatchedDenyFolder($Session) {
+    $labelled = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    if (Test-GMailServer $Session) { foreach ($use in $script:SystemLabels.Values) { $null = $labelled.Add($use) } }
+    $unmatched = [System.Collections.Generic.List[string]]::new()
+    foreach ($pattern in $Session.Settings.Policy.DenyFolders) {
+        $found = Select-ImapFolder $Session.Folders $pattern
+        if ($found.Count -eq 0 -and -not $labelled.Contains($pattern)) { $unmatched.Add($pattern) }
+    }
+    return , $unmatched.ToArray()
 }
 
 # The topmost Authentication-Results of a message, parsed, when it is from the receiving server a policy trusts

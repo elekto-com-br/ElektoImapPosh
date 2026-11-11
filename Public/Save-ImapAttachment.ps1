@@ -5,7 +5,8 @@ Saves the attachments of messages as files in a directory.
 .DESCRIPTION
 The `Save-ImapAttachment` function saves the attachments of each message given, decoded, as files in the
 directory of -Path, and returns the files. Only the attachments are downloaded, one part at a time, never the
-text of the message; nothing is marked as read.
+text of the message; nothing is marked as read. The content of each file is the sender's, as it is: only its
+name is made safe.
 
 A file that a message shows in its body with a name of its own, as Apple Mail sends a PDF, is an
 attachment too, unless it is an image. With -Inline, it also saves the other parts shown in the body: images
@@ -18,7 +19,9 @@ On Windows, each file carries the Mark of the Web, as Outlook and the browsers w
 stream Zone.Identifier): SmartScreen warns before such a program runs, Office opens such a document in
 Protected View and blocks its macros, and PowerShell under RemoteSigned asks for the signature of such a
 script. Unblock-File takes it off. A volume that keeps no such mark (FAT32, exFAT, some network shares) gets
-the files without it, and a warning says so.
+the files without it, and a warning says so. On Linux and macOS the files carry no mark: on a Mac, an
+application or installer saved from a message opens without the checks of Gatekeeper that one saved by Mail
+or Safari gets.
 
 The name of an attachment comes from whoever sent the message, so the file gets a name that is safe on any
 platform: only the last part of the name (never a path, so "../../x" is saved as "x" in -Path), in the
@@ -48,9 +51,12 @@ attached is saved as the server keeps it, an .eml.
 
 A file that already exists is not replaced, unless -Force is given; a directory of that name never is, nor
 a read-only file, nor a file this command saved, -Force or not, so that two messages that give the same
-name do not lose one of them. The sender picks the names, so give -Force only for a directory of their
-own: in a directory of scripts, or in the home directory, an attachment could replace a script or a
-profile. Each file is written under a temporary name ending in .part and then renamed, so whoever watches
+name do not lose one of them. The sender picks the names, so save into a directory made for the files,
+never the working directory of a project or of an agent: a new file needs no -Force, and some programs act on
+a file by its mere presence (CLAUDE.md and AGENTS.md as the instructions of an agent, Directory.Build.props
+for every build below it, conftest.py for the tests), which the Mark of the Web does not stop. Give -Force
+only for a directory of their own: in a directory of scripts, or in the home directory, an attachment could
+replace a script or a profile. Each file is written under a temporary name ending in .part and then renamed, so whoever watches
 the directory never sees half a file under its name. Ctrl+C while a file is written stops the command
 without saving that file or replacing the one there; the temporary file is deleted once written. A file
 that cannot be written, such as one another program keeps open, is the error AttachmentWriteFailed: only
@@ -65,7 +71,8 @@ when a number or -UniqueName changes it, the name written too; and for a name th
 before the change: all must pass, so DenyAttachmentTypes '*.url' withholds "Invoice.url", which would be
 saved as "Invoice.url.download". An attachment withheld is the error AttachmentWithheld, which says why.
 The rules see each file as a whole: a message attached (.eml) carries the body and the attachments of
-another message, whatever its sender, and a zip file other files. MaxMessages limits how many messages of
+another message, whatever its sender, and a zip file other files, which are not looked into, so a policy
+that denies programs should deny message/* and *.zip too. MaxMessages limits how many messages of
 each account one command handles, with a warning that says how many were left out.
 
 .PARAMETER Account
@@ -85,7 +92,8 @@ The UIDVALIDITY of the folder when the UIDs were listed, as Get-ImapMessage retu
 another one now, its messages were numbered anew, and nothing is saved. Also taken from the pipeline.
 
 .PARAMETER Path
-The directory where the files are saved. It must exist.
+The directory where the files are saved. It must exist. Give one made for the files, not the directory of a
+project: the sender names the files, and some programs act on a file by its mere presence.
 
 .PARAMETER Name
 Only the attachments with these names: the name the message gives or the name of the file, or wildcard
@@ -114,10 +122,10 @@ Get-ImapMessage -From bank.example -Since (Get-Date).Date | Save-ImapAttachment 
 Saves the PDF attachments of today's messages from bank.example in the directory Statements of the home directory.
 
 .EXAMPLE
-Save-ImapAttachment work -Folder Inbox -Uid 12045 -Path .
+Save-ImapAttachment work -Folder Inbox -Uid 12045 -Path ./Incoming
 
-Saves every attachment of the message with the UID 12045 in the inbox of the account "work" in the current
-directory.
+Saves every attachment of the message with the UID 12045 in the inbox of the account "work" in the directory
+Incoming, which must exist.
 
 .EXAMPLE
 Get-ImapMessage work -From client.example -Since (Get-Date).Date | Save-ImapAttachment -Path ./Prints -Inline -ContentType image/* -UniqueName

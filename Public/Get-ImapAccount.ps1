@@ -9,6 +9,8 @@ and where the password of each one comes from (never the password itself):
 - CredentialManager: the Windows Credential Manager
 - File: a file readable only by its owner (Linux and macOS)
 - Missing: no password, so the account cannot be used yet
+- Unusable: a stored password that cannot be read, or a password file that others can read; a
+  warning says why
 
 NoTls tells whether the account connects in plain text, and SkipCertificateCheck whether it
 accepts any certificate from its server. AllowWrite lists the kinds of change that the commands
@@ -17,7 +19,8 @@ ElektoImapPosh only reads. Policy names the policy followed when reading from th
 Set-ImapPolicy), if any. See Set-ImapAccount.
 
 The accounts are kept in accounts.json, in the folder ElektoImapPosh of the user's configuration
-folder (%APPDATA% on Windows, ~/.config elsewhere), or in the folder named by IMAP_CONFIG_DIR.
+folder (%APPDATA% on Windows; elsewhere $XDG_CONFIG_HOME when it is an absolute path, or else
+~/.config), or in the folder named by IMAP_CONFIG_DIR.
 
 .PARAMETER Name
 The name of the account, or a wildcard pattern. If not provided, lists all accounts.

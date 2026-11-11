@@ -6,7 +6,8 @@ Saves one message whole, as the server keeps it, as an .eml file in a directory.
 The `Save-ImapMessage` function saves a message as the server keeps it, byte for byte (its headers, its text
 and its attachments), as an .eml file in the directory of -Path, and returns the file. Mail clients open such
 a file, and its headers tell how the message came (Received, Authentication-Results, DKIM-Signature). Nothing
-is marked as read.
+is marked as read. The file is the sender's message as it is: what the other commands keep out of what they
+return (the characters that drive a terminal or hide text) stays in it, and only its name is made safe.
 
 It saves one message, and only one: by its UID, or by its Message-ID. When more than one message comes from
 the pipeline, or more than one message of the folder has the Message-ID, nothing is saved, and the error
@@ -18,7 +19,8 @@ without a subject), by the rules that make the name of an attachment safe on any
 Save-ImapAttachment), since the sender writes the subject; a slash in the subject is "_" ("Invoice 11_2026").
 It is written as an attachment is: under a temporary name ending in .part, then renamed, so that whoever
 watches the directory never sees half a file; on Windows, with the Mark of the Web, which tells Windows and
-the programs that read it that the file came from the internet (Unblock-File takes the mark off). A file that
+the programs that read it that the file came from the internet (Unblock-File takes the mark off), and on
+Linux and macOS with no mark. A file that
 already exists is not replaced, unless -Force is given; a directory of that name never is, nor a read-only
 file. Ctrl+C while the file is written stops the command without saving the file or replacing the one there.
 
@@ -70,9 +72,10 @@ Saves the newest message from bank.example in the inbox, headers and all, in the
 home directory.
 
 .EXAMPLE
-Save-ImapMessage work -Folder All -MessageId '<CAF8kLm1x@mail.gmail.com>' -Path ./Messages
+Save-ImapMessage work -Folder All -MessageId CAF8kLm1x@mail.gmail.com -Path ./Messages
 
-Saves the message with that Message-ID, wherever it is in the Gmail mailbox of the account "work".
+Saves the message with that Message-ID, wherever it is in the Gmail mailbox of the account "work". The
+Message-ID may be given with or without its angle brackets.
 
 .EXAMPLE
 Save-ImapMessage -Uid 12045 -Path ./Messages -WhatIf

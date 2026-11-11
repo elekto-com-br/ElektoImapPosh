@@ -31,6 +31,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
+`MailKitLite.dll` includes an implementation of MD4 (`MailKit/Security/Ntlm/MD4.cs`), under the same MIT license, with these further notices:
+
+```
+Copyright (c) 2003 Motus Technologies Inc. (http://www.motus.com)
+Copyright (c) 2004-2005, 2010 Novell, Inc (http://www.novell.com)
+```
+
 ## MimeKitLite
 
 - Package: [MimeKitLite](https://www.nuget.org/packages/MimeKitLite) (`MimeKitLite.dll`)

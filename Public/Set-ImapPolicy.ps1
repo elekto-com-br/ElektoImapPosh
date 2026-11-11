@@ -9,9 +9,17 @@ much one command downloads, and makes the owner's intent explicit. An account fo
 to Set-ImapAccount -Policy (without accounts, the one named by the environment variable IMAP_POLICY),
 and several accounts may share one. An account without a policy allows all reading.
 
-The commands that read messages (not in this version yet) follow it. The metadata of every message
-(sender, recipients, subject, date, labels, the names and sizes of its attachments) can always be
-read; of a message withheld by the policy, only that is shown, and the message says so.
+The commands that read messages follow it: Get-ImapMessage and Get-ImapThread say of each message
+whether its body may be read, Read-ImapMessage refuses one it withholds, and Save-ImapAttachment and
+Save-ImapMessage refuse to save it. The metadata of every message (sender, recipients, subject, date,
+labels, the names and sizes of its attachments) can always be read; of a message withheld by the
+policy, only that is shown, and the message says so.
+
+A policy keeps the text of a message from being read, not from being searched: the server compares
+-From and -Subject of Get-ImapMessage with the headers of every message, and -Query, the search of
+Gmail, with their text, those the policy withholds included, and lists the withheld ones that match,
+with their reason. So a search tells whether a withheld message has a phrase. -DenyQuery takes -Query
+away.
 
 A policy prevents accidents. It is no protection against anyone, an agent included, who can run
 commands as the same user: they can change the policy, as they can read the stored passwords.
@@ -27,6 +35,8 @@ The name of the policy: letters, digits, '.', '-' and '_', starting with a lette
 Folders whose messages are listed, with their metadata, but not read nor changed: full names,
 special uses (Junk, Trash...) or wildcard patterns, as -Folder of Get-ImapFolder takes them: only * and
 ? are wildcards, and brackets are taken as written, so that "[Gmail]/*" is every system folder of Gmail.
+An entry that names no folder of a mailbox (a typo, a folder renamed since) withholds nothing there:
+Test-ImapAccount warns of such entries.
 
 .PARAMETER AllowReadFrom
 The senders whose messages may be read in full; those of any other sender are withheld. Addresses or
@@ -50,7 +60,9 @@ image/*), or file names (*.pdf, *.csv). An attachment matches by its type or by 
 .PARAMETER DenyAttachmentTypes
 The attachments that may not be saved, even if -AllowAttachmentTypes names them, given as for
 -AllowAttachmentTypes. An attachment is denied when its type or its name matches: since the sender
-chooses both, name here the file names that must never be saved (*.exe).
+chooses both, name here the file names that must never be saved (*.exe). The rules see each file as a
+whole: a message attached (message/rfc822, an .eml) carries the attachments of another message, and a
+zip file other files, which are not looked into, so deny them too (message/*, *.eml, *.zip).
 
 .PARAMETER MaxAgeDays
 How old a message may be, in days: older ones are not searched nor read.
@@ -93,6 +105,14 @@ any sender. Off by default, since a server that does not stamp every message fro
 forged sender of the domain through; measured on Google Workspace only. Needs TrustAuthenticationResults.
 -TrustSameDomain:$false takes it away.
 
+.PARAMETER DenyQuery
+Makes Get-ImapMessage refuse -Query, the search of Gmail, for the accounts that follow the policy: it
+searches the text of every message, those the policy withholds included, and a withheld message that
+matches is listed, so the search tells whether its body has a phrase without reading it. The refusal
+is a QueryNotAllowed error, once for each account; -From, -Subject, -Since and -Unread still search
+the headers. Off by default, as -Query is the only way to search All Mail as Gmail does, and the
+categories of its inbox. -DenyQuery:$false takes it away.
+
 .EXAMPLE
 Set-ImapPolicy agent -DenyFolders 'Finance/*', Junk -MaxAgeDays 90 -MaxMessages 200 -MaxMessageSize 25MB
 
@@ -107,9 +127,9 @@ Lets the messages of the authenticated senders of example.com be read in full, a
 others.
 
 .EXAMPLE
-Set-ImapPolicy agent -DenyAttachmentTypes '*.exe', '*.zip' -MaxAttachmentSize 10MB
+Set-ImapPolicy agent -DenyAttachmentTypes '*.exe', '*.zip', 'message/*' -MaxAttachmentSize 10MB
 
-Keeps executables, zip files and any attachment larger than 10 MB from being saved.
+Keeps executables, zip files, messages attached and any attachment larger than 10 MB from being saved.
 
 .EXAMPLE
 Set-ImapPolicy agent -MaxMessages 0 -DenyFolders @()
@@ -154,7 +174,8 @@ Function Set-ImapPolicy {
         [long]$MaxAttachmentSize,
         [string]$TrustAuthenticationResults,
         [switch]$UseXOriginalFrom,
-        [switch]$TrustSameDomain
+        [switch]$TrustSameDomain,
+        [switch]$DenyQuery
     )
 
     $file = Read-AccountFile

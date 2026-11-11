@@ -28,7 +28,8 @@ $script:EnvironmentVariableNames = @('IMAP_SERVER', 'IMAP_PORT', 'IMAP_USER', 'I
 # same name: an account called "Keys" would hide .Keys. So the names are always listed with .psbase.Keys.
 
 # The folder of accounts.json (and, outside Windows, of the password files): IMAP_CONFIG_DIR, or else
-# ElektoImapPosh in the user's configuration folder (%APPDATA% on Windows, ~/.config elsewhere)
+# ElektoImapPosh in the user's configuration folder (%APPDATA% on Windows; elsewhere XDG_CONFIG_HOME when it is an
+# absolute path, or else ~/.config)
 function Get-AccountDirectory {
     # A relative IMAP_CONFIG_DIR is resolved here against the current location: the .NET file calls that
     # keep the passwords would resolve it against the process folder, which Set-Location does not change

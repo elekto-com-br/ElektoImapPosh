@@ -8,7 +8,11 @@ of the default account, or else of the IMAP_* environment variables, and authent
 what it found: how the connection was secured, whether the server's certificate was checked
 (CertificateChecked, false for an account with -SkipCertificateCheck, and with -NoTls, where there
 is none), the authentication mechanisms the server offers, and the capabilities it has after the
-login. It reads nothing from the mailbox.
+login. It reads no message.
+
+When the account follows a policy with DenyFolders, it also lists the folders of the mailbox, and
+warns of the entries that name none of them (a typo, a folder renamed since): such an entry withholds
+nothing there. A special use that Gmail stands for by a label, such as Important, is no such entry.
 
 The connection is always encrypted: TLS from the start on port 993, and STARTTLS on any other port,
 which fails when the server does not offer it. The server's certificate must be valid. An account
@@ -61,6 +65,21 @@ Function Test-ImapAccount {
             # Offered before the login: Gmail, for one, lists none after it
             $mechanisms = @($client.AuthenticationMechanisms | Sort-Object)
             if (Invoke-ImapLogin $PSCmdlet $client $settings) {
+                $elapsed = $stopwatch.Elapsed
+                # An entry of DenyFolders that names no folder withholds nothing, and nothing else tells: a policy knows no
+                # mailbox. One listing, only for an account whose policy has such a list (some 0.4 s on Gmail, measured).
+                $policy = $settings.Policy
+                if ($policy -and $policy.DenyFolders) {
+                    $session = @{ Client = $client; Settings = $settings }
+                    if ($null -ne (Get-ImapFolderList $PSCmdlet $session)) {
+                        $unmatched = Get-UnmatchedDenyFolder $session
+                        if ($unmatched.Count) {
+                            $entries = ($unmatched | ForEach-Object { "'$_'" }) -join ', '
+                            $names = if ($unmatched.Count -eq 1) { "The entry $entries of DenyFolders of the policy '$($policy.Name)' names no folder of $($settings.User), so it withholds" } else { "The entries $entries of DenyFolders of the policy '$($policy.Name)' name no folder of $($settings.User), so they withhold" }
+                            Write-Warning "$names nothing there. Get-ImapFolder lists the folders."
+                        }
+                    }
+                }
                 [PSCustomObject]@{
                     Account                  = $settings.Account
                     Server                   = $settings.Server
@@ -73,7 +92,7 @@ Function Test-ImapAccount {
                     CertificateChecked       = [bool]($client.IsSecure -and -not $settings.SkipCertificateCheck)
                     AuthenticationMechanisms = $mechanisms
                     Capabilities             = @("$($client.Capabilities)" -csplit ', ')
-                    Elapsed                  = $stopwatch.Elapsed
+                    Elapsed                  = $elapsed
                 }
             }
             $ended = $true

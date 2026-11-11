@@ -13,9 +13,37 @@ permissions:
   contents: read
 
 jobs:
+  # The tag must be on a commit whose CI passed, on Linux and on Windows: the build below runs on Linux only, and the
+  # publish cannot be undone (decided with JP, 2026-11-10, after the review before the first release). A CI still
+  # running is a failure too: run this workflow again once it is green.
+  ci:
+    name: CI Passed
+    runs-on: ubuntu-latest
+    permissions:
+      checks: read
+
+    steps:
+      - name: Check the CI of the tagged commit
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $runs = gh api "repos/$env:GITHUB_REPOSITORY/commits/$env:GITHUB_SHA/check-runs?per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read the checks of the tagged commit.' }
+          foreach ($name in 'Build & Test (ubuntu-latest)', 'Build & Test (windows-latest)') {
+              # A check run again has a run of its own: the last one counts
+              $run = $runs.check_runs | Where-Object { $_.name -ceq $name } | Sort-Object id -Descending | Select-Object -First 1
+              if (-not $run) { throw "The tagged commit $env:GITHUB_SHA has no '$name' check: tag a commit of main." }
+              if ($run.status -ne 'completed' -or $run.conclusion -ne 'success') {
+                  throw "'$name' of the tagged commit is $($run.status), $($run.conclusion): run this workflow again once the CI is green."
+              }
+              Write-Host "$name passed."
+          }
+
   # Everything that runs third-party code (PSScriptAnalyzer, Pester) runs here, without the Gallery API key
   build:
     name: Validate & Stage
+    needs: ci
     runs-on: ubuntu-latest
 
     steps:
@@ -35,8 +63,18 @@ jobs:
           Install-PSResource -Name PSScriptAnalyzer -Version '[1.25.0]' -Repository PSGallery -TrustRepository -Quiet
           Install-PSResource -Name Pester -Version '[6.2.0]' -Repository PSGallery -TrustRepository -Quiet
 
-      # Restores the mail libraries, parses every script, validates the manifest (and that it matches the
-      # tag), runs PSScriptAnalyzer and the tests, stages ./out/ElektoImapPosh and imports it.
+      # smtp4dev, a fake mail server, for the tests against a real IMAP server, as in ci.yml (the same pin, also in
+      # Tests/Container/Containerfile). A tool of the tests, never in the package.
+      - name: Install smtp4dev
+        shell: pwsh
+        run: |
+          dotnet tool install --global Rnwood.Smtp4dev --version 3.15.0
+          Join-Path $HOME .dotnet tools >> $env:GITHUB_PATH
+
+      # Restores the mail libraries, parses every script, validates the manifest (that it matches the tag, and
+      # has the notes of its version), runs PSScriptAnalyzer and the tests, stages ./out/ElektoImapPosh and
+      # imports it. With -ExpectedVersion, Build.ps1 also fails when smtp4dev is not on the PATH, rather than
+      # skip the tests against it.
       - name: Validate and stage
         shell: pwsh
         run: ./Build.ps1 -ExpectedVersion $env:VERSION
@@ -68,6 +106,13 @@ jobs:
           PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
         run: |
           if (-not $env:PSGALLERY_API_KEY) { throw "Secret PSGALLERY_API_KEY is not set." }
+          # A version on the Gallery cannot be pushed again: when it is there, this is a run again after the release
+          # job failed, and only that job has work left
+          $version = (Import-PowerShellDataFile ./out/ElektoImapPosh/ElektoImapPosh.psd1).ModuleVersion
+          if (Find-PSResource -Name ElektoImapPosh -Version "[$version]" -Repository PSGallery -ErrorAction Ignore) {
+              Write-Host "ElektoImapPosh $version is on the Gallery already."
+              return
+          }
           Publish-PSResource -Path ./out/ElektoImapPosh -Repository PSGallery -ApiKey $env:PSGALLERY_API_KEY
 
   # Once the package is on the Gallery: a GitHub release for the tag, with that version's notes from
@@ -111,8 +156,23 @@ jobs:
               $fence
               ''
               'Without access to the Gallery, extract `' + $zip + '` into a folder listed in `$env:PSModulePath`.'
+              'On Windows, run `Unblock-File` on the zip before extracting it: the files of the module are not signed,'
+              'and under the default execution policy (RemoteSigned) PowerShell refuses to load them once Explorer'
+              'extracted them with the Mark of the Web of the download.'
           )
           Set-Content -Path notes.md -Value $notes -Encoding utf8
 
-          gh release create $env:GITHUB_REF_NAME $zip --repo $env:GITHUB_REPOSITORY --verify-tag `
-              --title $env:GITHUB_REF_NAME --notes-file notes.md
+          # A release that exists is from a run that failed after creating it: its zip and notes are replaced, so
+          # that "Re-run failed jobs" mends it
+          gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+              gh release upload $env:GITHUB_REF_NAME $zip --repo $env:GITHUB_REPOSITORY --clobber
+              if ($LASTEXITCODE -ne 0) { throw 'Could not upload the zip to the release.' }
+              gh release edit $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --notes-file notes.md
+              if ($LASTEXITCODE -ne 0) { throw 'Could not write the notes of the release.' }
+          }
+          else {
+              gh release create $env:GITHUB_REF_NAME $zip --repo $env:GITHUB_REPOSITORY --verify-tag `
+                  --title $env:GITHUB_REF_NAME --notes-file notes.md
+              if ($LASTEXITCODE -ne 0) { throw 'Could not create the release.' }
+          }
