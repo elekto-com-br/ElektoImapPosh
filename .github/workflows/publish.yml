@@ -145,6 +145,9 @@ jobs:
           $zip = "ElektoImapPosh-$version.zip"
           Compress-Archive -Path ./out/ElektoImapPosh -DestinationPath $zip
 
+          # GitHub shows each line break of the notes of a release as a break, so a paragraph is one line, as is each
+          # item of the notes in the manifest (found by the session that brought these checks to ElektoMailPosh,
+          # 2026-11-11: the note on Unblock-File was cut in three lines). A string continued with + stays one line.
           $fence = '```'
           $notes = @(
               $section
@@ -155,10 +158,10 @@ jobs:
               "Install-Module -Name ElektoImapPosh -RequiredVersion $version"
               $fence
               ''
-              'Without access to the Gallery, extract `' + $zip + '` into a folder listed in `$env:PSModulePath`.'
-              'On Windows, run `Unblock-File` on the zip before extracting it: the files of the module are not signed,'
-              'and under the default execution policy (RemoteSigned) PowerShell refuses to load them once Explorer'
-              'extracted them with the Mark of the Web of the download.'
+              'Without access to the Gallery, extract `' + $zip + '` into a folder listed in `$env:PSModulePath`.' +
+                  ' On Windows, run `Unblock-File` on the zip before extracting it: the files of the module are not' +
+                  ' signed, and under the default execution policy (RemoteSigned) PowerShell refuses to load them' +
+                  ' once Explorer extracted them with the Mark of the Web of the download.'
           )
           Set-Content -Path notes.md -Value $notes -Encoding utf8
 
